@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>NC 다이노스 경기 알림</title>
+<meta name="theme-color" content="#1d3557" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="NC 알림" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/icon-180.png" />
+<link rel="icon" href="/icon-192.png" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <h1>NC 다이노스 경기 알림</h1>
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-tab="history" role="tab">기록</button>
+    <button class="tab" data-tab="settings" role="tab">알림 설정</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ── 기록 ── -->
+  <section id="panel-history" class="panel is-active">
+    <div id="history" class="history">
+      <p class="empty">불러오는 중…</p>
+    </div>
+  </section>
+
+  <!-- ── 설정 ── -->
+  <section id="panel-settings" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <h2>푸시 알림</h2>
+        <span id="push-state" class="badge">확인 중</span>
+      </div>
+      <p id="push-desc" class="muted">이 기기에서 알림을 받으려면 켜세요.</p>
+      <button id="btn-toggle" class="btn btn-primary" disabled>확인 중…</button>
+      <button id="btn-test" class="btn btn-ghost" hidden>테스트 알림 보내기</button>
+    </div>
+
+    <div class="card">
+      <h2>받을 알림 선택</h2>
+      <ul class="switches" id="switches">
+        <li>
+          <div><strong>경기 시작</strong><span class="muted">경기가 시작될 때</span></div>
+          <label class="sw"><input type="checkbox" data-kind="start" disabled /><span></span></label>
+        </li>
+        <li>
+          <div><strong>경기 취소</strong><span class="muted">우천 등으로 취소될 때</span></div>
+          <label class="sw"><input type="checkbox" data-kind="cancel" disabled /><span></span></label>
+        </li>
+        <li>
+          <div><strong>득점</strong><span class="muted">점수가 바뀔 때마다</span></div>
+          <label class="sw"><input type="checkbox" data-kind="score" disabled /><span></span></label>
+        </li>
+        <li>
+          <div><strong>경기 종료</strong><span class="muted">최종 결과</span></div>
+          <label class="sw"><input type="checkbox" data-kind="end" disabled /><span></span></label>
+        </li>
+      </ul>
+      <p class="muted small">설정은 기기별로 저장됩니다.</p>
+    </div>
+
+    <div class="card" id="ios-hint" hidden>
+      <h2>iPhone에서 알림 받기</h2>
+      <p class="muted">
+        iOS는 홈 화면에 추가한 앱에서만 알림을 지원합니다.
+        Safari에서 공유 버튼 → <strong>홈 화면에 추가</strong>를 누른 뒤,
+        홈 화면 아이콘으로 다시 열어 알림을 켜 주세요.
+      </p>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

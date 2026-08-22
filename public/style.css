@@ -1,0 +1,253 @@
+/* NC 다이노스 상징색에 가까운 네이비/골드 조합. 취향에 맞게 여기만 바꾸면 된다. */
+:root {
+  --navy: #1d3557;
+  --navy-soft: #2b4a75;
+  --gold: #c8a45c;
+  --bg: #f4f6f9;
+  --card: #ffffff;
+  --text: #16202e;
+  --muted: #6b7787;
+  --line: #e3e8ef;
+  --win: #17803d;
+  --lose: #c0392b;
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10151d;
+    --card: #19202b;
+    --text: #e8edf4;
+    --muted: #91a0b4;
+    --line: #27313f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo',
+    'Noto Sans KR', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 상단바 ── */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--navy);
+  color: #fff;
+  padding: calc(env(safe-area-inset-top) + 14px) 16px 0;
+}
+
+.topbar h1 {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+.tabs { display: flex; gap: 4px; }
+
+.tab {
+  flex: 1;
+  appearance: none;
+  border: 0;
+  background: none;
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px 0 12px;
+  border-bottom: 2.5px solid transparent;
+  cursor: pointer;
+}
+
+.tab.is-active { color: #fff; border-bottom-color: var(--gold); }
+
+/* ── 패널 ── */
+main { padding: 14px 12px calc(env(safe-area-inset-bottom) + 32px); max-width: 640px; margin: 0 auto; }
+.panel { display: none; }
+.panel.is-active { display: block; }
+
+/* ── 기록 ── */
+.day { margin-bottom: 18px; }
+
+.day-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 0 0 8px 4px;
+}
+
+.game {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 8px;
+}
+
+.game-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.state {
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--line);
+  color: var(--muted);
+}
+.state.live   { background: #fdecea; color: #c0392b; }
+.state.before { background: #eaf1fb; color: var(--navy-soft); }
+
+.score {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 12px 0 4px;
+}
+
+.side { flex: 1; text-align: center; }
+.side .name { font-size: 13px; color: var(--muted); }
+.side .pts { font-size: 30px; font-weight: 800; letter-spacing: -1px; }
+.side.win .pts { color: var(--win); }
+.side.lose .pts { color: var(--lose); }
+.side.is-team .name { color: var(--navy-soft); font-weight: 700; }
+
+.vs { font-size: 12px; color: var(--muted); }
+
+.result-line { text-align: center; font-size: 13px; font-weight: 700; margin-top: 2px; }
+.result-line.win  { color: var(--win); }
+.result-line.lose { color: var(--lose); }
+.result-line.cancel { color: var(--muted); }
+
+.evlog {
+  margin: 12px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px dashed var(--line);
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.evlog li { display: flex; gap: 8px; font-size: 12.5px; align-items: baseline; }
+.evlog time { color: var(--muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.evlog .k { font-weight: 700; color: var(--navy-soft); flex: 0 0 auto; }
+.evlog .t { color: var(--muted); }
+
+.empty { text-align: center; color: var(--muted); padding: 48px 16px; font-size: 14px; }
+
+/* ── 카드 / 설정 ── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.card h2 { margin: 0 0 8px; font-size: 15px; font-weight: 700; }
+.card-head { display: flex; justify-content: space-between; align-items: center; }
+.card-head h2 { margin: 0; }
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--line);
+  color: var(--muted);
+}
+.badge.on  { background: #e6f4ea; color: var(--win); }
+.badge.off { background: #fdecea; color: var(--lose); }
+
+.muted { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 0 0 12px; }
+.small { font-size: 12px; margin: 12px 0 0; }
+
+.btn {
+  width: 100%;
+  appearance: none;
+  border: 0;
+  border-radius: 10px;
+  padding: 13px;
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn-primary { background: var(--navy); color: #fff; }
+.btn-ghost { background: none; color: var(--navy-soft); border: 1px solid var(--line); margin-top: 8px; }
+
+.switches { list-style: none; margin: 0; padding: 0; }
+
+.switches li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.switches li:last-child { border-bottom: 0; }
+.switches strong { display: block; font-size: 14px; font-weight: 600; }
+.switches .muted { font-size: 12px; margin: 2px 0 0; }
+
+/* 토글 스위치 */
+.sw { position: relative; flex: 0 0 auto; }
+.sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+
+.sw span {
+  display: block;
+  width: 46px;
+  height: 27px;
+  border-radius: 999px;
+  background: var(--line);
+  transition: background 0.18s;
+  cursor: pointer;
+}
+
+.sw span::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 0.18s;
+}
+
+.sw input:checked + span { background: var(--navy); }
+.sw input:checked + span::after { transform: translateX(19px); }
+.sw input:disabled + span { opacity: 0.45; cursor: default; }
+
+/* ── 토스트 ── */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 24px);
+  transform: translateX(-50%);
+  background: rgba(22, 32, 46, 0.94);
+  color: #fff;
+  font-size: 13.5px;
+  padding: 11px 18px;
+  border-radius: 999px;
+  z-index: 50;
+  max-width: 90vw;
+  text-align: center;
+}

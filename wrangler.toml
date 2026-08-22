@@ -1,0 +1,28 @@
+name = "nc-baseball-alert"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# 1분마다 경기 상태를 확인한다.
+# KBO 경기는 14~23시(KST)에만 열리므로 핸들러 앞단에서 시간대를 걸러 낭비를 줄인다.
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nc-alert"
+# `wrangler d1 create nc-alert` 실행 후 출력되는 값으로 교체할 것
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[vars]
+# 알림 대상 팀 코드. 네이버 API의 teamCode 기준(NC 다이노스 = "NC")
+TEAM_CODE = "NC"
+# Web Push 구독자에게 노출되는 VAPID 공개키 (npm run genkeys 로 생성)
+VAPID_PUBLIC_KEY = "REPLACE_WITH_YOUR_VAPID_PUBLIC_KEY"
+VAPID_SUBJECT = "mailto:you@example.com"
+
+# VAPID_PRIVATE_KEY 는 vars 가 아니라 시크릿으로 넣는다:
+#   wrangler secret put VAPID_PRIVATE_KEY

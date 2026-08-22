@@ -1,0 +1,20 @@
+{
+  "name": "nc-baseball-alert",
+  "version": "1.0.0",
+  "description": "NC 다이노스 경기 알림 PWA (Cloudflare Workers + Web Push)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "genkeys": "node scripts/genkeys.mjs",
+    "genicons": "python scripts/genicons.py",
+    "test": "node scripts/selftest.mjs",
+    "db:init": "wrangler d1 execute nc-alert --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute nc-alert --local --file=./schema.sql",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
