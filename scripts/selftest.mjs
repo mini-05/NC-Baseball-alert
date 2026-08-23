@@ -107,6 +107,37 @@ async function testVapid() {
     { name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, b64urlToBytes(s), utf8(`${h}.${p}`),
   );
   check('JWT 서명이 공개키로 검증됨', ok);
+
+  // ── 설정 실수를 발송 전에 잡아내는지 ──
+  // 실제로 겪은 사고: 공개키와 개인키가 서로 다른 genkeys 실행에서 나와
+  // "DataError: Invalid EC key in JSON Web Key" 로만 터져 원인 파악이 어려웠다.
+  const other = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'],
+  );
+  const otherJwk = await crypto.subtle.exportKey('jwk', other.privateKey);
+
+  const failsWith = async (pub, priv) => {
+    try {
+      await makeVapidHeader(endpoint, pub, priv, 'mailto:t@e.com');
+      return null;
+    } catch (e) { return e.message; }
+  };
+
+  const mismatch = await failsWith(publicKey, otherJwk.d);
+  check('짝이 안 맞는 키쌍을 잡아냄', /키쌍|import 실패/.test(mismatch ?? ''), mismatch);
+
+  const empty = await failsWith(publicKey, '');
+  check('개인키 누락을 잡아냄', /비어 있습니다/.test(empty ?? ''), empty);
+
+  const badChars = await failsWith(publicKey, 'not+valid/base64url!');
+  check('base64url 아닌 개인키를 잡아냄', /base64url/.test(badChars ?? ''), badChars);
+
+  const truncated = await failsWith(publicKey, jwk.d.slice(0, 20));
+  check('잘린 개인키를 잡아냄', /32바이트가 아닙니다/.test(truncated ?? ''), truncated);
+
+  // 앞뒤 공백·따옴표가 붙어도 정상 동작해야 한다 (콘솔 붙여넣기 사고 방지)
+  const padded = await makeVapidHeader(endpoint, ` "${publicKey}" `, `\n ${jwk.d} \n`, 'mailto:t@e.com');
+  check('공백·따옴표가 붙어도 통과', padded.startsWith('vapid t='));
 }
 
 /* ══ 3. 시리즈 판별 ══ */

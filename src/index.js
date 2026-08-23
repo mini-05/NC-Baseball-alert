@@ -269,12 +269,27 @@ async function handleApi(request, env, url) {
     }
 
     await touchTestSent(env.DB, req.endpoint);
-    const res = await sendPush(
-      req.sub,
-      { kind: 'test', title: '테스트 알림', body: '알림이 정상 동작합니다.', ts: Date.now() },
-      env,
-    );
-    return json({ ok: res.ok, status: res.status });
+
+    // 이 엔드포인트는 설정을 점검하는 용도다. 실패 원인을 감추면 진단이 불가능하므로
+    // 여기서만은 예외 메시지를 그대로 돌려준다. (VAPID 키 설정 오류 등)
+    try {
+      const res = await sendPush(
+        req.sub,
+        { kind: 'test', title: '테스트 알림', body: '알림이 정상 동작합니다.', ts: Date.now() },
+        env,
+      );
+
+      if (!res.ok) {
+        return json(
+          { error: `푸시 서비스가 거부했습니다 (HTTP ${res.status}).`, status: res.status },
+          502,
+        );
+      }
+      return json({ ok: true, status: res.status });
+    } catch (err) {
+      console.error('test push failed', err);
+      return json({ error: err.message }, 500);
+    }
   }
 
   /* ── 관리자 전용 ── */

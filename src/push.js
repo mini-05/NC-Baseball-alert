@@ -72,25 +72,55 @@ async function hkdf(salt, ikm, info, length) {
  * 개인키(d)만으로는 JWK 를 구성할 수 없어 공개키에서 x, y 를 떼어 함께 넣는다.
  */
 async function importVapidKey(publicKeyB64, privateKeyB64) {
-  const pub = b64urlToBytes(publicKeyB64);
-  if (pub.length !== 65 || pub[0] !== 0x04) {
-    throw new Error('VAPID public key must be a 65-byte uncompressed P-256 point');
+  // 키를 콘솔에서 붙여넣어 등록하다 보면 앞뒤 공백·줄바꿈이나 따옴표가 딸려 오기 쉽다.
+  // 그대로 두면 서명 단계에서야 알 수 없는 예외로 터지므로 여기서 정리한다.
+  const pubB64 = String(publicKeyB64 ?? '').trim().replace(/^["']|["']$/g, '');
+  const privB64 = String(privateKeyB64 ?? '').trim().replace(/^["']|["']$/g, '');
+
+  if (!privB64) {
+    throw new Error('VAPID_PRIVATE_KEY 시크릿이 비어 있습니다. wrangler secret put 으로 등록하세요.');
   }
+  if (!/^[A-Za-z0-9_-]+$/.test(privB64)) {
+    throw new Error('VAPID_PRIVATE_KEY 가 base64url 형식이 아닙니다. genkeys 의 ② 값을 그대로 넣으세요.');
+  }
+  // P-256 개인키는 32바이트 = base64url 43자. 값이 잘렸거나 공개키를 잘못 넣은 경우를 잡는다.
+  if (b64urlToBytes(privB64).length !== 32) {
+    throw new Error(
+      `VAPID_PRIVATE_KEY 길이가 32바이트가 아닙니다 (${b64urlToBytes(privB64).length}바이트). ` +
+        '값이 잘렸거나 공개키를 잘못 등록했을 수 있습니다.',
+    );
+  }
+
+  const pub = b64urlToBytes(pubB64);
+  if (pub.length !== 65 || pub[0] !== 0x04) {
+    throw new Error(
+      `VAPID_PUBLIC_KEY 가 65바이트 비압축 P-256 점이 아닙니다 (길이 ${pub.length}).`,
+    );
+  }
+
   const jwk = {
     kty: 'EC',
     crv: 'P-256',
     x: bytesToB64url(pub.slice(1, 33)),
     y: bytesToB64url(pub.slice(33, 65)),
-    d: privateKeyB64,
+    d: privB64,
     ext: true,
   };
-  return crypto.subtle.importKey(
-    'jwk',
-    jwk,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign'],
-  );
+
+  try {
+    return await crypto.subtle.importKey(
+      'jwk',
+      jwk,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign'],
+    );
+  } catch (err) {
+    // 개인키와 공개키가 서로 다른 키쌍에서 나온 경우가 대표적이다.
+    throw new Error(
+      `VAPID 키 import 실패 — 공개키와 개인키가 같은 genkeys 실행에서 나온 값인지 확인하세요. (${err.message})`,
+    );
+  }
 }
 
 export async function makeVapidHeader(endpoint, publicKeyB64, privateKeyB64, subject) {
