@@ -51,6 +51,8 @@ export function kstIsoToEpoch(iso) {
 /* ─────────────────────────── 시리즈 ─────────────────────────── */
 
 export const SERIES = {
+  exhibition: { label: '시범경기', short: '시범', post: false, order: -2 },
+  allstar: { label: '올스타전', short: '올스타', post: false, order: -1 },
   regular: { label: '정규시즌', short: '', post: false, order: 0 },
   tiebreaker: { label: '순위결정전', short: '순위결정전', post: true, order: 1 },
   wildcard: { label: '와일드카드 결정전', short: '와일드카드', post: true, order: 2 },
@@ -66,12 +68,16 @@ export const SERIES = {
  * gameId 는 날짜 대신 고정 접두사로 시작한다. 2023·2024·2025 세 시즌에서
  * 아래 대응이 일치하는 것을 확인했다.
  *
- *   20260823...  정규시즌 (경기일 YYYYMMDD)
+ *   20260823...  정규시즌 또는 시범경기 (경기일 YYYYMMDD)
+ *   9999...      올스타전 (팀 코드도 EA/WE 로 나온다)
  *   6666...      순위결정전   (2024년 KT-SSG 5위 결정전에서 관측)
  *   4444...      와일드카드 결정전
  *   3333...      준플레이오프
  *   5555...      플레이오프
  *   7777...      한국시리즈
+ *
+ * 시범경기는 접두사로 구분되지 않는다. 정규시즌과 형식이 완전히 같아서
+ * 개막일 이전인지로 갈라야 한다. (season.js 의 resolveSeasonBounds 참고)
  *
  * 문서화된 규칙이 아니므로, 모르는 접두사는 정규시즌으로 간주해
  * "알림이 아예 안 오는" 최악을 피한다.
@@ -79,6 +85,7 @@ export const SERIES = {
 export function seriesOf(gameId) {
   const prefix = String(gameId ?? '').slice(0, 4);
   switch (prefix) {
+    case '9999': return 'allstar';
     case '6666': return 'tiebreaker';
     case '4444': return 'wildcard';
     case '3333': return 'semi_playoff';
@@ -89,6 +96,20 @@ export function seriesOf(gameId) {
 }
 
 export const isPostseason = (series) => SERIES[series]?.post === true;
+
+/**
+ * gameId 끝 4자리는 시즌 연도다. (`20260822SSNC0` + `2026`)
+ * 포스트시즌 경기도 같은 규칙을 따른다: `77771026HHLG0` + `2025`.
+ * 이 값으로 "올해 경기"를 가려낸다 — 경기 날짜가 아니라 시즌 기준이어야
+ * 11월에 열리는 한국시리즈가 그해 시즌으로 묶인다.
+ */
+export function seasonYearOf(gameId) {
+  const tail = String(gameId ?? '').slice(-4);
+  return /^\d{4}$/.test(tail) ? Number(tail) : null;
+}
+
+/** 정규 KBO 10개 구단 코드. 올스타전은 EA(이스턴)·WE(웨스턴)으로 나온다. */
+export const TEAM_CODES = new Set(['HT', 'SS', 'LG', 'OB', 'KT', 'SK', 'LT', 'NC', 'WO', 'HH']);
 
 /* ─────────────────────────── 일정 ─────────────────────────── */
 
@@ -127,13 +148,23 @@ export function normalizeGame(g) {
 }
 
 /**
- * 지정한 기간의 KBO 경기를 가져온다.
- * categoryId 가 'kbo' 인 경기만 남긴다. (퓨처스·국가대표 경기 제외)
+ * size 는 kbo 경기가 아니라 *응답 전체*(퓨처스·국가대표 포함)에 걸리는 상한이고,
+ * 넘으면 아무 표시 없이 잘린다. 500 을 넘겨 요청하면 오히려 결과가 깨진다
+ * (2000 으로 요청하면 10건만 돌아오는 것을 확인).
+ * 그래서 상한은 500 으로 두고, 기간을 짧게 쪼개 여러 번 부른다.
  */
-export async function fetchGames(fromDate, toDate) {
+const PAGE_SIZE = 500;
+
+/** 한 번에 요청할 최대 일수. 하루 최대 5경기 × 여러 카테고리를 고려한 값. */
+const CHUNK_DAYS = 31;
+
+const addDays = (dateStr, n) =>
+  new Date(Date.parse(`${dateStr}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+
+async function fetchWindow(fromDate, toDate) {
   const url =
     `${SCHEDULE_URL}?fields=${FIELDS}&upperCategoryId=kbaseball` +
-    `&fromDate=${fromDate}&toDate=${toDate}&size=500`;
+    `&fromDate=${fromDate}&toDate=${toDate}&size=${PAGE_SIZE}`;
 
   const res = await fetch(url, { headers: HEADERS });
   if (!res.ok) throw new Error(`KBO schedule fetch failed: HTTP ${res.status}`);
@@ -143,14 +174,65 @@ export async function fetchGames(fromDate, toDate) {
     throw new Error('KBO schedule response shape changed');
   }
 
-  return json.result.games
-    .filter((g) => g.categoryId === 'kbo')
-    .map(normalizeGame);
+  const games = json.result.games;
+  if (games.length >= PAGE_SIZE) {
+    // 잘렸다는 뜻이다. 조용히 넘어가면 경기가 통째로 빠진 채 동작하게 된다.
+    console.warn(`KBO schedule truncated at ${PAGE_SIZE}: ${fromDate}~${toDate}`);
+  }
+  return games;
+}
+
+/**
+ * 지정한 기간의 KBO 경기를 가져온다.
+ * categoryId 가 'kbo' 인 경기만 남긴다. (퓨처스·국가대표 경기 제외)
+ * 기간이 길면 자동으로 나눠 요청하고 gameId 로 중복을 제거한다.
+ */
+export async function fetchGames(fromDate, toDate) {
+  const windows = [];
+  for (let start = fromDate; start <= toDate; start = addDays(start, CHUNK_DAYS)) {
+    const end = addDays(start, CHUNK_DAYS - 1);
+    windows.push([start, end > toDate ? toDate : end]);
+  }
+
+  const pages = await Promise.all(windows.map(([f, t]) => fetchWindow(f, t)));
+
+  const byId = new Map();
+  for (const g of pages.flat()) {
+    if (g.categoryId === 'kbo') byId.set(g.gameId, g);
+  }
+
+  return [...byId.values()].map(normalizeGame);
 }
 
 /** 해당 팀이 뛰는 경기만 남긴다. */
 export function filterTeam(games, teamCode) {
   return games.filter((g) => g.homeCode === teamCode || g.awayCode === teamCode);
+}
+
+/**
+ * "이번 시즌의 진짜 경기"만 남긴다.
+ *
+ * 네이버의 kbo 카테고리에는 정규시즌·포스트시즌 외에 아래가 섞여 있다.
+ *   - 시범경기: 형식이 정규시즌과 완전히 같고 개막일 이전에만 열린다 (2026년 팀당 12경기)
+ *   - 올스타전: gameId 접두 9999, 팀 코드가 EA(이스턴)·WE(웨스턴)
+ *   - 지난 시즌 경기: 날짜 범위가 겹치면 함께 딸려 온다
+ *
+ * @param {number} year   이번 시즌 연도
+ * @param {string|null} opener 정규시즌 개막일(YYYY-MM-DD). null 이면 시범경기를 거르지 않는다.
+ */
+export function filterCurrentSeason(games, year, opener) {
+  return games.filter((g) => {
+    if (seasonYearOf(g.gameId) !== year) return false;
+
+    // 올스타전은 접두사와 팀 코드 양쪽으로 걸러 한쪽이 바뀌어도 새지 않게 한다.
+    if (g.series === 'allstar') return false;
+    if (!TEAM_CODES.has(g.homeCode) || !TEAM_CODES.has(g.awayCode)) return false;
+
+    // 개막일을 모르면 시범경기 판별을 포기한다. 빠뜨리는 것보다 낫다.
+    if (opener && g.series === 'regular' && g.gameDate < opener) return false;
+
+    return true;
+  });
 }
 
 /** 대상 팀 관점에서 상대팀 이름과 홈/원정 여부를 뽑는다. */

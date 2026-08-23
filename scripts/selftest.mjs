@@ -10,7 +10,8 @@
 
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
-import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch } from '../src/kbo.js';
+import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
+         seasonYearOf, filterCurrentSeason } from '../src/kbo.js';
 import { isPollWindow } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor } from '../src/db.js';
@@ -119,11 +120,67 @@ function testSeries() {
   check('한국시리즈', seriesOf('77771026HHLG02025') === 'korean_series');
   check('순위결정전', seriesOf('66661001KTSK02024') === 'tiebreaker');
 
-  check('모르는 접두사는 정규시즌으로 안전 처리', seriesOf('9999abcd') === 'regular');
+  check('모르는 접두사는 정규시즌으로 안전 처리', seriesOf('1234abcd') === 'regular');
   check('빈 값도 터지지 않음', seriesOf(undefined) === 'regular' && seriesOf(null) === 'regular');
+
+  check('올스타전', seriesOf('99990711WEEA02026') === 'allstar');
 
   check('포스트시즌 판정', isPostseason('korean_series') && isPostseason('wildcard'));
   check('정규시즌은 포스트시즌 아님', !isPostseason('regular'));
+  check('올스타전도 포스트시즌 아님', !isPostseason('allstar'));
+
+  // gameId 끝 4자리 = 시즌 연도. 11월 한국시리즈도 그해 시즌으로 묶인다.
+  check('시즌 연도 추출', seasonYearOf('20260822SSNC02026') === 2026);
+  check('포스트시즌도 시즌 연도로', seasonYearOf('77771026HHLG02025') === 2025);
+  check('잘못된 값은 null', seasonYearOf('abc') === null && seasonYearOf(undefined) === null);
+}
+
+/* ══ 3-b. 이번 시즌 필터 ══ */
+
+function testSeasonFilter() {
+  const mk = (over) => normalizeGame({
+    gameId: '20260415SSNC02026', gameDate: '2026-04-15', gameDateTime: '2026-04-15T18:30:00',
+    stadium: '창원', homeTeamCode: 'NC', homeTeamName: 'NC',
+    awayTeamCode: 'SS', awayTeamName: '삼성', homeTeamScore: 0, awayTeamScore: 0,
+    statusCode: 'BEFORE', cancel: false, suspended: false, ...over,
+  });
+
+  const OPENER = '2026-03-28'; // 2026 시즌 실제 개막일 (10개 구단 데이터로 역산 확인)
+  const keep = (games) => filterCurrentSeason(games, 2026, OPENER);
+
+  check('정규시즌 경기는 통과', keep([mk({})]).length === 1);
+
+  // 시범경기: 형식은 정규시즌과 같고 개막일 이전이라는 점만 다르다
+  const exhibition = mk({ gameId: '20260315WONC02026', gameDate: '2026-03-15' });
+  check('시범경기 제외', keep([exhibition]).length === 0);
+
+  const openerDay = mk({ gameId: '20260328SSNC02026', gameDate: '2026-03-28' });
+  check('개막일 당일은 포함', keep([openerDay]).length === 1);
+
+  // 올스타전: gameId 접두 9999 + 팀 코드 EA/WE
+  const allstar = mk({
+    gameId: '99990711WEEA02026', gameDate: '2026-07-11',
+    homeTeamCode: 'EA', homeTeamName: '이스턴', awayTeamCode: 'WE', awayTeamName: '웨스턴',
+  });
+  check('올스타전 제외', keep([allstar]).length === 0);
+
+  // 접두사만 바뀌어도 팀 코드로 한 번 더 걸린다 (이중 방어)
+  const oddAllstar = mk({ gameId: '12340711WEEA02026', homeTeamCode: 'EA', awayTeamCode: 'WE' });
+  check('올스타 접두사가 바뀌어도 팀 코드로 제외', keep([oddAllstar]).length === 0);
+
+  const lastSeason = mk({ gameId: '20251026HHLG02025', gameDate: '2025-10-26' });
+  check('지난 시즌 제외', keep([lastSeason]).length === 0);
+
+  const lastPost = mk({ gameId: '77771026HHLG02025', gameDate: '2025-10-26' });
+  check('지난 시즌 포스트시즌도 제외', keep([lastPost]).length === 0);
+
+  const thisPost = mk({ gameId: '77771026NCLG02026', gameDate: '2026-10-26' });
+  check('올해 포스트시즌은 통과', keep([thisPost]).length === 1);
+
+  // 개막일을 못 구했으면 시범경기 판별을 포기한다 (빠뜨리는 것보다 낫다)
+  check('개막일 없으면 3월 경기도 통과', filterCurrentSeason([exhibition], 2026, null).length === 1);
+  check('개막일 없어도 지난 시즌은 제외', filterCurrentSeason([lastSeason], 2026, null).length === 0);
+  check('개막일 없어도 올스타전은 제외', filterCurrentSeason([allstar], 2026, null).length === 0);
 }
 
 /* ══ 4. 상태 전이 감지 ══ */
@@ -390,6 +447,7 @@ async function testHomeOnly() {
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
 console.log('\n[2] VAPID JWT');              await testVapid();
 console.log('\n[3] 시리즈 판별');            testSeries();
+console.log('\n[3b] 이번 시즌 필터');        testSeasonFilter();
 console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();

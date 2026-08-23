@@ -8,7 +8,10 @@
  * 결과적으로 비시즌 외부 호출은 하루 1회, 시즌 중에도 경기 시간대에만 발생한다.
  */
 
-import { fetchGames, filterTeam, fetchStandings, kstDateOffset, kstIsoToEpoch } from './kbo.js';
+import {
+  fetchGames, filterTeam, filterCurrentSeason, fetchStandings,
+  kstDateOffset, kstIsoToEpoch, seasonYearOf, TEAM_CODES,
+} from './kbo.js';
 import { getCache, putCache } from './db.js';
 
 /** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
@@ -21,6 +24,56 @@ const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
 
 /**
+ * 정규시즌 개막일을 알아낸다.
+ *
+ * 시범경기는 정규시즌과 형식이 완전히 같아 gameId 만으로는 구분할 수 없다.
+ * 대신 순위표의 gameCount 는 **정규시즌 경기만** 센다는 점을 이용한다:
+ * 완료된 경기를 날짜순으로 늘어놓고 뒤에서 gameCount 개를 세면 그 앞이 시범경기다.
+ *
+ * 2026 시즌 데이터로 검증했을 때 10개 구단 전부 같은 날짜(2026-03-28)를 가리켰다.
+ * 상수로 박지 않는 이유는 개막일이 매년 다르고 우천으로 밀릴 수도 있기 때문이다.
+ *
+ * 개막 전(gameCount 가 0)이거나 조회에 실패하면 null 을 준다.
+ * 그 경우 호출부는 시범경기 판별을 포기한다 — 경기를 통째로 빠뜨리는 것보다 낫다.
+ */
+export async function resolveSeasonOpener(env, year) {
+  const key = `opener:${year}`;
+  const cached = await getCache(env.DB, key);
+  if (cached !== null) return cached.date;
+
+  try {
+    const standings = await fetchStandings(year);
+    const me = standings.teams.find((t) => t.code === env.TEAM_CODE);
+    if (!me || !me.games) return null; // 아직 정규시즌 경기가 없다
+
+    // 시즌 전체 일정이 필요하다. 한 달 단위로 쪼개 받으므로 요청이 여러 번 나간다.
+    // 30일 캐시라 시즌당 몇 번만 실행된다.
+    const all = await fetchGames(`${year}-01-01`, `${year}-12-31`);
+
+    const done = filterTeam(all, env.TEAM_CODE)
+      .filter(
+        (g) =>
+          seasonYearOf(g.gameId) === year &&
+          g.phase === 'result' &&
+          !g.cancelled &&
+          TEAM_CODES.has(g.homeCode) &&
+          TEAM_CODES.has(g.awayCode),
+      )
+      .sort((a, b) => (a.gameDate + a.gameId).localeCompare(b.gameDate + b.gameId));
+
+    const skip = done.length - me.games;
+    // skip 이 음수면 순위표가 일정보다 앞서 있다는 뜻이라 신뢰할 수 없다.
+    const date = skip >= 0 && skip < done.length ? done[skip].gameDate : null;
+
+    await putCache(env.DB, key, { date }, 30 * 24 * HOUR);
+    return date;
+  } catch (err) {
+    console.error('season opener resolution failed', err.message);
+    return null;
+  }
+}
+
+/**
  * 오늘(과 어제) 우리 팀 경기 계획을 가져온다. 하루 한 번만 실제 조회한다.
  *
  * 어제를 포함하는 이유: 자정을 넘겨 끝나는 경기의 마지막 상태 전이를 놓치지 않기 위함.
@@ -30,9 +83,13 @@ export async function loadDailyPlan(env, today) {
   const cached = await getCache(env.DB, key);
   if (cached) return cached;
 
-  const games = filterTeam(
-    await fetchGames(kstDateOffset(-1), today),
-    env.TEAM_CODE,
+  const year = Number(today.slice(0, 4));
+  const opener = await resolveSeasonOpener(env, year);
+
+  const games = filterCurrentSeason(
+    filterTeam(await fetchGames(kstDateOffset(-1), today), env.TEAM_CODE),
+    year,
+    opener,
   );
 
   const plan = {
@@ -86,9 +143,13 @@ export async function loadSchedule(env, today, days = 30) {
   const cached = await getCache(env.DB, key);
   if (cached) return cached;
 
-  const games = filterTeam(
-    await fetchGames(today, kstDateOffset(days)),
-    env.TEAM_CODE,
+  const year = Number(today.slice(0, 4));
+  const opener = await resolveSeasonOpener(env, year);
+
+  const games = filterCurrentSeason(
+    filterTeam(await fetchGames(today, kstDateOffset(days)), env.TEAM_CODE),
+    year,
+    opener,
   );
 
   const schedule = games

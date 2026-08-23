@@ -120,23 +120,36 @@ export async function insertEvent(db, game, ev) {
   return (res.meta?.changes ?? 0) > 0;
 }
 
-/** 최근 경기 기록 + 각 경기에 딸린 이벤트를 일자 내림차순으로 반환한다. */
-export async function listHistory(db, { limitDays = 30 } = {}) {
+/**
+ * 최근 경기 기록 + 각 경기에 딸린 이벤트를 일자 내림차순으로 반환한다.
+ *
+ * 이번 시즌 경기만 돌려준다. gameId 끝 4자리가 시즌 연도이므로 SQL 에서 바로 거른다.
+ * 지난 시즌에 쌓인 행이 남아 있어도 화면에 섞이지 않는다.
+ */
+export async function listHistory(db, { limitDays = 30, seasonYear } = {}) {
+  const season = String(seasonYear);
+  const seasonFilter = `substr(game_id, -4) = ?`;
+
   const dateFilter = `game_date IN (
-    SELECT DISTINCT game_date FROM game_state ORDER BY game_date DESC LIMIT ?
+    SELECT DISTINCT game_date FROM game_state WHERE ${seasonFilter}
+    ORDER BY game_date DESC LIMIT ?
   )`;
 
   const games = await db
-    .prepare(`SELECT * FROM game_state WHERE ${dateFilter} ORDER BY game_date DESC, start_at DESC`)
-    .bind(limitDays)
+    .prepare(
+      `SELECT * FROM game_state
+       WHERE ${seasonFilter} AND ${dateFilter}
+       ORDER BY game_date DESC, start_at DESC`,
+    )
+    .bind(season, season, limitDays)
     .all();
 
   const events = await db
     .prepare(
       `SELECT game_id, kind, series, title, body, created_at FROM events
-       WHERE ${dateFilter} ORDER BY id ASC`,
+       WHERE ${seasonFilter} AND ${dateFilter} ORDER BY id ASC`,
     )
-    .bind(limitDays)
+    .bind(season, season, limitDays)
     .all();
 
   const byGame = new Map();
@@ -170,6 +183,26 @@ export async function listHistory(db, { limitDays = 30 } = {}) {
     cancelled: Boolean(r.cancelled),
     events: byGame.get(r.game_id) ?? [],
   }));
+}
+
+/**
+ * 이번 시즌이 아닌 경기 기록을 지운다.
+ *
+ * 필터를 넣기 전에 쌓인 시범경기·올스타전·지난 시즌 행을 실제로 걷어내는 용도다.
+ * gameId 끝 4자리가 시즌 연도라는 점을 그대로 쓴다.
+ */
+export async function pruneOtherSeasons(db, seasonYear) {
+  const season = String(seasonYear);
+
+  const res = await db.batch([
+    db.prepare('DELETE FROM events WHERE substr(game_id, -4) != ?').bind(season),
+    db.prepare('DELETE FROM game_state WHERE substr(game_id, -4) != ?').bind(season),
+  ]);
+
+  return {
+    events: res[0]?.meta?.changes ?? 0,
+    games: res[1]?.meta?.changes ?? 0,
+  };
 }
 
 /* ─────────────── 구독 ─────────────── */

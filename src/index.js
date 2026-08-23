@@ -4,14 +4,19 @@
  *  - fetch():     PWA 정적 파일 + /api/*
  */
 
-import { fetchGames, filterTeam, kstNow, kstDateOffset, postseasonOutlook } from './kbo.js';
+import {
+  fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
+} from './kbo.js';
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
-import { loadDailyPlan, isPollWindow, loadStandings, loadSchedule, invalidatePlan } from './season.js';
+import {
+  loadDailyPlan, isPollWindow, loadStandings, loadSchedule,
+  invalidatePlan, resolveSeasonOpener,
+} from './season.js';
 import {
   loadStates, upsertStateStmt, insertEvent, listHistory,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
-  updateSettings, subscribersFor, countSubscriptions, touchTestSent,
+  updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -39,9 +44,15 @@ async function tick(env) {
 
 async function poll(env) {
   const kst = kstNow();
+  const opener = await resolveSeasonOpener(env, kst.year);
 
   // 자정을 넘겨 끝나는 경기가 있어 어제~오늘을 함께 본다.
-  const games = filterTeam(await fetchGames(kstDateOffset(-1), kst.date), env.TEAM_CODE);
+  // 시범경기·올스타전·지난 시즌 경기는 알림 대상이 아니므로 여기서 걸러 낸다.
+  const games = filterCurrentSeason(
+    filterTeam(await fetchGames(kstDateOffset(-1), kst.date), env.TEAM_CODE),
+    kst.year,
+    opener,
+  );
   if (games.length === 0) return { checked: 0, fired: 0 };
 
   const prevStates = await loadStates(env.DB, games.map((g) => g.gameId));
@@ -153,7 +164,8 @@ async function handleApi(request, env, url) {
 
   if (path === '/api/history' && method === 'GET') {
     const days = Math.min(Math.max(Number(url.searchParams.get('days')) || 30, 1), 120);
-    return json({ games: await listHistory(env.DB, { limitDays: days }) });
+    const { year } = kstNow();
+    return json({ games: await listHistory(env.DB, { limitDays: days, seasonYear: year }) });
   }
 
   /** 앞으로의 경기 일정. 홈경기 여부를 함께 내려 앱에서 강조 표시한다. */
@@ -279,6 +291,14 @@ async function handleApi(request, env, url) {
     const { date } = kstNow();
     await invalidatePlan(env, date);
     return json({ ok: true, plan: await loadDailyPlan(env, date) });
+  }
+
+  /** 이번 시즌이 아닌 경기 기록을 DB에서 지운다. 필터 도입 전에 쌓인 행 정리용. */
+  if (path === '/api/admin/prune' && method === 'POST') {
+    if (!isAdmin(request, env)) return json({ error: '권한이 없습니다.' }, 401);
+
+    const { year } = kstNow();
+    return json({ ok: true, season: year, deleted: await pruneOtherSeasons(env.DB, year) });
   }
 
   return json({ error: 'Not found' }, 404);
