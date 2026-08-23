@@ -11,7 +11,7 @@ import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
   loadDailyPlan, isPollWindow, loadStandings, loadSchedule,
-  invalidatePlan, resolveSeasonOpener,
+  invalidatePlan, resolveSeasonOpener, invalidateStandings,
 } from './season.js';
 import {
   loadStates, upsertStateStmt, insertEvent, listHistory,
@@ -74,13 +74,19 @@ async function poll(env) {
   if (writes.length > 0) await env.DB.batch(writes);
 
   let fired = 0;
+  let ended = false;
+
   for (const { game, ev } of pending) {
     // dedup_key 충돌이면 이미 발송한 이벤트이므로 건너뛴다.
     if (!(await insertEvent(env.DB, game, ev))) continue;
 
     await broadcast(env, ev);
+    if (ev.kind === 'end') ended = true;
     fired++;
   }
+
+  // 경기가 끝났으면 순위가 바뀐다. 캐시를 비워 다음 조회에서 최신 순위를 받게 한다.
+  if (ended) await invalidateStandings(env, kst.year);
 
   return { checked: games.length, fired };
 }

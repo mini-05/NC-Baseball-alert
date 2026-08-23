@@ -105,8 +105,72 @@ $$('.tab').forEach((tab) => {
 
 /* ─────────── 순위 · 포스트시즌 ─────────── */
 
+/**
+ * 전체 순위표. 포스트시즌 진출 구간을 구분선으로 나눠 보여준다.
+ *
+ * 진출 기준(1위 한국시리즈 / 4~5위 와일드카드 등)은 서버가 순위 API 응답의
+ * postSeason.teamColors 를 그대로 넘겨준 것이라, KBO 가 규칙을 바꿔도 따라간다.
+ */
+function renderTable(standings) {
+  const box = $('#table');
+  clear(box);
+
+  if (!standings?.teams?.length) {
+    box.append(el('p', { class: 'empty' }, '순위 정보를 불러올 수 없어요.', el('br'), '비시즌일 수 있습니다.'));
+    return;
+  }
+
+  const tiers = standings.tiers ?? [];
+  const rows = [];
+
+  for (const t of standings.teams) {
+    // 이 순위에서 시작하는 진출 구간이 있으면 라벨을 먼저 넣는다.
+    const tier = tiers.find((x) => x.from === t.rank);
+    if (tier) rows.push(el('p', { class: 'tier-label', text: tier.title }));
+
+    const isMine = t.code === teamCode;
+
+    rows.push(
+      el('div', { class: `trow${isMine ? ' mine' : ''}` },
+        el('span', { class: 'trank', text: String(t.rank) }),
+        el('span', { class: 'tname', text: t.name }),
+        el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
+        el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
+        el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
+      ),
+    );
+
+    // 진출권 마지막 순위 뒤에 선을 그어 경계를 분명히 한다.
+    if (standings.cutoff && t.rank === standings.cutoff) {
+      rows.push(el('div', { class: 'cutline' }, el('span', { text: '포스트시즌 진출선' })));
+    }
+  }
+
+  box.append(
+    el('div', { class: 'card table-card' },
+      el('div', { class: 'thead' },
+        el('span', { class: 'trank', text: '순위' }),
+        el('span', { class: 'tname', text: '팀' }),
+        el('span', { class: 'trec', text: '승-무-패' }),
+        el('span', { class: 'tpct', text: '승률' }),
+        el('span', { class: 'tgb', text: '승차' }),
+      ),
+      ...rows,
+    ),
+  );
+}
+
 function renderStandings({ standings, outlook }) {
-  const slot = $('#standings');
+  renderTable(standings);
+
+  const stamp = $('#standings-updated');
+  if (stamp) {
+    stamp.textContent = standings
+      ? `${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })} 기준 · 경기 종료 시 갱신`
+      : '';
+  }
+
+  const slot = $('#outlook');
   clear(slot);
   if (!standings || !outlook) return; // 비시즌이면 카드를 아예 띄우지 않는다.
 

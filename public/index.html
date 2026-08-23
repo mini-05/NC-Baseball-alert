@@ -61,6 +61,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab is-active" data-tab="history" role="tab">기록</button>
     <button class="tab" data-tab="schedule" role="tab">일정</button>
+    <button class="tab" data-tab="standings" role="tab">순위</button>
     <button class="tab" data-tab="settings" role="tab">알림</button>
   </nav>
 </header>
@@ -68,7 +69,6 @@
 <main>
   <!-- ─────────── 기록 ─────────── -->
   <section id="panel-history" class="panel is-active">
-    <div id="standings"></div>
     <div id="history">
       <div class="skeleton"></div>
       <div class="skeleton"></div>
@@ -85,6 +85,15 @@
       <div class="skeleton"></div>
       <div class="skeleton"></div>
     </div>
+  </section>
+
+  <!-- ─────────── 순위 ─────────── -->
+  <section id="panel-standings" class="panel">
+    <div id="outlook"></div>
+    <div id="table">
+      <div class="skeleton"></div>
+    </div>
+    <p class="fineprint" id="standings-updated"></p>
   </section>
 
   <!-- ─────────── 알림 ─────────── -->

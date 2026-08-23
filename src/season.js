@@ -173,7 +173,8 @@ export async function loadSchedule(env, today, days = 30) {
 /**
  * 순위표를 캐시와 함께 가져온다.
  *
- * 순위는 경기가 끝나야 바뀌므로 30분 캐시로 충분하다.
+ * 순위는 경기가 끝나야 바뀌므로 짧은 캐시로 충분하고, 경기 종료를 감지하면
+ * invalidateStandings 로 즉시 비운다. 그래서 경기가 끝나는 즉시 새 순위가 보인다.
  * 비시즌에는 해당 연도 데이터가 없을 수 있어 실패를 조용히 삼키고 null 을 준다.
  */
 export async function loadStandings(env, year) {
@@ -183,10 +184,15 @@ export async function loadStandings(env, year) {
 
   try {
     const standings = await fetchStandings(year);
-    await putCache(env.DB, key, standings, 30 * MIN);
+    await putCache(env.DB, key, standings, 10 * MIN);
     return standings;
   } catch (err) {
     console.error('standings fetch failed', err.message);
     return null;
   }
+}
+
+/** 경기가 끝났을 때 호출한다. 다음 조회에서 최신 순위를 새로 받아 온다. */
+export async function invalidateStandings(env, year) {
+  await putCache(env.DB, `standings:${year}`, null, -1);
 }
