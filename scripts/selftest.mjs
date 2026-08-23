@@ -143,9 +143,31 @@ function testDetect() {
   const kinds = (evs) => evs.map((e) => e.kind).join(',');
 
   check('처음 보는 경기는 알리지 않음', detectEvents(null, g(), T).length === 0);
-  check('경기 시작 감지', kinds(detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T)) === 'start');
+
+  const started = detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T);
+  check('경기 시작 감지', kinds(started) === 'start');
+  // es-hangul josa: 삼성(받침 ㅇ) → 과
+  check('시작 문구 조사', started[0]?.body === '삼성과의 홈 경기가 시작됐어요. (창원)', started[0]?.body);
+
   check('변화 없으면 이벤트 없음', detectEvents(g(), g(), T).length === 0);
-  check('경기 취소 감지', kinds(detectEvents(g(), g({ cancel: true }), T)) === 'cancel');
+
+  const cancelled = detectEvents(g(), g({ cancel: true }), T);
+  check('경기 취소 감지', kinds(cancelled) === 'cancel');
+  check('취소 문구 조사', cancelled[0]?.body === '삼성과의 홈 경기가 취소됐어요. (창원)', cancelled[0]?.body);
+
+  // 받침 없는 팀명과 영문 약어에서도 조사가 맞아야 한다.
+  const vsLotte = detectEvents(
+    g({ awayTeamCode: 'LT', awayTeamName: '롯데' }),
+    g({ awayTeamCode: 'LT', awayTeamName: '롯데', statusCode: 'STARTED' }), T,
+  );
+  check('롯데 → 와', vsLotte[0]?.body.startsWith('롯데와의'), vsLotte[0]?.body);
+
+  const vsKt = detectEvents(
+    g({ awayTeamCode: 'KT', awayTeamName: 'KT' }),
+    g({ awayTeamCode: 'KT', awayTeamName: 'KT', statusCode: 'STARTED' }), T,
+  );
+  // KT → 케이티 → 받침 없음 → 와
+  check('KT → 와 (영문 약어를 한글 발음으로 읽음)', vsKt[0]?.body.startsWith('KT와의'), vsKt[0]?.body);
   check('취소는 한 번만', detectEvents(g({ cancel: true }), g({ cancel: true }), T).length === 0);
 
   const live = (h, a) => g({ statusCode: 'STARTED', statusInfo: '5회말', homeTeamScore: h, awayTeamScore: a });
@@ -219,6 +241,8 @@ function testOutlook() {
   check('5위와 7.0경기차', o.gamesBehindLine === 7, String(o.gamesBehindLine));
   // 48 + 39 = 87 > 57 이므로 산술적으로는 아직 가능하다.
   check('아직 산술적 가능 → chasing', o.status === 'chasing', o.status);
+  // 두산(받침 ㄴ) → 을
+  check('note 조사 처리', o.note === '잔여 39경기. 두산을 넘어야 진출권에 들어요.', o.note);
 
   // 잔여 경기가 적어 5위 현재 승수를 못 넘는 경우 → 확정 탈락
   const late = structuredClone(standings);

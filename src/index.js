@@ -283,9 +283,12 @@ async function handleApi(request, env, url) {
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  // 웹폰트는 Google Fonts 만 허용한다 (Cormorant Garamond · Inter · Noto Serif KR).
-  "style-src 'self' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com",
+  // 웹폰트 출처만 허용한다.
+  //   Google Fonts — Cormorant Garamond · Inter · Noto Serif KR
+  //   jsdelivr     — Pretendard (본문 한글)
+  // Tossface 는 SVG 심볼로 인라인돼 있어 외부 출처가 필요 없다.
+  "style-src 'self' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+  "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net",
   "img-src 'self' data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",

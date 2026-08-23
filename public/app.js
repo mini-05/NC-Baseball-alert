@@ -30,18 +30,19 @@ function el(tag, props = {}, ...children) {
 const clear = (node) => { while (node.firstChild) node.firstChild.remove(); };
 
 /**
- * 받침 유무에 맞는 조사를 붙인다. ("두산을" / "롯데를")
- *
- * KBO 팀명 중 영문 표기(KT·LG·NC·SSG·KIA)는 한국어 발음이 모두 모음으로 끝나므로
- * (케이티, 엘지, 엔씨, 에스에스지, 기아) 받침 없음으로 처리하면 맞다.
+ * Tossface 아이콘. index.html 에 인라인된 <symbol> 을 참조한다.
+ * 같은 문서 안의 참조라 외부 SVG use 의 브라우저 호환 문제가 없다.
  */
-function withParticle(word, hasJong, noJong) {
-  const text = String(word ?? '').trim();
-  if (!text) return text;
+function icon(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'tf');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
 
-  const code = text.charCodeAt(text.length - 1);
-  const isHangul = code >= 0xac00 && code <= 0xd7a3;
-  return text + (isHangul && (code - 0xac00) % 28 !== 0 ? hasJong : noJong);
+  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  use.setAttribute('href', `#tf-${name}`);
+  svg.append(use);
+  return svg;
 }
 
 const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', end: '종료', test: '테스트' };
@@ -109,7 +110,7 @@ function renderStandings({ standings, outlook }) {
   clear(slot);
   if (!standings || !outlook) return; // 비시즌이면 카드를 아예 띄우지 않는다.
 
-  const { team, rank, cutoff, cutoffTeam, remaining, gamesBehindLine, tierTitle, status } = outlook;
+  const { team, rank, cutoff, remaining, gamesBehindLine, tierTitle, status } = outlook;
 
   // 진출권 안일 때만 코랄. 시스템은 코랄을 아껴 쓴다.
   const pill =
@@ -119,16 +120,8 @@ function renderStandings({ standings, outlook }) {
         ? el('span', { class: 'pill out', text: '포스트시즌 탈락 확정' })
         : el('span', { class: 'pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
 
-  const lineName = cutoffTeam?.name ?? `${cutoff}위`;
-
-  let note;
-  if (status === 'in') {
-    note = `현재 순위를 지키면 ${tierTitle ?? '포스트시즌 진출'}이에요. 잔여 ${remaining}경기.`;
-  } else if (status === 'eliminated') {
-    note = `남은 ${remaining}경기를 모두 이겨도 ${lineName}의 현재 승수에 미치지 못해요.`;
-  } else {
-    note = `잔여 ${remaining}경기. ${withParticle(lineName, '을', '를')} 넘어야 진출권에 들어요.`;
-  }
+  // 문장은 서버가 es-hangul 로 조사까지 맞춰 내려준다. 여기서는 그대로 쓴다.
+  const note = outlook.note ?? '';
 
   // 진출권까지의 거리를 시각화. 승차가 클수록 막대가 짧아진다.
   const progress = status === 'in' ? 1 : Math.max(0, 1 - gamesBehindLine / Math.max(remaining, 1));
@@ -188,7 +181,7 @@ function renderGame(g) {
   const isLive = g.phase === 'live' && !g.cancelled;
 
   const seriesTag = SERIES_SHORT[g.series]
-    ? el('span', { class: 'tag', text: SERIES_SHORT[g.series] })
+    ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
     : null;
 
   const team = (t, lost) =>
@@ -216,6 +209,7 @@ function renderGame(g) {
                 hour: '2-digit', minute: '2-digit', hour12: false,
               }),
             }),
+            icon(e.kind),
             el('span', { class: 'tl-body' },
               el('b', { class: 'tl-kind', text: KIND_LABEL[e.kind] ?? e.kind }),
               e.body,

@@ -12,9 +12,17 @@
  */
 
 :root {
-  /* ── 브랜드 ── */
-  --primary: #cc785c;
-  --primary-active: #a9583e;
+  /*
+   * ── 브랜드 ──
+   * Claude 시스템의 구조는 그대로 두고 강조색만 NC 다이노스 공식 색으로 바꿨다.
+   * 공식 사이트(ncdinos.com) CSS 에서 확인한 값이다:
+   *   #071d3d — 로그인·가입 버튼, 주요 제목 (주색)
+   *   #c7a079 — 활성 탭, 액션 버튼, .gold/.brown 클래스 (보조색)
+   * 코랄(#cc785c) 자리에 NC 골드가, 다크 표면(#181715) 자리에 NC 네이비가 들어간다.
+   * 골드가 코랄과 같은 계열의 따뜻한 색이라 시스템의 성격이 유지된다.
+   */
+  --primary: #c7a079;
+  --primary-active: #a98867;      /* 누름 상태 — 골드를 어둡게 */
   --primary-disabled: #e6dfd8;
   --on-primary: #ffffff;
   --accent-teal: #5db8a6;
@@ -25,9 +33,9 @@
   --surface-soft: #f5f0e8;
   --surface-card: #efe9de;
   --surface-cream-strong: #e8e0d2;
-  --surface-dark: #181715;
-  --surface-dark-elevated: #252320;
-  --surface-dark-soft: #1f1e1b;
+  --surface-dark: #071d3d;          /* NC 네이비 */
+  --surface-dark-soft: #0c2749;     /* 다크 카드 안쪽 */
+  --surface-dark-elevated: #1e457c; /* NC 공식 보조 네이비 */
   --hairline: #e6dfd8;
   --hairline-soft: #ebe6df;
 
@@ -38,7 +46,7 @@
   --muted: #6c6a64;
   --muted-soft: #8e8b82;
   --on-dark: #faf9f5;
-  --on-dark-soft: #a09d96;
+  --on-dark-soft: #9fb2c9; /* 네이비 위 보조 텍스트 — 네이비 기운을 머금은 회색 */
 
   /* ── 시맨틱 ── */
   --success: #5db872;
@@ -64,11 +72,13 @@
    * 폰트 폴백 체인.
    * Cormorant Garamond / Inter 에는 한글 글리프가 없으므로, 라틴 문자와 숫자는
    * 앞쪽 폰트가, 한글은 그 뒤 한글 폰트가 자동으로 맡는다.
+   * 본문 한글은 Pretendard — 토스가 실제로 쓰는 본문 서체이고,
+   * DESIGN.md 가 StyreneB 의 조건으로 요구한 "휴머니스트" 성격에 부합한다.
    */
   --font-display: 'Cormorant Garamond', 'Noto Serif KR', 'Apple SD Gothic Neo',
     Garamond, 'Times New Roman', serif;
-  --font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
-    'Segoe UI', Roboto, 'Noto Sans KR', sans-serif;
+  --font-sans: Inter, 'Pretendard Variable', Pretendard, -apple-system,
+    BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', Roboto, sans-serif;
 }
 
 /*
@@ -78,22 +88,24 @@
  */
 @media (prefers-color-scheme: dark) {
   :root {
-    --canvas: #181715;
-    --surface-soft: #1f1e1b;
-    --surface-card: #1f1e1b;
-    --surface-cream-strong: #252320;
-    --hairline: #2e2c28;
-    --hairline-soft: #26241f;
+    /* 다크 모드에서는 NC 네이비가 바탕이 된다. */
+    --canvas: #071d3d;
+    --surface-soft: #0c2749;
+    --surface-card: #0c2749;
+    --surface-cream-strong: #12335c;
+    --hairline: #143a68;
+    --hairline-soft: #0f2e55;
 
     --ink: #faf9f5;
-    --body-strong: #ebe6df;
-    --body: #d5d0c7;
-    --muted: #a09d96;
-    --muted-soft: #8e8b82;
+    --body-strong: #e7edf5;
+    --body: #cfdae8;
+    --muted: #9fb2c9;
+    --muted-soft: #7e93ad;
 
-    --surface-dark: #0f0e0d;
-    --surface-dark-soft: #141312;
-    --surface-dark-elevated: #252320;
+    /* 라이트 모드의 다크 표면보다 한 단계 더 깊게 두어 대비를 유지한다. */
+    --surface-dark: #04122a;
+    --surface-dark-soft: #071d3d;
+    --surface-dark-elevated: #12335c;
   }
 }
 
@@ -113,6 +125,9 @@ body {
 
 /* 브랜드 글리프 */
 .spike { width: 16px; height: 16px; fill: var(--ink); flex: 0 0 auto; }
+
+/* 아이콘 심볼 정의만 담는 숨은 SVG. 화면을 차지하지 않는다. */
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
 /* ─────────── 상단 ─────────── */
 
@@ -284,6 +299,9 @@ main {
 .card-dark .game-meta { color: var(--on-dark-soft); }
 
 .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.1em;
@@ -293,6 +311,7 @@ main {
   background: var(--surface-cream-strong);
   color: var(--ink);
 }
+.tag .tf { width: 14px; height: 14px; margin: 0; }
 .card-dark .tag { background: var(--surface-dark-elevated); color: var(--on-dark); }
 
 /* badge-coral — LIVE 표시. 코랄을 쓰는 몇 안 되는 자리. */
@@ -348,7 +367,15 @@ main {
 }
 .card-dark .timeline { border-top-color: var(--surface-dark-elevated); }
 
-.tl-item { display: grid; grid-template-columns: 44px 1fr; gap: var(--s-sm); }
+.tl-item {
+  display: grid;
+  grid-template-columns: 44px 18px 1fr;
+  gap: var(--s-xs);
+  align-items: start;
+}
+
+/* Tossface 아이콘. 폰트(4MB) 대신 같은 저작물의 SVG(7KB)를 인라인 심볼로 쓴다. */
+.tf { width: 18px; height: 18px; margin-top: 1px; }
 .tl-time {
   font-size: 13px;
   color: var(--muted-soft);

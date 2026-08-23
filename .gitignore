@@ -4,3 +4,6 @@ node_modules/
 .env
 *.log
 .DS_Store
+
+# gentossface.py 의 중간 산출물. 정본은 public/index.html 에 인라인돼 있다.
+scripts/tossface-sprite.svg

@@ -5,6 +5,8 @@
  * 이 파일 하나만 고치면 되도록 나머지 코드와의 접점을 좁혀 둔다.
  */
 
+import { josa } from 'es-hangul';
+
 const SCHEDULE_URL = 'https://api-gw.sports.naver.com/schedule/games';
 const STANDINGS_URL = 'https://api-gw.sports.naver.com/statistics/categories/kbo/seasons';
 const FIELDS = 'basic,superCategoryId,categoryName,stadium,statusNum';
@@ -245,6 +247,19 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
     status = 'chasing';
   }
 
+  const gamesBehindLine = inside ? 0 : Number((me.gb - (line?.gb ?? 0)).toFixed(1));
+  const lineName = line?.name ?? `${standings.cutoff}위`;
+
+  // 문장을 서버에서 완성해 내려보낸다. 조사 처리를 한곳(es-hangul)에 모으기 위함이다.
+  let note;
+  if (status === 'in') {
+    note = `현재 순위를 지키면 ${tier?.title ?? '포스트시즌 진출'}이에요. 잔여 ${remaining}경기.`;
+  } else if (status === 'eliminated') {
+    note = `남은 ${remaining}경기를 모두 이겨도 ${josa(lineName, '이/가')} 지금까지 쌓은 승수에 미치지 못해요.`;
+  } else {
+    note = `잔여 ${remaining}경기. ${josa(lineName, '을/를')} 넘어야 진출권에 들어요.`;
+  }
+
   return {
     team: me,
     rank: me.rank,
@@ -252,8 +267,9 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
     cutoffTeam: line ? { name: line.name, rank: line.rank, wins: line.wins } : null,
     remaining,
     // 진출권 팀과의 승차. 이미 진출권 안이면 0.
-    gamesBehindLine: inside ? 0 : Number((me.gb - (line?.gb ?? 0)).toFixed(1)),
+    gamesBehindLine,
     tierTitle: tier?.title ?? null,
     status, // in | chasing | eliminated
+    note,
   };
 }

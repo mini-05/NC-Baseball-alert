@@ -8,6 +8,7 @@
  *   같은 전이가 두 번 발송되지 않는다.
  */
 
+import { josa } from 'es-hangul';
 import { perspective, SERIES, isPostseason } from './kbo.js';
 
 export const KINDS = ['start', 'cancel', 'score', 'end'];
@@ -57,7 +58,12 @@ export function detectEvents(prev, cur, teamCode) {
 
   const events = [];
   const p = perspective(cur, teamCode);
-  const vs = `${p.isHome ? 'vs' : '@'} ${p.oppName}`;
+
+  // "삼성과의 경기" / "롯데와의 경기" — 받침에 따라 조사가 갈린다.
+  // es-hangul 의 josa 는 KT·SSG 같은 영문 약어도 한글 발음(케이티·에스에스지)으로
+  // 읽어 조사를 고르므로 팀명을 예외 처리할 필요가 없다.
+  const matchup = `${josa(p.oppName, '와/과')}의 ${p.isHome ? '홈' : '원정'} 경기`;
+  const where = cur.stadium ? ` (${cur.stadium})` : '';
   const t = tag(cur.series);
   const scope = isPostseason(cur.series) ? 'postseason' : 'regular';
 
@@ -66,24 +72,14 @@ export function detectEvents(prev, cur, teamCode) {
 
   // 1) 경기 취소 — 취소된 경기는 시작/종료 알림을 낼 이유가 없으므로 여기서 끝낸다.
   if (!prev.cancelled && cur.cancelled) {
-    push(
-      'cancel',
-      `${cur.gameId}:cancel`,
-      `${t}경기 취소`,
-      `${p.teamName} ${vs} 경기가 취소됐습니다.${cur.stadium ? ` (${cur.stadium})` : ''}`,
-    );
+    push('cancel', `${cur.gameId}:cancel`, `${t}경기 취소`, `${matchup}가 취소됐어요.${where}`);
     return events;
   }
   if (cur.cancelled) return events;
 
   // 2) 경기 시작
   if (prev.phase === 'before' && cur.phase === 'live') {
-    push(
-      'start',
-      `${cur.gameId}:start`,
-      `${t}경기 시작`,
-      `${p.teamName} ${vs} 경기가 시작됐습니다.${cur.stadium ? ` (${cur.stadium})` : ''}`,
-    );
+    push('start', `${cur.gameId}:start`, `${t}경기 시작`, `${matchup}가 시작됐어요.${where}`);
   }
 
   // 3) 득점 — 점수가 변한 경기 중 상태에서만. 어느 팀이 냈는지 구분해 알린다.

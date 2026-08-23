@@ -14,11 +14,11 @@ from pathlib import Path
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "public"
 
-# DESIGN.md 의 색 삼원(크림 + 코랄 + 다크)을 그대로 쓴다.
-NAVY = (24, 23, 21)     # surface-dark #181715 — 배경
-GOLD = (204, 120, 92)   # primary #cc785c — 공 테두리
-CREAM = (250, 249, 245) # canvas #faf9f5 — 공 몸통
-SEAM = (204, 120, 92)   # primary — 실밥
+# NC 다이노스 공식 색(ncdinos.com 에서 확인) + Claude 시스템의 크림.
+NAVY = (7, 29, 61)      # #071d3d NC 네이비 — 배경
+GOLD = (199, 160, 121)  # #c7a079 NC 골드 — 공 테두리
+CREAM = (250, 249, 245) # #faf9f5 크림 — 공 몸통
+SEAM = (199, 160, 121)  # NC 골드 — 실밥
 
 # 안티에일리어싱용 슈퍼샘플링 배율. 4면 육안으로 계단현상이 보이지 않는다.
 SS = 4
