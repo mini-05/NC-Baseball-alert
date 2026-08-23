@@ -283,8 +283,9 @@ async function handleApi(request, env, url) {
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self' https://cdn.jsdelivr.net",
-  "font-src 'self' https://cdn.jsdelivr.net",
+  // 웹폰트는 Google Fonts 만 허용한다 (Cormorant Garamond · Inter · Noto Serif KR).
+  "style-src 'self' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",

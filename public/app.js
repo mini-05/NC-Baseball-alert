@@ -95,13 +95,10 @@ function serialize(sub) {
 
 /* ─────────── 탭 ─────────── */
 
-const segmented = $('.segmented');
-
-$$('.seg').forEach((seg, index) => {
-  seg.addEventListener('click', () => {
-    segmented.dataset.index = String(index);
-    $$('.seg').forEach((s) => s.classList.toggle('is-active', s === seg));
-    $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${seg.dataset.tab}`));
+$$('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    $$('.tab').forEach((t) => t.classList.toggle('is-active', t === tab));
+    $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${tab.dataset.tab}`));
   });
 });
 
@@ -114,12 +111,13 @@ function renderStandings({ standings, outlook }) {
 
   const { team, rank, cutoff, cutoffTeam, remaining, gamesBehindLine, tierTitle, status } = outlook;
 
+  // 진출권 안일 때만 코랄. 시스템은 코랄을 아껴 쓴다.
   const pill =
     status === 'in'
-      ? el('span', { class: 'ps-pill in', text: tierTitle ?? '포스트시즌 진출권' })
+      ? el('span', { class: 'pill in', text: tierTitle ?? '포스트시즌 진출권' })
       : status === 'eliminated'
-        ? el('span', { class: 'ps-pill out', text: '포스트시즌 탈락 확정' })
-        : el('span', { class: 'ps-pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
+        ? el('span', { class: 'pill out', text: '포스트시즌 탈락 확정' })
+        : el('span', { class: 'pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
 
   const lineName = cutoffTeam?.name ?? `${cutoff}위`;
 
@@ -136,8 +134,8 @@ function renderStandings({ standings, outlook }) {
   const progress = status === 'in' ? 1 : Math.max(0, 1 - gamesBehindLine / Math.max(remaining, 1));
 
   slot.append(
-    el('div', { class: 'card rank-card' },
-      el('div', { class: 'rank-head' },
+    el('div', { class: 'card card-outline' },
+      el('div', { class: 'rank-line' },
         el('span', { class: 'rank-num', text: String(rank) }),
         el('span', { class: 'rank-unit', text: '위' }),
         el('span', {
@@ -187,8 +185,10 @@ function renderGame(g) {
         ? '종료'
         : formatStart(g.startAt);
 
-  const seriesChip = SERIES_SHORT[g.series]
-    ? el('span', { class: 'chip post', text: SERIES_SHORT[g.series] })
+  const isLive = g.phase === 'live' && !g.cancelled;
+
+  const seriesTag = SERIES_SHORT[g.series]
+    ? el('span', { class: 'tag', text: SERIES_SHORT[g.series] })
     : null;
 
   const team = (t, lost) =>
@@ -225,10 +225,12 @@ function renderGame(g) {
       )
     : null;
 
-  return el('article', { class: 'card game' },
+  // 진행 중인 경기는 다크 표면에 올린다. 크림 카드 사이에서 확실히 구분되고,
+  // 크림↔다크 교차가 이 디자인 시스템의 페이싱 방식이다.
+  return el('article', { class: `card${isLive ? ' card-dark' : ''}` },
     el('div', { class: 'game-meta' },
-      seriesChip,
-      g.phase === 'live' && !g.cancelled ? el('span', { class: 'chip live', text: 'LIVE' }) : null,
+      seriesTag,
+      isLive ? el('span', { class: 'tag live', text: 'Live' }) : null,
       el('span', { text: `${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}` }),
       el('span', { class: 'game-status', text: status }),
     ),
@@ -281,9 +283,11 @@ async function loadStandings() {
 /* ─────────── 알림 설정 ─────────── */
 
 function setPushUi(state, desc) {
-  const dot = $('#push-dot');
-  dot.className = `dot ${state === 'on' ? 'on' : state === 'error' ? 'err' : ''}`;
   $('#push-desc').textContent = desc;
+
+  // 알림이 꺼져 있을 때만 전면 코랄 콜아웃으로 바꿔 행동을 유도한다.
+  // 켜진 뒤에는 평범한 크림 카드로 돌아간다 — 코랄은 아껴 쓰는 색이다.
+  $('#push-card').classList.toggle('card-coral', state === 'off' || state === 'error');
 
   const btn = $('#btn-toggle');
   btn.textContent = state === 'on' ? '알림 끄기' : state === 'error' ? '다시 시도' : '알림 켜기';

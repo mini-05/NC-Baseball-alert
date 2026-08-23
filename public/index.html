@@ -4,97 +4,115 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>NC 다이노스 경기 알림</title>
-<meta name="theme-color" content="#f2f4f6" />
+<meta name="theme-color" content="#faf9f5" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <meta name="apple-mobile-web-app-title" content="NC 알림" />
 <link rel="manifest" href="/manifest.json" />
 <link rel="apple-touch-icon" href="/icon-180.png" />
 <link rel="icon" href="/icon-192.png" />
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+
+<!--
+  DESIGN.md 는 Copernicus(디스플레이 세리프)와 StyreneB(본문 산세리프)를 지정하지만
+  둘 다 Anthropic 라이선스 폰트라 공개 웹폰트가 없다. 문서가 명시한 대체재를 쓴다:
+  세리프 → Cormorant Garamond, 산세리프 → Inter.
+  다만 두 폰트 모두 한글 글리프가 없으므로, 폰트 폴백 체인으로 라틴/숫자는 대체재가,
+  한글은 Noto Serif KR / 시스템 한글 폰트가 렌더링하게 한다. (style.css 참고)
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Inter:wght@400;500;600&family=Noto+Serif+KR:wght@400;500&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
 
-<header class="header">
-  <p class="header-eyebrow">NC 다이노스</p>
-  <h1 class="header-title">경기 알림</h1>
-
-  <div class="segmented" role="tablist">
-    <button class="seg is-active" data-tab="history" role="tab">기록</button>
-    <button class="seg" data-tab="settings" role="tab">알림</button>
-    <span class="seg-thumb" aria-hidden="true"></span>
+<header class="topbar">
+  <div class="brand">
+    <!-- Anthropic 스파이크 마크를 본뜬 4방향 방사형 글리프. 브랜드 워드마크 접두사 역할. -->
+    <svg class="spike" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 1.5 L13.5 9.6 L21.2 6.2 L15.4 12 L21.2 17.8 L13.5 14.4 L12 22.5 L10.5 14.4 L2.8 17.8 L8.6 12 L2.8 6.2 L10.5 9.6 Z" />
+    </svg>
+    <span class="wordmark">NC 다이노스</span>
   </div>
+
+  <h1 class="display">경기 알림</h1>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-tab="history" role="tab">기록</button>
+    <button class="tab" data-tab="settings" role="tab">알림</button>
+  </nav>
 </header>
 
 <main>
   <!-- ─────────── 기록 ─────────── -->
   <section id="panel-history" class="panel is-active">
-    <div id="standings" class="standings-slot"></div>
+    <div id="standings"></div>
     <div id="history">
-      <div class="skeleton-card"></div>
-      <div class="skeleton-card"></div>
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
     </div>
   </section>
 
   <!-- ─────────── 알림 ─────────── -->
   <section id="panel-settings" class="panel">
-    <div class="card card-hero">
-      <div class="hero-row">
-        <div>
-          <h2 class="hero-title">푸시 알림</h2>
-          <p id="push-desc" class="hero-desc">확인하고 있어요…</p>
-        </div>
-        <span id="push-dot" class="dot"></span>
-      </div>
+    <!-- 알림이 꺼져 있으면 코랄 콜아웃(callout-card-coral)으로, 켜져 있으면 크림 카드로 바뀐다. -->
+    <div class="card hero" id="push-card">
+      <h2 class="hero-title">푸시 알림</h2>
+      <p id="push-desc" class="hero-desc">확인하고 있어요…</p>
       <button id="btn-toggle" class="btn btn-primary" disabled>확인 중</button>
-      <button id="btn-test" class="btn btn-quiet" hidden>테스트 알림 보내기</button>
+      <button id="btn-test" class="btn btn-link" hidden>테스트 알림 보내기</button>
     </div>
 
-    <h3 class="section-title">언제 알릴까요</h3>
-    <div class="card card-list" id="kinds">
+    <h3 class="eyebrow">언제 알릴까요</h3>
+    <div class="card card-rows">
       <label class="row">
-        <div class="row-text"><b>경기 시작</b><span>플레이볼 순간</span></div>
+        <span class="row-text"><b>경기 시작</b><span>플레이볼 순간</span></span>
         <span class="sw"><input type="checkbox" data-key="start" disabled /><i></i></span>
       </label>
       <label class="row">
-        <div class="row-text"><b>경기 취소</b><span>우천 등으로 취소될 때</span></div>
+        <span class="row-text"><b>경기 취소</b><span>우천 등으로 취소될 때</span></span>
         <span class="sw"><input type="checkbox" data-key="cancel" disabled /><i></i></span>
       </label>
       <label class="row">
-        <div class="row-text"><b>득점</b><span>점수가 바뀔 때마다</span></div>
+        <span class="row-text"><b>득점</b><span>점수가 바뀔 때마다</span></span>
         <span class="sw"><input type="checkbox" data-key="score" disabled /><i></i></span>
       </label>
       <label class="row">
-        <div class="row-text"><b>경기 종료</b><span>최종 결과</span></div>
+        <span class="row-text"><b>경기 종료</b><span>최종 결과</span></span>
         <span class="sw"><input type="checkbox" data-key="end" disabled /><i></i></span>
       </label>
     </div>
 
-    <h3 class="section-title">어떤 경기를 알릴까요</h3>
-    <div class="card card-list" id="scopes">
+    <h3 class="eyebrow">어떤 경기를 알릴까요</h3>
+    <div class="card card-rows">
       <label class="row">
-        <div class="row-text"><b>정규시즌</b><span>3월~10월 페넌트레이스</span></div>
+        <span class="row-text"><b>정규시즌</b><span>3월~10월 페넌트레이스</span></span>
         <span class="sw"><input type="checkbox" data-key="regular" disabled /><i></i></span>
       </label>
       <label class="row">
-        <div class="row-text"><b>포스트시즌</b><span>와일드카드 · 준PO · PO · 한국시리즈</span></div>
+        <span class="row-text"><b>포스트시즌</b><span>와일드카드 · 준PO · PO · 한국시리즈</span></span>
         <span class="sw"><input type="checkbox" data-key="postseason" disabled /><i></i></span>
       </label>
     </div>
-    <p class="footnote">설정은 이 기기에만 적용돼요.</p>
+    <p class="fineprint">설정은 이 기기에만 적용돼요.</p>
 
-    <div class="card card-hint" id="ios-hint" hidden>
+    <div class="card card-dark" id="ios-hint" hidden>
       <h3>iPhone에서 알림 받기</h3>
       <p>
         iOS는 홈 화면에 추가한 앱에서만 알림을 지원해요.
-        Safari 공유 버튼 → <b>홈 화면에 추가</b>를 누른 뒤,
+        Safari 공유 버튼에서 <b>홈 화면에 추가</b>를 누른 뒤,
         홈 화면 아이콘으로 다시 열어 주세요.
       </p>
     </div>
   </section>
 </main>
+
+<footer class="footer">
+  <svg class="spike" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M12 1.5 L13.5 9.6 L21.2 6.2 L15.4 12 L21.2 17.8 L13.5 14.4 L12 22.5 L10.5 14.4 L2.8 17.8 L8.6 12 L2.8 6.2 L10.5 9.6 Z" />
+  </svg>
+  <p>경기 정보 출처 · 네이버 스포츠</p>
+</footer>
 
 <div id="toast" class="toast" hidden></div>
 
