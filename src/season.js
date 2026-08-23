@@ -76,6 +76,40 @@ export async function invalidatePlan(env, today) {
 }
 
 /**
+ * 앞으로의 경기 일정을 가져온다. 하루 한 번만 실제 조회한다.
+ *
+ * 경기 결과가 아니라 "언제 어디서 누구와 붙는지"만 쓰므로 캐시를 길게 잡아도 된다.
+ * 다만 우천 취소가 당일 반영되어야 하므로 오늘 경기는 포함해 6시간마다 갱신한다.
+ */
+export async function loadSchedule(env, today, days = 30) {
+  const key = `schedule:${today}:${days}`;
+  const cached = await getCache(env.DB, key);
+  if (cached) return cached;
+
+  const games = filterTeam(
+    await fetchGames(today, kstDateOffset(days)),
+    env.TEAM_CODE,
+  );
+
+  const schedule = games
+    .map((g) => ({
+      gameId: g.gameId,
+      gameDate: g.gameDate,
+      startAt: g.startAt,
+      stadium: g.stadium,
+      series: g.series,
+      isHome: g.homeCode === env.TEAM_CODE,
+      oppName: g.homeCode === env.TEAM_CODE ? g.awayName : g.homeName,
+      phase: g.phase,
+      cancelled: g.cancelled,
+    }))
+    .sort((a, b) => a.startAt.localeCompare(b.startAt));
+
+  await putCache(env.DB, key, schedule, 6 * HOUR);
+  return schedule;
+}
+
+/**
  * 순위표를 캐시와 함께 가져온다.
  *
  * 순위는 경기가 끝나야 바뀌므로 30분 캐시로 충분하다.

@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   -- 시리즈 범위: 정규시즌 / 포스트시즌을 따로 끌 수 있다.
   on_regular    INTEGER NOT NULL DEFAULT 1,
   on_postseason INTEGER NOT NULL DEFAULT 1,
+  -- 켜면 홈경기 알림만 받는다. 기본값은 꺼짐(전 경기 수신).
+  home_only     INTEGER NOT NULL DEFAULT 0,
   -- 테스트 알림 남용을 막기 위한 최근 발송 시각
   last_test_at  TEXT,
   created_at    TEXT NOT NULL,

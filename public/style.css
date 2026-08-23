@@ -386,6 +386,86 @@ main {
 .tl-kind { font-weight: 500; color: var(--ink); margin-right: var(--s-xs); }
 .card-dark .tl-kind { color: var(--on-dark); }
 
+/* ─────────── 일정 ─────────── */
+
+.legend {
+  display: flex;
+  gap: var(--s-md);
+  margin: 0 4px var(--s-sm);
+  font-size: 13px;
+  color: var(--muted);
+}
+.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+
+.swatch { width: 10px; height: 10px; border-radius: 3px; }
+.swatch.home { background: var(--primary); }
+.swatch.away { background: var(--hairline); }
+
+.sched-summary {
+  margin: 0 4px var(--s-md);
+  font-size: 14px;
+  color: var(--muted);
+}
+.sched-summary b { color: var(--ink); font-weight: 600; }
+.sched-summary b.hl { color: var(--primary-active); }
+
+.sched {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: var(--s-sm);
+  align-items: center;
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  padding: var(--s-sm) var(--s-md);
+  margin-bottom: var(--s-xs);
+}
+
+/*
+ * 홈경기 강조. 왼쪽에 골드 띠를 세우고 카드 배경을 크림 카드로 올린다.
+ * 원정은 캔버스 위 헤어라인 테두리로 두어 한 단계 뒤로 물러나게 한다.
+ */
+.sched.is-home {
+  background: var(--surface-card);
+  border-color: transparent;
+  border-left: 3px solid var(--primary);
+  padding-left: calc(var(--s-md) - 2px);
+}
+
+.sched.is-off { opacity: 0.55; }
+
+.sched-date { text-align: center; }
+
+.sched-md {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.sched-rel { display: block; font-size: 12px; color: var(--muted-soft); margin-top: 1px; }
+
+.sched-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* 홈/원정 배지 */
+.hb {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  flex: 0 0 auto;
+}
+.hb.home { background: var(--primary); color: var(--on-primary); }
+.hb.away { background: var(--hairline); color: var(--muted); }
+
+.sched-opp { font-size: 15px; font-weight: 500; color: var(--ink); }
+.sched.is-home .sched-opp { font-weight: 600; }
+
+.sched-sub { font-size: 13px; color: var(--muted-soft); margin-top: 2px; }
+
 /* ─────────── 알림 설정 ─────────── */
 
 .hero-title {

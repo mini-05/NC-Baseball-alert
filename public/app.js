@@ -54,7 +54,7 @@ const SERIES_SHORT = {
   korean_series: '한국시리즈',
 };
 
-const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason'];
+const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
 
 let teamCode = 'NC';
 let subscription = null; // 현재 기기의 PushSubscription
@@ -180,9 +180,12 @@ function renderGame(g) {
 
   const isLive = g.phase === 'live' && !g.cancelled;
 
-  const seriesTag = SERIES_SHORT[g.series]
-    ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
-    : null;
+  // 시리즈 태그는 포스트시즌 경기에만 붙인다. 정규시즌 경기에는 표시하지 않는다.
+  // 판단 근거는 서버가 내려주는 isPostseason 이며, 라벨만 여기서 고른다.
+  const seriesTag =
+    g.isPostseason && SERIES_SHORT[g.series]
+      ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
+      : null;
 
   const team = (t, lost) =>
     el('div', { class: `team${t === mine ? ' mine' : ''}${lost ? ' lost' : ''}` },
@@ -271,6 +274,90 @@ async function loadStandings() {
     renderStandings(await api('/api/standings'));
   } catch {
     /* 순위는 부가 정보다. 실패해도 기록 화면은 그대로 쓴다. */
+  }
+}
+
+/* ─────────── 일정 ─────────── */
+
+/** 오늘부터 며칠 뒤인지. 0이면 오늘, 1이면 내일. */
+function daysFromToday(dateStr) {
+  const today = new Date();
+  // KST 기준 오늘 날짜를 구한다. (앱은 국내 사용자를 전제로 한다)
+  const kst = new Date(today.getTime() + 9 * 3600000).toISOString().slice(0, 10);
+  const [ay, am, ad] = kst.split('-').map(Number);
+  const [by, bm, bd] = dateStr.split('-').map(Number);
+  return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400000);
+}
+
+function relativeDay(dateStr) {
+  const d = daysFromToday(dateStr);
+  if (d === 0) return '오늘';
+  if (d === 1) return '내일';
+  if (d === 2) return '모레';
+  return null;
+}
+
+function renderScheduleItem(g) {
+  const rel = relativeDay(g.gameDate);
+
+  const seriesTag =
+    SERIES_SHORT[g.series] && g.series !== 'regular'
+      ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
+      : null;
+
+  return el('article', { class: `sched${g.isHome ? ' is-home' : ''}${g.cancelled ? ' is-off' : ''}` },
+    el('div', { class: 'sched-date' },
+      el('span', { class: 'sched-md', text: g.gameDate.slice(5).replace('-', '.') }),
+      el('span', { class: 'sched-rel', text: rel ?? formatDay(g.gameDate).split(' ')[2] }),
+    ),
+    el('div', { class: 'sched-main' },
+      el('div', { class: 'sched-top' },
+        // 홈/원정을 가장 먼저 읽히게 둔다. 홈경기는 골드 배지.
+        el('span', { class: `hb ${g.isHome ? 'home' : 'away'}`, text: g.isHome ? '홈' : '원정' }),
+        seriesTag,
+        el('span', { class: 'sched-opp', text: g.oppName }),
+      ),
+      el('div', { class: 'sched-sub' },
+        g.cancelled ? '경기 취소' : `${formatStart(g.startAt)} · ${g.stadium ?? ''}`,
+      ),
+    ),
+  );
+}
+
+async function loadSchedule() {
+  const box = $('#schedule');
+  try {
+    const { games } = await api('/api/schedule?days=30');
+    clear(box);
+
+    if (!games.length) {
+      box.append(
+        el('p', { class: 'empty' }, '예정된 경기가 없어요.', el('br'), '비시즌이거나 일정이 아직 나오지 않았습니다.'),
+      );
+      return;
+    }
+
+    const homeCount = games.filter((g) => g.isHome).length;
+    box.append(
+      el('p', { class: 'sched-summary' },
+        el('b', { text: `${games.length}경기` }),
+        ` 예정 · 그중 홈경기 `,
+        el('b', { class: 'hl', text: `${homeCount}경기` }),
+      ),
+    );
+
+    const byDay = new Map();
+    for (const g of games) {
+      if (!byDay.has(g.gameDate)) byDay.set(g.gameDate, []);
+      byDay.get(g.gameDate).push(g);
+    }
+
+    for (const [date, list] of byDay) {
+      box.append(...list.map(renderScheduleItem));
+    }
+  } catch (err) {
+    clear(box);
+    box.append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
   }
 }
 
@@ -437,7 +524,7 @@ async function initPush() {
     /* 설정 조회 실패는 기본값으로 계속 진행 */
   }
 
-  await Promise.all([loadHistory(), loadStandings()]);
+  await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
 
   initPush().catch((err) => {
     setPushUi('error', `알림을 준비하지 못했어요: ${err.message}`);
@@ -449,6 +536,7 @@ async function initPush() {
     if (!document.hidden) {
       loadHistory();
       loadStandings();
+      loadSchedule();
     }
   });
 })();

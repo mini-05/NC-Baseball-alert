@@ -13,6 +13,7 @@ import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch } from '../src/kbo.js';
 import { isPollWindow } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
+import { subscribersFor } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -194,6 +195,10 @@ function testDetect() {
   const p = perspective(away(0, 1), T);
   check('원정 경기 관점', !p.isHome && p.oppName === '삼성' && p.teamScore === 1);
 
+  // ── 홈/원정 표시 — "홈경기만 받기" 설정이 이 값으로 걸러진다 ──
+  check('홈경기 이벤트는 isHome true', detectEvents(live(1, 0), live(2, 0), T)[0]?.isHome === true);
+  check('원정경기 이벤트는 isHome false', detectEvents(away(0, 0), away(0, 1), T)[0]?.isHome === false);
+
   // ── 포스트시즌 ──
   const ks = (over) => normalizeGame({
     gameId: '77771026NCLG02026', gameDate: '2026-10-26', gameDateTime: '2026-10-26T14:00:00',
@@ -318,6 +323,68 @@ function testSecurity() {
   check('Origin 없으면 통과', checkOrigin(req(null), url));
 }
 
+/* ══ 8. 홈경기 전용 알림 필터 ══ */
+
+/**
+ * D1 을 흉내 내는 최소 스텁. 실행된 SQL 과 바인딩을 기록하고,
+ * subscriptions 테이블을 자바스크립트에서 직접 필터링해 결과를 돌려준다.
+ * 이렇게 하면 실제 DB 없이도 "어떤 구독이 대상이 되는가"를 검증할 수 있다.
+ */
+function fakeDb(rows) {
+  const calls = [];
+  return {
+    calls,
+    prepare(sql) {
+      calls.push(sql);
+      return {
+        bind: () => this,
+        all: async () => {
+          // WHERE 절을 해석해 스텁 데이터에 적용한다.
+          const needsKind = /on_(\w+) = 1/.exec(sql)?.[1];
+          const needsScope = /on_(regular|postseason) = 1/.exec(sql)?.[1];
+          const homeOnlyExcluded = sql.includes('home_only = 0');
+
+          const results = rows.filter((r) => {
+            if (needsKind && !r[`on_${needsKind}`]) return false;
+            if (needsScope && !r[`on_${needsScope}`]) return false;
+            if (homeOnlyExcluded && r.home_only) return false;
+            return true;
+          });
+          return { results };
+        },
+      };
+    },
+  };
+}
+
+async function testHomeOnly() {
+  const rows = [
+    { endpoint: 'all', on_start: 1, on_regular: 1, on_postseason: 1, home_only: 0 },
+    { endpoint: 'homeonly', on_start: 1, on_regular: 1, on_postseason: 1, home_only: 1 },
+  ];
+
+  const names = (r) => r.map((x) => x.endpoint).sort().join(',');
+
+  const home = await subscribersFor(fakeDb(rows), 'start', 'regular', true);
+  check('홈경기 → 전체 수신자 + 홈경기전용 모두', names(home) === 'all,homeonly', names(home));
+
+  const awayGame = await subscribersFor(fakeDb(rows), 'start', 'regular', false);
+  check('원정경기 → 홈경기전용은 제외', names(awayGame) === 'all', names(awayGame));
+
+  // 원정 경기일 때만 home_only 조건이 SQL 에 붙어야 한다.
+  const dbHome = fakeDb(rows);
+  await subscribersFor(dbHome, 'start', 'regular', true);
+  check('홈경기 쿼리에는 home_only 조건 없음', !dbHome.calls[0].includes('home_only'));
+
+  const dbAway = fakeDb(rows);
+  await subscribersFor(dbAway, 'start', 'regular', false);
+  check('원정 쿼리에는 home_only = 0 조건 포함', dbAway.calls[0].includes('home_only = 0'));
+
+  // 알 수 없는 종류·범위는 조회 자체를 하지 않는다.
+  check('모르는 종류는 빈 배열', (await subscribersFor(fakeDb(rows), 'nope', 'regular', true)).length === 0);
+  check('모르는 범위는 빈 배열', (await subscribersFor(fakeDb(rows), 'start', 'nope', true)).length === 0);
+}
+
 /* ══ 실행 ══ */
 
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
@@ -327,6 +394,7 @@ console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[7] 보안 검증');              testSecurity();
+console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);

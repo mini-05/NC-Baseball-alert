@@ -67,8 +67,9 @@ export function detectEvents(prev, cur, teamCode) {
   const t = tag(cur.series);
   const scope = isPostseason(cur.series) ? 'postseason' : 'regular';
 
+  // isHome 은 "홈경기만 받기" 설정을 거르는 데 쓰인다.
   const push = (kind, dedupKey, title, body) =>
-    events.push({ kind, scope, series: cur.series, dedupKey, title, body });
+    events.push({ kind, scope, series: cur.series, isHome: p.isHome, dedupKey, title, body });
 
   // 1) 경기 취소 — 취소된 경기는 시작/종료 알림을 낼 이유가 없으므로 여기서 끝낸다.
   if (!prev.cancelled && cur.cancelled) {

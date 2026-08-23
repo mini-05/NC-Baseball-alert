@@ -1,6 +1,7 @@
 /** D1 접근을 한곳에 모은다. 나머지 코드는 SQL 을 직접 쓰지 않는다. */
 
 import { KIND_COLUMN, SCOPE_COLUMN } from './detect.js';
+import { isPostseason } from './kbo.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -162,6 +163,9 @@ export async function listHistory(db, { limitDays = 30 } = {}) {
     awayScore: r.away_score,
     phase: r.phase,
     series: r.series,
+    // 시리즈 태그(한국시리즈·준PO 등)를 붙일지 여부를 서버가 명시적으로 정한다.
+    // 정규시즌 경기에는 태그가 붙지 않는다.
+    isPostseason: isPostseason(r.series),
     statusInfo: r.status_info,
     cancelled: Boolean(r.cancelled),
     events: byGame.get(r.game_id) ?? [],
@@ -202,7 +206,7 @@ export async function getSubscription(db, endpoint) {
 export async function getSettings(db, endpoint) {
   const row = await db
     .prepare(
-      `SELECT on_start, on_cancel, on_score, on_end, on_regular, on_postseason
+      `SELECT on_start, on_cancel, on_score, on_end, on_regular, on_postseason, home_only
        FROM subscriptions WHERE endpoint = ?`,
     )
     .bind(endpoint)
@@ -216,6 +220,7 @@ export async function getSettings(db, endpoint) {
     end: Boolean(row.on_end),
     regular: Boolean(row.on_regular),
     postseason: Boolean(row.on_postseason),
+    homeOnly: Boolean(row.home_only),
   };
 }
 
@@ -225,7 +230,7 @@ export async function getSettings(db, endpoint) {
  * 클라이언트 입력이 SQL 식별자로 흘러 들어갈 경로가 없다.
  */
 export async function updateSettings(db, endpoint, settings) {
-  const columns = { ...KIND_COLUMN, ...SCOPE_COLUMN };
+  const columns = { ...KIND_COLUMN, ...SCOPE_COLUMN, homeOnly: 'home_only' };
   const sets = [];
   const values = [];
 
@@ -256,18 +261,28 @@ export async function touchTestSent(db, endpoint) {
 }
 
 /**
- * 해당 종류와 시리즈 범위를 모두 켜 둔 구독만 가져온다.
- * 컬럼명은 화이트리스트에서만 나온다.
+ * 이 이벤트를 받을 구독만 가져온다.
+ *
+ * 세 조건을 모두 만족해야 한다.
+ *   1. 해당 알림 종류를 켜 두었을 것
+ *   2. 해당 시리즈 범위(정규/포스트시즌)를 켜 두었을 것
+ *   3. "홈경기만 받기"를 켰다면 그 경기가 홈경기일 것
+ *
+ * 컬럼명은 KIND_COLUMN / SCOPE_COLUMN 화이트리스트에서만 나오므로
+ * 클라이언트 입력이 SQL 식별자 위치로 흘러갈 경로가 없다.
  */
-export async function subscribersFor(db, kind, scope) {
+export async function subscribersFor(db, kind, scope, isHome) {
   const kindColumn = KIND_COLUMN[kind];
   const scopeColumn = SCOPE_COLUMN[scope];
   if (!kindColumn || !scopeColumn) return [];
 
+  // 원정 경기면 home_only 를 켜 둔 구독을 제외한다. 홈경기면 모두 통과.
+  const homeClause = isHome ? '' : ' AND home_only = 0';
+
   const { results } = await db
     .prepare(
       `SELECT endpoint, p256dh, auth FROM subscriptions
-       WHERE ${kindColumn} = 1 AND ${scopeColumn} = 1`,
+       WHERE ${kindColumn} = 1 AND ${scopeColumn} = 1${homeClause}`,
     )
     .all();
 

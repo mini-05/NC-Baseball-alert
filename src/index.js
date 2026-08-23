@@ -7,7 +7,7 @@
 import { fetchGames, filterTeam, kstNow, kstDateOffset, postseasonOutlook } from './kbo.js';
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
-import { loadDailyPlan, isPollWindow, loadStandings, invalidatePlan } from './season.js';
+import { loadDailyPlan, isPollWindow, loadStandings, loadSchedule, invalidatePlan } from './season.js';
 import {
   loadStates, upsertStateStmt, insertEvent, listHistory,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
@@ -74,15 +74,19 @@ async function poll(env) {
   return { checked: games.length, fired };
 }
 
-/** 종류와 시리즈 범위를 모두 켜 둔 구독자에게 발송하고, 폐기된 구독은 정리한다. */
+/**
+ * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
+ * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
+ */
 async function broadcast(env, ev) {
-  const subs = await subscribersFor(env.DB, ev.kind, ev.scope);
+  const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) return;
 
   const payload = {
     kind: ev.kind,
     scope: ev.scope,
     series: ev.series,
+    isHome: ev.isHome,
     title: ev.title,
     body: ev.body,
     ts: Date.now(),
@@ -150,6 +154,13 @@ async function handleApi(request, env, url) {
   if (path === '/api/history' && method === 'GET') {
     const days = Math.min(Math.max(Number(url.searchParams.get('days')) || 30, 1), 120);
     return json({ games: await listHistory(env.DB, { limitDays: days }) });
+  }
+
+  /** 앞으로의 경기 일정. 홈경기 여부를 함께 내려 앱에서 강조 표시한다. */
+  if (path === '/api/schedule' && method === 'GET') {
+    const days = Math.min(Math.max(Number(url.searchParams.get('days')) || 30, 1), 90);
+    const { date } = kstNow();
+    return json({ games: await loadSchedule(env, date, days) });
   }
 
   /** 순위와 포스트시즌 진출 상황. 비시즌이면 standings 가 null 이다. */
@@ -221,7 +232,7 @@ async function handleApi(request, env, url) {
 
     // 알려진 키의 불린 값만 통과시킨다.
     const patch = {};
-    for (const name of [...KINDS, ...SCOPES]) {
+    for (const name of [...KINDS, ...SCOPES, 'homeOnly']) {
       if (typeof req.body[name] === 'boolean') patch[name] = req.body[name];
     }
     if (Object.keys(patch).length === 0) {

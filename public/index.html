@@ -60,6 +60,7 @@
 
   <nav class="tabs" role="tablist">
     <button class="tab is-active" data-tab="history" role="tab">기록</button>
+    <button class="tab" data-tab="schedule" role="tab">일정</button>
     <button class="tab" data-tab="settings" role="tab">알림</button>
   </nav>
 </header>
@@ -69,6 +70,18 @@
   <section id="panel-history" class="panel is-active">
     <div id="standings"></div>
     <div id="history">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </section>
+
+  <!-- ─────────── 일정 ─────────── -->
+  <section id="panel-schedule" class="panel">
+    <div class="legend">
+      <span class="legend-item"><i class="swatch home"></i>홈경기 (창원)</span>
+      <span class="legend-item"><i class="swatch away"></i>원정</span>
+    </div>
+    <div id="schedule">
       <div class="skeleton"></div>
       <div class="skeleton"></div>
     </div>
@@ -113,6 +126,10 @@
       <label class="row">
         <span class="row-text"><b>포스트시즌</b><span>와일드카드 · 준PO · PO · 한국시리즈</span></span>
         <span class="sw"><input type="checkbox" data-key="postseason" disabled /><i></i></span>
+      </label>
+      <label class="row">
+        <span class="row-text"><b>홈경기만</b><span>켜면 창원 홈경기 알림만 받아요</span></span>
+        <span class="sw"><input type="checkbox" data-key="homeOnly" disabled /><i></i></span>
       </label>
     </div>
     <p class="fineprint">설정은 이 기기에만 적용돼요.</p>
