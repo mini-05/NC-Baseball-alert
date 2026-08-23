@@ -1,0 +1,97 @@
+/**
+ * 시즌 게이팅 — 경기가 없는 날·시간에는 외부 API를 아예 호출하지 않는다.
+ *
+ * 크론은 1분마다 깨어나지만, 실제로 감시가 필요한 시간은 하루에 3~4시간뿐이고
+ * 비시즌(11월~3월)에는 아예 없다. 그래서 "오늘 우리 팀 경기 목록"을 하루 한 번만
+ * 조회해 캐시하고, 그 계획에 따라 폴링 여부를 정한다.
+ *
+ * 결과적으로 비시즌 외부 호출은 하루 1회, 시즌 중에도 경기 시간대에만 발생한다.
+ */
+
+import { fetchGames, filterTeam, fetchStandings, kstDateOffset, kstIsoToEpoch } from './kbo.js';
+import { getCache, putCache } from './db.js';
+
+/** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
+const PRE_START_MIN = 90;
+
+/** 경기 시작 후 몇 시간까지 감시할지. 연장·중단을 포함해도 이 안에서 끝난다. */
+const POST_START_HOURS = 7;
+
+const MIN = 60 * 1000;
+const HOUR = 60 * MIN;
+
+/**
+ * 오늘(과 어제) 우리 팀 경기 계획을 가져온다. 하루 한 번만 실제 조회한다.
+ *
+ * 어제를 포함하는 이유: 자정을 넘겨 끝나는 경기의 마지막 상태 전이를 놓치지 않기 위함.
+ */
+export async function loadDailyPlan(env, today) {
+  const key = `plan:${today}`;
+  const cached = await getCache(env.DB, key);
+  if (cached) return cached;
+
+  const games = filterTeam(
+    await fetchGames(kstDateOffset(-1), today),
+    env.TEAM_CODE,
+  );
+
+  const plan = {
+    date: today,
+    games: games.map((g) => ({
+      gameId: g.gameId,
+      startAt: g.startAt,
+      series: g.series,
+      phase: g.phase,
+    })),
+    fetchedAt: new Date().toISOString(),
+  };
+
+  // 계획은 당일에만 유효하다. 자정이 지나면 새로 만든다.
+  await putCache(env.DB, key, plan, 12 * HOUR);
+  return plan;
+}
+
+/**
+ * 지금이 감시가 필요한 시간대인지 판단한다.
+ *
+ * 이미 끝난(result) 경기만 있는 계획이라면 더 볼 이유가 없다. 다만 계획은
+ * 하루 한 번만 갱신되므로 phase 는 오래된 값일 수 있다. 따라서 phase 로
+ * 건너뛰지 않고 시간 창만으로 판단한다.
+ */
+export function isPollWindow(plan, now = Date.now()) {
+  for (const g of plan.games) {
+    const start = kstIsoToEpoch(g.startAt);
+    if (start == null) return true; // 시각을 못 읽으면 안전하게 감시한다.
+
+    if (now >= start - PRE_START_MIN * MIN && now <= start + POST_START_HOURS * HOUR) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 계획을 강제로 다시 만든다. (경기가 추가·변경됐을 때 쓰는 관리용) */
+export async function invalidatePlan(env, today) {
+  await putCache(env.DB, `plan:${today}`, null, -1);
+}
+
+/**
+ * 순위표를 캐시와 함께 가져온다.
+ *
+ * 순위는 경기가 끝나야 바뀌므로 30분 캐시로 충분하다.
+ * 비시즌에는 해당 연도 데이터가 없을 수 있어 실패를 조용히 삼키고 null 을 준다.
+ */
+export async function loadStandings(env, year) {
+  const key = `standings:${year}`;
+  const cached = await getCache(env.DB, key);
+  if (cached) return cached;
+
+  try {
+    const standings = await fetchStandings(year);
+    await putCache(env.DB, key, standings, 30 * MIN);
+    return standings;
+  } catch (err) {
+    console.error('standings fetch failed', err.message);
+    return null;
+  }
+}

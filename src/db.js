@@ -1,10 +1,42 @@
 /** D1 접근을 한곳에 모은다. 나머지 코드는 SQL 을 직접 쓰지 않는다. */
 
-import { KIND_COLUMN } from './detect.js';
+import { KIND_COLUMN, SCOPE_COLUMN } from './detect.js';
 
 const nowIso = () => new Date().toISOString();
 
-/* ---------- 경기 스냅샷 ---------- */
+/* ─────────────── 캐시 ─────────────── */
+
+/** 만료되지 않은 캐시 값을 돌려준다. 없거나 만료됐으면 null. */
+export async function getCache(db, key) {
+  const row = await db
+    .prepare('SELECT value, expires_at FROM cache WHERE key = ?')
+    .bind(key)
+    .first();
+
+  if (!row) return null;
+  if (Date.parse(row.expires_at) <= Date.now()) return null;
+
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return null; // 저장된 값이 깨졌으면 캐시 미스로 취급한다.
+  }
+}
+
+/** ttlMs 가 0 이하이면 즉시 만료된 값으로 넣어 사실상 무효화한다. */
+export async function putCache(db, key, value, ttlMs) {
+  const expires = new Date(Date.now() + ttlMs).toISOString();
+  await db
+    .prepare(
+      `INSERT INTO cache (key, value, expires_at, updated_at) VALUES (?,?,?,?)
+       ON CONFLICT(key) DO UPDATE SET
+         value=excluded.value, expires_at=excluded.expires_at, updated_at=excluded.updated_at`,
+    )
+    .bind(key, JSON.stringify(value ?? null), expires, nowIso())
+    .run();
+}
+
+/* ─────────────── 경기 스냅샷 ─────────────── */
 
 /** 주어진 gameId 들의 직전 스냅샷을 Map<gameId, snapshot> 으로 반환한다. */
 export async function loadStates(db, gameIds) {
@@ -26,6 +58,7 @@ export async function loadStates(db, gameIds) {
         homeScore: r.home_score,
         awayScore: r.away_score,
         phase: r.phase,
+        series: r.series,
         cancelled: Boolean(r.cancelled),
         suspended: Boolean(r.suspended),
       },
@@ -39,12 +72,13 @@ export function upsertStateStmt(db, g) {
     .prepare(
       `INSERT INTO game_state
          (game_id, game_date, start_at, stadium, home_code, home_name, away_code, away_name,
-          home_score, away_score, phase, status_code, status_info, cancelled, suspended, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          home_score, away_score, phase, series, status_code, status_info, cancelled, suspended, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(game_id) DO UPDATE SET
          home_score=excluded.home_score,
          away_score=excluded.away_score,
          phase=excluded.phase,
+         series=excluded.series,
          status_code=excluded.status_code,
          status_info=excluded.status_info,
          cancelled=excluded.cancelled,
@@ -54,26 +88,16 @@ export function upsertStateStmt(db, g) {
          updated_at=excluded.updated_at`,
     )
     .bind(
-      g.gameId,
-      g.gameDate,
-      g.startAt,
-      g.stadium,
-      g.homeCode,
-      g.homeName,
-      g.awayCode,
-      g.awayName,
-      g.homeScore,
-      g.awayScore,
-      g.phase,
-      g.statusCode,
-      g.statusInfo,
-      g.cancelled ? 1 : 0,
-      g.suspended ? 1 : 0,
+      g.gameId, g.gameDate, g.startAt, g.stadium,
+      g.homeCode, g.homeName, g.awayCode, g.awayName,
+      g.homeScore, g.awayScore, g.phase, g.series,
+      g.statusCode, g.statusInfo,
+      g.cancelled ? 1 : 0, g.suspended ? 1 : 0,
       nowIso(),
     );
 }
 
-/* ---------- 이벤트 ---------- */
+/* ─────────────── 이벤트 ─────────────── */
 
 /**
  * 이벤트를 기록한다. dedup_key 가 UNIQUE 이므로 같은 전이는 두 번 들어가지 않는다.
@@ -83,19 +107,12 @@ export async function insertEvent(db, game, ev) {
   const res = await db
     .prepare(
       `INSERT OR IGNORE INTO events
-         (game_id, game_date, kind, dedup_key, title, body, home_score, away_score, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+         (game_id, game_date, kind, series, dedup_key, title, body, home_score, away_score, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
-      game.gameId,
-      game.gameDate,
-      ev.kind,
-      ev.dedupKey,
-      ev.title,
-      ev.body,
-      game.homeScore,
-      game.awayScore,
-      nowIso(),
+      game.gameId, game.gameDate, ev.kind, ev.series, ev.dedupKey,
+      ev.title, ev.body, game.homeScore, game.awayScore, nowIso(),
     )
     .run();
 
@@ -104,24 +121,19 @@ export async function insertEvent(db, game, ev) {
 
 /** 최근 경기 기록 + 각 경기에 딸린 이벤트를 일자 내림차순으로 반환한다. */
 export async function listHistory(db, { limitDays = 30 } = {}) {
+  const dateFilter = `game_date IN (
+    SELECT DISTINCT game_date FROM game_state ORDER BY game_date DESC LIMIT ?
+  )`;
+
   const games = await db
-    .prepare(
-      `SELECT * FROM game_state
-       WHERE game_date IN (
-         SELECT DISTINCT game_date FROM game_state ORDER BY game_date DESC LIMIT ?
-       )
-       ORDER BY game_date DESC, start_at DESC`,
-    )
+    .prepare(`SELECT * FROM game_state WHERE ${dateFilter} ORDER BY game_date DESC, start_at DESC`)
     .bind(limitDays)
     .all();
 
   const events = await db
     .prepare(
-      `SELECT game_id, kind, title, body, created_at FROM events
-       WHERE game_date IN (
-         SELECT DISTINCT game_date FROM game_state ORDER BY game_date DESC LIMIT ?
-       )
-       ORDER BY id ASC`,
+      `SELECT game_id, kind, series, title, body, created_at FROM events
+       WHERE ${dateFilter} ORDER BY id ASC`,
     )
     .bind(limitDays)
     .all();
@@ -149,13 +161,19 @@ export async function listHistory(db, { limitDays = 30 } = {}) {
     homeScore: r.home_score,
     awayScore: r.away_score,
     phase: r.phase,
+    series: r.series,
     statusInfo: r.status_info,
     cancelled: Boolean(r.cancelled),
     events: byGame.get(r.game_id) ?? [],
   }));
 }
 
-/* ---------- 구독 ---------- */
+/* ─────────────── 구독 ─────────────── */
+
+export async function countSubscriptions(db) {
+  const row = await db.prepare('SELECT COUNT(*) AS n FROM subscriptions').first();
+  return row?.n ?? 0;
+}
 
 export async function saveSubscription(db, sub) {
   const ts = nowIso();
@@ -174,9 +192,19 @@ export async function deleteSubscription(db, endpoint) {
   await db.prepare('DELETE FROM subscriptions WHERE endpoint = ?').bind(endpoint).run();
 }
 
+export async function getSubscription(db, endpoint) {
+  return db
+    .prepare('SELECT endpoint, p256dh, auth, last_test_at FROM subscriptions WHERE endpoint = ?')
+    .bind(endpoint)
+    .first();
+}
+
 export async function getSettings(db, endpoint) {
   const row = await db
-    .prepare('SELECT on_start, on_cancel, on_score, on_end FROM subscriptions WHERE endpoint = ?')
+    .prepare(
+      `SELECT on_start, on_cancel, on_score, on_end, on_regular, on_postseason
+       FROM subscriptions WHERE endpoint = ?`,
+    )
     .bind(endpoint)
     .first();
 
@@ -186,18 +214,25 @@ export async function getSettings(db, endpoint) {
     cancel: Boolean(row.on_cancel),
     score: Boolean(row.on_score),
     end: Boolean(row.on_end),
+    regular: Boolean(row.on_regular),
+    postseason: Boolean(row.on_postseason),
   };
 }
 
-/** 전달된 종류만 갱신한다. 알 수 없는 키는 무시해 SQL 주입 여지를 없앤다. */
+/**
+ * 전달된 항목만 갱신한다.
+ * 컬럼명은 KIND_COLUMN / SCOPE_COLUMN 화이트리스트에서만 나오므로,
+ * 클라이언트 입력이 SQL 식별자로 흘러 들어갈 경로가 없다.
+ */
 export async function updateSettings(db, endpoint, settings) {
+  const columns = { ...KIND_COLUMN, ...SCOPE_COLUMN };
   const sets = [];
   const values = [];
 
-  for (const [kind, column] of Object.entries(KIND_COLUMN)) {
-    if (kind in settings) {
+  for (const [name, column] of Object.entries(columns)) {
+    if (name in settings) {
       sets.push(`${column} = ?`);
-      values.push(settings[kind] ? 1 : 0);
+      values.push(settings[name] ? 1 : 0);
     }
   }
   if (sets.length === 0) return false;
@@ -213,13 +248,27 @@ export async function updateSettings(db, endpoint, settings) {
   return (res.meta?.changes ?? 0) > 0;
 }
 
-/** 해당 종류의 알림을 켜 둔 구독만 가져온다. */
-export async function subscribersFor(db, kind) {
-  const column = KIND_COLUMN[kind];
-  if (!column) return [];
+export async function touchTestSent(db, endpoint) {
+  await db
+    .prepare('UPDATE subscriptions SET last_test_at = ? WHERE endpoint = ?')
+    .bind(nowIso(), endpoint)
+    .run();
+}
+
+/**
+ * 해당 종류와 시리즈 범위를 모두 켜 둔 구독만 가져온다.
+ * 컬럼명은 화이트리스트에서만 나온다.
+ */
+export async function subscribersFor(db, kind, scope) {
+  const kindColumn = KIND_COLUMN[kind];
+  const scopeColumn = SCOPE_COLUMN[scope];
+  if (!kindColumn || !scopeColumn) return [];
 
   const { results } = await db
-    .prepare(`SELECT endpoint, p256dh, auth FROM subscriptions WHERE ${column} = 1`)
+    .prepare(
+      `SELECT endpoint, p256dh, auth FROM subscriptions
+       WHERE ${kindColumn} = 1 AND ${scopeColumn} = 1`,
+    )
     .all();
 
   return results ?? [];

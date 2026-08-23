@@ -6,8 +6,8 @@ compatibility_date = "2025-01-01"
 directory = "./public"
 binding = "ASSETS"
 
-# 1분마다 경기 상태를 확인한다.
-# KBO 경기는 14~23시(KST)에만 열리므로 핸들러 앞단에서 시간대를 걸러 낭비를 줄인다.
+# 1분마다 깨어나지만, 핸들러가 "오늘 우리 팀 경기 계획"을 먼저 보고
+# 경기가 없는 날·시간이면 외부 API를 호출하지 않고 즉시 끝낸다. (src/season.js)
 [triggers]
 crons = ["* * * * *"]
 
@@ -24,5 +24,13 @@ TEAM_CODE = "NC"
 VAPID_PUBLIC_KEY = "REPLACE_WITH_YOUR_VAPID_PUBLIC_KEY"
 VAPID_SUBJECT = "mailto:you@example.com"
 
-# VAPID_PRIVATE_KEY 는 vars 가 아니라 시크릿으로 넣는다:
-#   wrangler secret put VAPID_PRIVATE_KEY
+# 푸시 엔드포인트 호스트 허용 목록에 추가할 도메인 (쉼표 구분).
+# 기본 목록(src/security.js)에 없는 브라우저가 등장했을 때 코드 수정 없이 풀어 주는 용도.
+# 로그에 "허용되지 않은 푸시 호스트"가 찍히면 그 호스트를 여기에 넣는다.
+EXTRA_PUSH_HOSTS = ""
+
+# 아래 두 값은 vars 가 아니라 시크릿으로 넣는다. 저장소에 커밋하지 말 것.
+#   wrangler secret put VAPID_PRIVATE_KEY   # 푸시 서명용 개인키 (필수)
+#   wrangler secret put ADMIN_TOKEN         # /api/admin/* 접근용 (선택)
+#
+# ADMIN_TOKEN 을 설정하지 않으면 관리자 엔드포인트는 항상 401 로 잠긴다(기본 거부).

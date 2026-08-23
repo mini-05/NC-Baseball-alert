@@ -3,12 +3,62 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+/**
+ * DOM 생성 헬퍼.
+ *
+ * 문자열을 innerHTML 로 조립하지 않는 이유: 경기 데이터는 외부 API에서 온다.
+ * 팀명·구장·상황("7회말") 같은 값이 언제든 태그처럼 생긴 문자열이 될 수 있는데,
+ * 아래처럼 textContent 로만 넣으면 XSS 가 성립할 여지 자체가 없어진다.
+ */
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+
+  for (const [key, value] of Object.entries(props)) {
+    if (value == null || value === false) continue;
+    if (key === 'class') node.className = value;
+    else if (key === 'text') node.textContent = value;
+    else node.setAttribute(key, value);
+  }
+
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    node.append(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+const clear = (node) => { while (node.firstChild) node.firstChild.remove(); };
+
+/**
+ * 받침 유무에 맞는 조사를 붙인다. ("두산을" / "롯데를")
+ *
+ * KBO 팀명 중 영문 표기(KT·LG·NC·SSG·KIA)는 한국어 발음이 모두 모음으로 끝나므로
+ * (케이티, 엘지, 엔씨, 에스에스지, 기아) 받침 없음으로 처리하면 맞다.
+ */
+function withParticle(word, hasJong, noJong) {
+  const text = String(word ?? '').trim();
+  if (!text) return text;
+
+  const code = text.charCodeAt(text.length - 1);
+  const isHangul = code >= 0xac00 && code <= 0xd7a3;
+  return text + (isHangul && (code - 0xac00) % 28 !== 0 ? hasJong : noJong);
+}
+
 const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', end: '종료', test: '테스트' };
+const SERIES_SHORT = {
+  tiebreaker: '순위결정전',
+  wildcard: '와일드카드',
+  semi_playoff: '준PO',
+  playoff: 'PO',
+  korean_series: '한국시리즈',
+};
+
+const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason'];
 
 let teamCode = 'NC';
 let subscription = null; // 현재 기기의 PushSubscription
 
-/* ---------- 공통 ---------- */
+/* ─────────── 공통 ─────────── */
 
 async function api(path, options) {
   const res = await fetch(path, {
@@ -16,136 +66,192 @@ async function api(path, options) {
     ...options,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(data.error || `요청 실패 (${res.status})`);
   return data;
 }
 
 let toastTimer;
 function toast(message) {
-  const el = $('#toast');
-  el.textContent = message;
-  el.hidden = false;
+  const box = $('#toast');
+  box.textContent = message;
+  box.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    el.hidden = true;
-  }, 2600);
+  toastTimer = setTimeout(() => { box.hidden = true; }, 2800);
 }
 
-/** VAPID 공개키(base64url)를 pushManager 가 요구하는 Uint8Array 로 변환한다. */
 function urlBase64ToUint8Array(base64) {
   const padded = (base64 + '='.repeat((4 - (base64.length % 4)) % 4))
-    .replace(/-/g, '+')
-    .replace(/_/g, '/');
+    .replace(/-/g, '+').replace(/_/g, '/');
   const raw = atob(padded);
   const out = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
   return out;
 }
 
-/** PushSubscription 을 서버로 보낼 평범한 객체로 바꾼다. */
 function serialize(sub) {
-  const json = sub.toJSON();
-  return { endpoint: sub.endpoint, keys: { p256dh: json.keys.p256dh, auth: json.keys.auth } };
+  const j = sub.toJSON();
+  return { endpoint: sub.endpoint, keys: { p256dh: j.keys.p256dh, auth: j.keys.auth } };
 }
 
-/* ---------- 탭 ---------- */
+/* ─────────── 탭 ─────────── */
 
-$$('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    $$('.tab').forEach((t) => t.classList.toggle('is-active', t === tab));
-    $$('.panel').forEach((p) =>
-      p.classList.toggle('is-active', p.id === `panel-${tab.dataset.tab}`),
-    );
+const segmented = $('.segmented');
+
+$$('.seg').forEach((seg, index) => {
+  seg.addEventListener('click', () => {
+    segmented.dataset.index = String(index);
+    $$('.seg').forEach((s) => s.classList.toggle('is-active', s === seg));
+    $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${seg.dataset.tab}`));
   });
 });
 
-/* ---------- 기록 화면 ---------- */
+/* ─────────── 순위 · 포스트시즌 ─────────── */
+
+function renderStandings({ standings, outlook }) {
+  const slot = $('#standings');
+  clear(slot);
+  if (!standings || !outlook) return; // 비시즌이면 카드를 아예 띄우지 않는다.
+
+  const { team, rank, cutoff, cutoffTeam, remaining, gamesBehindLine, tierTitle, status } = outlook;
+
+  const pill =
+    status === 'in'
+      ? el('span', { class: 'ps-pill in', text: tierTitle ?? '포스트시즌 진출권' })
+      : status === 'eliminated'
+        ? el('span', { class: 'ps-pill out', text: '포스트시즌 탈락 확정' })
+        : el('span', { class: 'ps-pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
+
+  const lineName = cutoffTeam?.name ?? `${cutoff}위`;
+
+  let note;
+  if (status === 'in') {
+    note = `현재 순위를 지키면 ${tierTitle ?? '포스트시즌 진출'}이에요. 잔여 ${remaining}경기.`;
+  } else if (status === 'eliminated') {
+    note = `남은 ${remaining}경기를 모두 이겨도 ${lineName}의 현재 승수에 미치지 못해요.`;
+  } else {
+    note = `잔여 ${remaining}경기. ${withParticle(lineName, '을', '를')} 넘어야 진출권에 들어요.`;
+  }
+
+  // 진출권까지의 거리를 시각화. 승차가 클수록 막대가 짧아진다.
+  const progress = status === 'in' ? 1 : Math.max(0, 1 - gamesBehindLine / Math.max(remaining, 1));
+
+  slot.append(
+    el('div', { class: 'card rank-card' },
+      el('div', { class: 'rank-head' },
+        el('span', { class: 'rank-num', text: String(rank) }),
+        el('span', { class: 'rank-unit', text: '위' }),
+        el('span', {
+          class: 'rank-record',
+          text: `${team.wins}승 ${team.draws}무 ${team.losses}패 · ${team.pct.toFixed(3)}`,
+        }),
+      ),
+      pill,
+      el('p', { class: 'rank-note', text: note }),
+      status !== 'eliminated' &&
+        el('div', { class: 'gap-bar' }, el('i', { style: `width:${Math.round(progress * 100)}%` })),
+    ),
+  );
+}
+
+/* ─────────── 경기 기록 ─────────── */
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
 
 function formatDay(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
   const wd = WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
-  return `${m}월 ${d}일 (${wd})`;
+  return `${m}월 ${d}일 ${wd}요일`;
 }
 
-function formatTime(iso) {
-  // 서버가 저장한 KST 로컬시각 문자열. 브라우저 시간대 변환 없이 그대로 읽는다.
+/** 서버가 저장한 KST 로컬시각 문자열. 시간대 변환 없이 그대로 읽는다. */
+function formatStart(iso) {
   const m = /T(\d{2}):(\d{2})/.exec(iso || '');
-  return m ? `${m[1]}:${m[2]}` : '';
+  if (!m) return '';
+  const h = Number(m[1]);
+  return `${h < 12 ? '오전' : '오후'} ${h % 12 || 12}:${m[2]}`;
 }
 
 function renderGame(g) {
   const isHome = g.homeCode === teamCode;
-  const teamScore = isHome ? g.homeScore : g.awayScore;
-  const oppScore = isHome ? g.awayScore : g.homeScore;
-  const teamName = isHome ? g.homeName : g.awayName;
-  const oppName = isHome ? g.awayName : g.homeName;
+  const mine = { name: isHome ? g.homeName : g.awayName, score: isHome ? g.homeScore : g.awayScore };
+  const opp = { name: isHome ? g.awayName : g.homeName, score: isHome ? g.awayScore : g.homeScore };
 
   const done = g.phase === 'result' && !g.cancelled;
-  const diff = teamScore - oppScore;
+  const diff = mine.score - opp.score;
 
-  const stateLabel = g.cancelled
+  const status = g.cancelled
     ? '취소'
     : g.phase === 'live'
-      ? g.statusInfo || '경기 중'
+      ? (g.statusInfo || '경기 중')
       : g.phase === 'result'
         ? '종료'
-        : formatTime(g.startAt);
-  const stateClass = g.cancelled ? '' : g.phase === 'live' ? 'live' : g.phase === 'before' ? 'before' : '';
+        : formatStart(g.startAt);
 
-  const teamSide = done ? (diff > 0 ? 'win' : diff < 0 ? 'lose' : '') : '';
-  const oppSide = done ? (diff < 0 ? 'win' : diff > 0 ? 'lose' : '') : '';
+  const seriesChip = SERIES_SHORT[g.series]
+    ? el('span', { class: 'chip post', text: SERIES_SHORT[g.series] })
+    : null;
+
+  const team = (t, lost) =>
+    el('div', { class: `team${t === mine ? ' mine' : ''}${lost ? ' lost' : ''}` },
+      el('div', { class: 'team-name', text: t.name }),
+      el('div', { class: 'team-score', text: g.cancelled ? '–' : String(t.score) }),
+    );
 
   const verdict = g.cancelled
-    ? '<p class="result-line cancel">경기 취소</p>'
+    ? el('div', { class: 'verdict off', text: '경기 취소' })
     : done
-      ? `<p class="result-line ${teamSide}">${diff > 0 ? '승리' : diff < 0 ? '패배' : '무승부'}</p>`
-      : '';
+      ? el('div', {
+          class: `verdict ${diff > 0 ? 'win' : diff < 0 ? 'lose' : 'draw'}`,
+          text: diff > 0 ? '승리' : diff < 0 ? '패배' : '무승부',
+        })
+      : null;
 
-  const events = g.events.length
-    ? `<ul class="evlog">${g.events
-        .map(
-          (e) =>
-            `<li><time>${new Date(e.createdAt).toLocaleTimeString('ko-KR', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })}</time><span class="k">${KIND_LABEL[e.kind] ?? e.kind}</span><span class="t">${
-              e.body
-            }</span></li>`,
-        )
-        .join('')}</ul>`
-    : '';
+  const timeline = g.events.length
+    ? el('ul', { class: 'timeline' },
+        g.events.map((e) =>
+          el('li', { class: 'tl-item' },
+            el('span', {
+              class: 'tl-time',
+              text: new Date(e.createdAt).toLocaleTimeString('ko-KR', {
+                hour: '2-digit', minute: '2-digit', hour12: false,
+              }),
+            }),
+            el('span', { class: 'tl-body' },
+              el('b', { class: 'tl-kind', text: KIND_LABEL[e.kind] ?? e.kind }),
+              e.body,
+            ),
+          ),
+        ),
+      )
+    : null;
 
-  return `
-    <article class="game">
-      <div class="game-top">
-        <span>${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}</span>
-        <span class="state ${stateClass}">${stateLabel}</span>
-      </div>
-      <div class="score">
-        <div class="side is-team ${teamSide}">
-          <div class="name">${teamName}</div>
-          <div class="pts">${g.cancelled ? '-' : teamScore}</div>
-        </div>
-        <div class="vs">:</div>
-        <div class="side ${oppSide}">
-          <div class="name">${oppName}</div>
-          <div class="pts">${g.cancelled ? '-' : oppScore}</div>
-        </div>
-      </div>
-      ${verdict}
-      ${events}
-    </article>`;
+  return el('article', { class: 'card game' },
+    el('div', { class: 'game-meta' },
+      seriesChip,
+      g.phase === 'live' && !g.cancelled ? el('span', { class: 'chip live', text: 'LIVE' }) : null,
+      el('span', { text: `${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}` }),
+      el('span', { class: 'game-status', text: status }),
+    ),
+    el('div', { class: 'matchup' },
+      team(mine, done && diff < 0),
+      el('span', { class: 'colon', text: ':' }),
+      team(opp, done && diff > 0),
+    ),
+    verdict,
+    timeline,
+  );
 }
 
 async function loadHistory() {
   const box = $('#history');
   try {
     const { games } = await api('/api/history?days=30');
+    clear(box);
+
     if (!games.length) {
-      box.innerHTML =
-        '<p class="empty">아직 기록이 없습니다.<br />경기가 열리면 여기에 쌓입니다.</p>';
+      box.append(
+        el('p', { class: 'empty' }, '아직 기록이 없어요.', el('br'), '경기가 열리면 여기에 쌓입니다.'),
+      );
       return;
     }
 
@@ -155,39 +261,48 @@ async function loadHistory() {
       byDay.get(g.gameDate).push(g);
     }
 
-    box.innerHTML = Array.from(byDay, ([date, list]) => `
-      <section class="day">
-        <h2 class="day-label">${formatDay(date)}</h2>
-        ${list.map(renderGame).join('')}
-      </section>`).join('');
+    for (const [date, list] of byDay) {
+      box.append(el('h2', { class: 'day-title', text: formatDay(date) }), ...list.map(renderGame));
+    }
   } catch (err) {
-    box.innerHTML = `<p class="empty">기록을 불러오지 못했습니다.<br />${err.message}</p>`;
+    clear(box);
+    box.append(el('p', { class: 'empty' }, '기록을 불러오지 못했어요.', el('br'), err.message));
   }
 }
 
-/* ---------- 알림 설정 ---------- */
+async function loadStandings() {
+  try {
+    renderStandings(await api('/api/standings'));
+  } catch {
+    /* 순위는 부가 정보다. 실패해도 기록 화면은 그대로 쓴다. */
+  }
+}
 
-function setPushState(on, label) {
-  const badge = $('#push-state');
-  badge.textContent = label;
-  badge.className = `badge ${on ? 'on' : 'off'}`;
+/* ─────────── 알림 설정 ─────────── */
 
-  $('#btn-toggle').textContent = on ? '알림 끄기' : '알림 켜기';
-  $('#btn-toggle').disabled = false;
-  $('#btn-test').hidden = !on;
-  $$('#switches input').forEach((i) => (i.disabled = !on));
+function setPushUi(state, desc) {
+  const dot = $('#push-dot');
+  dot.className = `dot ${state === 'on' ? 'on' : state === 'error' ? 'err' : ''}`;
+  $('#push-desc').textContent = desc;
+
+  const btn = $('#btn-toggle');
+  btn.textContent = state === 'on' ? '알림 끄기' : state === 'error' ? '다시 시도' : '알림 켜기';
+  btn.disabled = state === 'unsupported';
+  $('#btn-test').hidden = state !== 'on';
+  $$('.sw input').forEach((i) => { i.disabled = state !== 'on'; });
 }
 
 function applySettings(settings) {
-  $$('#switches input').forEach((input) => {
-    input.checked = Boolean(settings?.[input.dataset.kind]);
+  $$('.sw input').forEach((input) => {
+    input.checked = Boolean(settings?.[input.dataset.key]);
   });
 }
 
 async function enablePush() {
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') {
-    toast('알림 권한이 거부됐습니다. 브라우저 설정에서 허용해 주세요.');
+    toast('알림 권한이 거부됐어요. 브라우저 설정에서 허용해 주세요.');
+    setPushUi('off', '알림 권한이 필요해요.');
     return;
   }
 
@@ -208,29 +323,32 @@ async function enablePush() {
   });
 
   applySettings(settings);
-  setPushState(true, '켜짐');
-  toast('알림이 켜졌습니다.');
+  setPushUi('on', '이 기기로 알림을 보내드려요.');
+  toast('알림이 켜졌어요');
 }
 
 async function disablePush() {
   if (!subscription) return;
 
-  const endpoint = subscription.endpoint;
+  const { endpoint } = subscription;
   await subscription.unsubscribe().catch(() => {});
   await api('/api/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) });
 
   subscription = null;
-  setPushState(false, '꺼짐');
-  toast('알림이 꺼졌습니다.');
+  setPushUi('off', '이 기기에서 알림을 받으려면 켜 주세요.');
+  toast('알림이 꺼졌어요');
 }
 
 $('#btn-toggle').addEventListener('click', async () => {
-  $('#btn-toggle').disabled = true;
+  const btn = $('#btn-toggle');
+  btn.disabled = true;
   try {
     subscription ? await disablePush() : await enablePush();
   } catch (err) {
-    toast(`실패: ${err.message}`);
-    $('#btn-toggle').disabled = false;
+    toast(err.message);
+    setPushUi('error', `알림을 준비하지 못했어요: ${err.message}`);
+  } finally {
+    if (btn.textContent !== '확인 중') btn.disabled = false;
   }
 });
 
@@ -241,48 +359,48 @@ $('#btn-test').addEventListener('click', async () => {
       method: 'POST',
       body: JSON.stringify({ endpoint: subscription.endpoint }),
     });
-    toast('테스트 알림을 보냈습니다.');
+    toast('테스트 알림을 보냈어요');
   } catch (err) {
-    toast(`실패: ${err.message}`);
+    toast(err.message);
   }
 });
 
-$$('#switches input').forEach((input) => {
+$$('.sw input').forEach((input) => {
   input.addEventListener('change', async () => {
     if (!subscription) return;
+    const key = input.dataset.key;
+    if (!SETTING_KEYS.includes(key)) return;
+
     try {
       await api('/api/settings', {
         method: 'POST',
-        body: JSON.stringify({
-          endpoint: subscription.endpoint,
-          [input.dataset.kind]: input.checked,
-        }),
+        body: JSON.stringify({ endpoint: subscription.endpoint, [key]: input.checked }),
       });
     } catch (err) {
       input.checked = !input.checked; // 서버 반영 실패 시 UI 를 되돌린다.
-      toast(`설정 저장 실패: ${err.message}`);
+      toast(err.message);
     }
   });
 });
 
-/* ---------- 시작 ---------- */
+/* ─────────── 시작 ─────────── */
 
 async function initPush() {
-  const supported = 'serviceWorker' in navigator && 'PushManager' in window;
-
-  // iOS 는 홈 화면에 추가한 상태에서만 PushManager 를 노출한다.
   const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
-  const standalone = window.navigator.standalone === true ||
+  const standalone =
+    window.navigator.standalone === true ||
     window.matchMedia('(display-mode: standalone)').matches;
+
   if (isIos && !standalone) $('#ios-hint').hidden = false;
 
-  if (!supported) {
-    $('#push-state').textContent = '지원 안 함';
-    $('#push-state').className = 'badge off';
-    $('#push-desc').textContent = isIos
-      ? '홈 화면에 추가한 뒤 다시 열면 알림을 켤 수 있습니다.'
-      : '이 브라우저는 웹 푸시를 지원하지 않습니다.';
-    $('#btn-toggle').textContent = '사용 불가';
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    setPushUi(
+      'unsupported',
+      isIos
+        ? '홈 화면에 추가한 뒤 다시 열면 알림을 켤 수 있어요.'
+        : '이 브라우저는 웹 푸시를 지원하지 않아요.',
+    );
+    $('#btn-toggle').textContent = '사용할 수 없음';
     return;
   }
 
@@ -290,25 +408,26 @@ async function initPush() {
   const reg = await navigator.serviceWorker.ready;
   const existing = await reg.pushManager.getSubscription();
 
-  if (existing && Notification.permission === 'granted') {
-    subscription = existing;
-    setPushState(true, '켜짐');
+  if (!existing || Notification.permission !== 'granted') {
+    setPushUi('off', '이 기기에서 알림을 받으려면 켜 주세요.');
+    return;
+  }
 
-    // 서버에 남아 있는 설정을 복원한다. 서버에서 사라졌다면 다시 등록한다.
-    try {
-      const { settings } = await api(
-        `/api/settings?endpoint=${encodeURIComponent(existing.endpoint)}`,
-      );
-      applySettings(settings);
-    } catch {
-      const { settings } = await api('/api/subscribe', {
-        method: 'POST',
-        body: JSON.stringify(serialize(existing)),
-      });
-      applySettings(settings);
-    }
-  } else {
-    setPushState(false, '꺼짐');
+  subscription = existing;
+  setPushUi('on', '이 기기로 알림을 보내드려요.');
+
+  // 서버에 남아 있는 설정을 복원한다. 서버에서 사라졌다면 다시 등록한다.
+  try {
+    const { settings } = await api(
+      `/api/settings?endpoint=${encodeURIComponent(existing.endpoint)}`,
+    );
+    applySettings(settings);
+  } catch {
+    const { settings } = await api('/api/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(serialize(existing)),
+    });
+    applySettings(settings);
   }
 }
 
@@ -320,20 +439,18 @@ async function initPush() {
     /* 설정 조회 실패는 기본값으로 계속 진행 */
   }
 
-  await loadHistory();
+  await Promise.all([loadHistory(), loadStandings()]);
 
   initPush().catch((err) => {
-    // 초기화가 실패해도 버튼이 "확인 중"에 멈춰 있으면 안 된다. 원인을 보여주고 재시도를 허용한다.
-    $('#push-state').textContent = '오류';
-    $('#push-state').className = 'badge off';
-    $('#push-desc').textContent = `알림을 준비하지 못했습니다: ${err.message}`;
-    $('#btn-toggle').textContent = '다시 시도';
-    $('#btn-toggle').disabled = false;
+    setPushUi('error', `알림을 준비하지 못했어요: ${err.message}`);
     console.error('initPush failed', err);
   });
 
-  // 앱을 다시 볼 때 최신 기록으로 갱신한다.
+  // 앱을 다시 볼 때 최신 상태로 갱신한다.
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) loadHistory();
+    if (!document.hidden) {
+      loadHistory();
+      loadStandings();
+    }
   });
 })();

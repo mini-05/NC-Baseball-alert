@@ -8,7 +8,7 @@
  *   같은 전이가 두 번 발송되지 않는다.
  */
 
-import { perspective } from './kbo.js';
+import { perspective, SERIES, isPostseason } from './kbo.js';
 
 export const KINDS = ['start', 'cancel', 'score', 'end'];
 
@@ -20,12 +20,25 @@ export const KIND_COLUMN = {
   end: 'on_end',
 };
 
+/** 시리즈 범위 → subscriptions 테이블의 on/off 컬럼명 */
+export const SCOPES = ['regular', 'postseason'];
+export const SCOPE_COLUMN = {
+  regular: 'on_regular',
+  postseason: 'on_postseason',
+};
+
 export const KIND_LABEL = {
   start: '경기 시작',
   cancel: '경기 취소',
   score: '득점',
   end: '경기 종료',
 };
+
+/** 포스트시즌 경기는 제목 앞에 시리즈를 붙여 정규시즌과 구별되게 한다. */
+function tag(series) {
+  const short = SERIES[series]?.short;
+  return short ? `[${short}] ` : '';
+}
 
 /** "NC 3 : 2 삼성" 형태의 스코어 문자열 (대상 팀을 항상 왼쪽에 둔다) */
 function scoreLine(game, teamCode) {
@@ -37,7 +50,7 @@ function scoreLine(game, teamCode) {
  * @param {object|null} prev DB에 저장돼 있던 직전 스냅샷 (없으면 null)
  * @param {object} cur  방금 조회한 현재 상태 (normalizeGame 결과)
  * @param {string} teamCode 알림 대상 팀 코드
- * @returns {Array<{kind,dedupKey,title,body}>}
+ * @returns {Array<{kind,scope,series,dedupKey,title,body}>}
  */
 export function detectEvents(prev, cur, teamCode) {
   if (!prev) return [];
@@ -45,32 +58,39 @@ export function detectEvents(prev, cur, teamCode) {
   const events = [];
   const p = perspective(cur, teamCode);
   const vs = `${p.isHome ? 'vs' : '@'} ${p.oppName}`;
+  const t = tag(cur.series);
+  const scope = isPostseason(cur.series) ? 'postseason' : 'regular';
+
+  const push = (kind, dedupKey, title, body) =>
+    events.push({ kind, scope, series: cur.series, dedupKey, title, body });
 
   // 1) 경기 취소 — 취소된 경기는 시작/종료 알림을 낼 이유가 없으므로 여기서 끝낸다.
   if (!prev.cancelled && cur.cancelled) {
-    events.push({
-      kind: 'cancel',
-      dedupKey: `${cur.gameId}:cancel`,
-      title: '경기 취소',
-      body: `${p.teamName} ${vs} 경기가 취소됐습니다.${cur.stadium ? ` (${cur.stadium})` : ''}`,
-    });
+    push(
+      'cancel',
+      `${cur.gameId}:cancel`,
+      `${t}경기 취소`,
+      `${p.teamName} ${vs} 경기가 취소됐습니다.${cur.stadium ? ` (${cur.stadium})` : ''}`,
+    );
     return events;
   }
   if (cur.cancelled) return events;
 
   // 2) 경기 시작
   if (prev.phase === 'before' && cur.phase === 'live') {
-    events.push({
-      kind: 'start',
-      dedupKey: `${cur.gameId}:start`,
-      title: '경기 시작',
-      body: `${p.teamName} ${vs} 경기가 시작됐습니다.${cur.stadium ? ` (${cur.stadium})` : ''}`,
-    });
+    push(
+      'start',
+      `${cur.gameId}:start`,
+      `${t}경기 시작`,
+      `${p.teamName} ${vs} 경기가 시작됐습니다.${cur.stadium ? ` (${cur.stadium})` : ''}`,
+    );
   }
 
   // 3) 득점 — 점수가 변한 경기 중 상태에서만. 어느 팀이 냈는지 구분해 알린다.
-  const teamGained = p.teamScore - (prev.homeCode === teamCode ? prev.homeScore : prev.awayScore);
-  const oppGained = p.oppScore - (prev.homeCode === teamCode ? prev.awayScore : prev.homeScore);
+  const prevTeamScore = prev.homeCode === teamCode ? prev.homeScore : prev.awayScore;
+  const prevOppScore = prev.homeCode === teamCode ? prev.awayScore : prev.homeScore;
+  const teamGained = p.teamScore - prevTeamScore;
+  const oppGained = p.oppScore - prevOppScore;
 
   if (cur.phase === 'live' && (teamGained !== 0 || oppGained !== 0)) {
     const who =
@@ -80,25 +100,20 @@ export function detectEvents(prev, cur, teamCode) {
           ? `${p.teamName} ${teamGained}점 득점!`
           : `${p.oppName} ${oppGained}점 실점`;
 
-    events.push({
-      kind: 'score',
+    push(
+      'score',
       // 점수 조합을 키에 넣어, 같은 경기의 서로 다른 득점 상황이 각각 발송되게 한다.
-      dedupKey: `${cur.gameId}:score:${cur.homeScore}-${cur.awayScore}`,
-      title: who,
-      body: `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}`,
-    });
+      `${cur.gameId}:score:${cur.homeScore}-${cur.awayScore}`,
+      `${t}${who}`,
+      `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}`,
+    );
   }
 
   // 4) 경기 종료
   if (prev.phase !== 'result' && cur.phase === 'result') {
     const diff = p.teamScore - p.oppScore;
     const verdict = diff > 0 ? '승리' : diff < 0 ? '패배' : '무승부';
-    events.push({
-      kind: 'end',
-      dedupKey: `${cur.gameId}:end`,
-      title: `경기 종료 · ${p.teamName} ${verdict}`,
-      body: scoreLine(cur, teamCode),
-    });
+    push('end', `${cur.gameId}:end`, `${t}경기 종료 · ${p.teamName} ${verdict}`, scoreLine(cur, teamCode));
   }
 
   return events;
