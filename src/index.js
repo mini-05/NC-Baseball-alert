@@ -11,7 +11,7 @@ import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
   loadDailyPlan, isPollWindow, loadStandings, loadSchedule,
-  invalidatePlan, resolveSeasonOpener, invalidateStandings,
+  invalidatePlan, resolveSeasonOpener, invalidateStandings, invalidateSchedule,
 } from './season.js';
 import {
   loadStates, upsertStateStmt, insertEvent, listHistory,
@@ -85,8 +85,11 @@ async function poll(env) {
     fired++;
   }
 
-  // 경기가 끝났으면 순위가 바뀐다. 캐시를 비워 다음 조회에서 최신 순위를 받게 한다.
-  if (ended) await invalidateStandings(env, kst.year);
+  // 경기가 끝났으면 순위와 지난 일정의 결과가 함께 바뀐다. 두 캐시를 비운다.
+  if (ended) {
+    await invalidateStandings(env, kst.year);
+    await invalidateSchedule(env, kst.year);
+  }
 
   return { checked: games.length, fired };
 }
@@ -174,11 +177,13 @@ async function handleApi(request, env, url) {
     return json({ games: await listHistory(env.DB, { limitDays: days, seasonYear: year }) });
   }
 
-  /** 앞으로의 경기 일정. 홈경기 여부를 함께 내려 앱에서 강조 표시한다. */
+  /**
+   * 이번 시즌 전체 일정. 홈경기 여부와 지난 경기의 결과를 함께 내려
+   * 앱에서 홈경기를 강조하고 지난 일정에 스코어를 붙일 수 있게 한다.
+   */
   if (path === '/api/schedule' && method === 'GET') {
-    const days = Math.min(Math.max(Number(url.searchParams.get('days')) || 30, 1), 90);
-    const { date } = kstNow();
-    return json({ games: await loadSchedule(env, date, days) });
+    const { year, date } = kstNow();
+    return json({ today: date, games: await loadSchedule(env, year) });
   }
 
   /** 순위와 포스트시즌 진출 상황. 비시즌이면 standings 가 null 이다. */

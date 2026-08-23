@@ -138,36 +138,56 @@ export async function invalidatePlan(env, today) {
  * 경기 결과가 아니라 "언제 어디서 누구와 붙는지"만 쓰므로 캐시를 길게 잡아도 된다.
  * 다만 우천 취소가 당일 반영되어야 하므로 오늘 경기는 포함해 6시간마다 갱신한다.
  */
-export async function loadSchedule(env, today, days = 30) {
-  const key = `schedule:${today}:${days}`;
+export async function loadSchedule(env, year) {
+  const key = `schedule:${year}`;
   const cached = await getCache(env.DB, key);
   if (cached) return cached;
 
-  const year = Number(today.slice(0, 4));
   const opener = await resolveSeasonOpener(env, year);
 
+  // 시즌 전체를 받는다. 지난 경기의 결과까지 함께 보여주기 위함이다.
   const games = filterCurrentSeason(
-    filterTeam(await fetchGames(today, kstDateOffset(days)), env.TEAM_CODE),
+    filterTeam(await fetchGames(`${year}-01-01`, `${year}-12-31`), env.TEAM_CODE),
     year,
     opener,
   );
 
   const schedule = games
-    .map((g) => ({
-      gameId: g.gameId,
-      gameDate: g.gameDate,
-      startAt: g.startAt,
-      stadium: g.stadium,
-      series: g.series,
-      isHome: g.homeCode === env.TEAM_CODE,
-      oppName: g.homeCode === env.TEAM_CODE ? g.awayName : g.homeName,
-      phase: g.phase,
-      cancelled: g.cancelled,
-    }))
+    .map((g) => {
+      const isHome = g.homeCode === env.TEAM_CODE;
+      const teamScore = isHome ? g.homeScore : g.awayScore;
+      const oppScore = isHome ? g.awayScore : g.homeScore;
+
+      return {
+        gameId: g.gameId,
+        gameDate: g.gameDate,
+        startAt: g.startAt,
+        stadium: g.stadium,
+        series: g.series,
+        isHome,
+        oppName: isHome ? g.awayName : g.homeName,
+        phase: g.phase,
+        cancelled: g.cancelled,
+        statusInfo: g.statusInfo,
+        // 지난 경기의 결과. 아직 안 끝난 경기는 화면에서 phase 로 걸러 쓴다.
+        teamScore,
+        oppScore,
+        result:
+          g.phase === 'result' && !g.cancelled
+            ? teamScore > oppScore ? 'win' : teamScore < oppScore ? 'lose' : 'draw'
+            : null,
+      };
+    })
     .sort((a, b) => a.startAt.localeCompare(b.startAt));
 
-  await putCache(env.DB, key, schedule, 6 * HOUR);
+  // 경기 결과가 반영돼야 하므로 짧게 잡고, 경기가 끝나면 invalidateSchedule 로 즉시 비운다.
+  await putCache(env.DB, key, schedule, 30 * MIN);
   return schedule;
+}
+
+/** 경기가 끝났을 때 호출한다. 지난 일정의 결과를 바로 반영하기 위함이다. */
+export async function invalidateSchedule(env, year) {
+  await putCache(env.DB, `schedule:${year}`, null, -1);
 }
 
 /**

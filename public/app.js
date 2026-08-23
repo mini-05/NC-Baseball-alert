@@ -218,6 +218,13 @@ function formatDay(dateStr) {
   return `${m}월 ${d}일 ${wd}요일`;
 }
 
+/** ISO 시각(UTC)을 24시간제 HH:MM 로. 이벤트 기록 시각에 쓴다. */
+function clockOf(iso) {
+  return new Date(iso).toLocaleTimeString('ko-KR', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
 /** 서버가 저장한 KST 로컬시각 문자열. 시간대 변환 없이 그대로 읽는다. */
 function formatStart(iso) {
   const m = /T(\d{2}):(\d{2})/.exec(iso || '');
@@ -266,6 +273,30 @@ function renderGame(g) {
         })
       : null;
 
+  /*
+   * 시작·종료 시각.
+   *
+   * 알림 이벤트에 기록된 시각이 실제 관측 시각이라 가장 정확하다.
+   * 다만 앱이 감시를 시작하기 전에 이미 끝난 경기에는 이벤트가 없으므로,
+   * 그때는 편성 시각(startAt)으로 대신하고 '예정'임을 밝힌다.
+   */
+  const at = (kind) => {
+    const e = g.events.find((x) => x.kind === kind);
+    return e ? clockOf(e.createdAt) : null;
+  };
+
+  const observedStart = at('start');
+  const observedEnd = at('end');
+
+  const timeParts = [];
+  if (observedStart) timeParts.push(`${observedStart} 시작`);
+  else if (!g.cancelled) timeParts.push(`${formatStart(g.startAt)} 예정`);
+  if (observedEnd) timeParts.push(`${observedEnd} 종료`);
+
+  const times = timeParts.length
+    ? el('div', { class: 'game-times', text: timeParts.join(' · ') })
+    : null;
+
   const timeline = g.events.length
     ? el('ul', { class: 'timeline' },
         g.events.map((e) =>
@@ -301,6 +332,7 @@ function renderGame(g) {
       team(opp, done && diff > 0),
     ),
     verdict,
+    times,
     timeline,
   );
 }
@@ -361,63 +393,107 @@ function relativeDay(dateStr) {
   return null;
 }
 
-function renderScheduleItem(g) {
+const RESULT_LABEL = { win: '승', lose: '패', draw: '무' };
+
+function renderScheduleItem(g, today) {
   const rel = relativeDay(g.gameDate);
+  const isPast = g.gameDate < today;
+  const isToday = g.gameDate === today;
 
   const seriesTag =
     SERIES_SHORT[g.series] && g.series !== 'regular'
       ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
       : null;
 
-  return el('article', { class: `sched${g.isHome ? ' is-home' : ''}${g.cancelled ? ' is-off' : ''}` },
+  // 지난 경기는 결과를, 예정 경기는 시각을 오른쪽에 둔다.
+  const trailing = g.result
+    ? el('div', { class: `sched-score ${g.result}` },
+        el('span', { class: 'sched-vs', text: `${g.teamScore} : ${g.oppScore}` }),
+        el('span', { class: 'sched-wl', text: RESULT_LABEL[g.result] }),
+      )
+    : null;
+
+  const sub = g.cancelled
+    ? '경기 취소'
+    : isPast && !g.result
+      ? (g.stadium ?? '')
+      : `${formatStart(g.startAt)} · ${g.stadium ?? ''}`;
+
+  const classes = [
+    'sched',
+    g.isHome && 'is-home',
+    g.cancelled && 'is-off',
+    isPast && !g.cancelled && 'is-past',
+    isToday && 'is-today',
+  ].filter(Boolean).join(' ');
+
+  return el('article', { class: classes, 'data-date': g.gameDate },
     el('div', { class: 'sched-date' },
       el('span', { class: 'sched-md', text: g.gameDate.slice(5).replace('-', '.') }),
       el('span', { class: 'sched-rel', text: rel ?? formatDay(g.gameDate).split(' ')[2] }),
     ),
     el('div', { class: 'sched-main' },
       el('div', { class: 'sched-top' },
-        // 홈/원정을 가장 먼저 읽히게 둔다. 홈경기는 골드 배지.
         el('span', { class: `hb ${g.isHome ? 'home' : 'away'}`, text: g.isHome ? '홈' : '원정' }),
         seriesTag,
         el('span', { class: 'sched-opp', text: g.oppName }),
       ),
-      el('div', { class: 'sched-sub' },
-        g.cancelled ? '경기 취소' : `${formatStart(g.startAt)} · ${g.stadium ?? ''}`,
-      ),
+      el('div', { class: 'sched-sub', text: sub }),
     ),
+    trailing,
   );
 }
+
+let scheduleScrolled = false;
 
 async function loadSchedule() {
   const box = $('#schedule');
   try {
-    const { games } = await api('/api/schedule?days=30');
+    const { games, today } = await api('/api/schedule');
     clear(box);
 
     if (!games.length) {
       box.append(
-        el('p', { class: 'empty' }, '예정된 경기가 없어요.', el('br'), '비시즌이거나 일정이 아직 나오지 않았습니다.'),
+        el('p', { class: 'empty' }, '일정이 없어요.', el('br'), '비시즌이거나 일정이 아직 나오지 않았습니다.'),
       );
       return;
     }
 
+    const played = games.filter((g) => g.result);
+    const wins = played.filter((g) => g.result === 'win').length;
+    const losses = played.filter((g) => g.result === 'lose').length;
+    const draws = played.filter((g) => g.result === 'draw').length;
     const homeCount = games.filter((g) => g.isHome).length;
+
     box.append(
       el('p', { class: 'sched-summary' },
         el('b', { text: `${games.length}경기` }),
-        ` 예정 · 그중 홈경기 `,
+        ' · 홈 ',
         el('b', { class: 'hl', text: `${homeCount}경기` }),
+        played.length ? ` · ${wins}승 ${draws}무 ${losses}패` : '',
       ),
     );
 
-    const byDay = new Map();
+    // 월별로 끊어 긴 목록을 훑기 쉽게 한다.
+    let lastMonth = null;
     for (const g of games) {
-      if (!byDay.has(g.gameDate)) byDay.set(g.gameDate, []);
-      byDay.get(g.gameDate).push(g);
+      const month = g.gameDate.slice(0, 7);
+      if (month !== lastMonth) {
+        lastMonth = month;
+        box.append(el('h2', { class: 'month-title', text: `${Number(month.slice(5))}월` }));
+      }
+      box.append(renderScheduleItem(g, today));
     }
 
-    for (const [date, list] of byDay) {
-      box.append(...list.map(renderScheduleItem));
+    // 처음 열었을 때 오늘 근처가 보이게 한다. 시즌 전체를 담아 목록이 길기 때문이다.
+    if (!scheduleScrolled) {
+      const anchor =
+        box.querySelector(`[data-date="${today}"]`) ??
+        [...box.querySelectorAll('[data-date]')].find((n) => n.dataset.date > today);
+      if (anchor) {
+        anchor.scrollIntoView({ block: 'center' });
+        scheduleScrolled = true;
+      }
     }
   } catch (err) {
     clear(box);

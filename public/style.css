@@ -357,6 +357,16 @@ main {
 .verdict.lose { color: var(--error); }
 .verdict.draw, .verdict.off { color: var(--muted); }
 
+/* 기록 카드의 시작·종료 시각 */
+.game-times {
+  margin-top: var(--s-xs);
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--muted-soft);
+  font-variant-numeric: tabular-nums;
+}
+.card-dark .game-times { color: var(--on-dark-soft); }
+
 .timeline {
   list-style: none;
   margin: var(--s-md) 0 0;
@@ -490,9 +500,19 @@ main {
 .sched-summary b { color: var(--ink); font-weight: 600; }
 .sched-summary b.hl { color: var(--primary-active); }
 
+.month-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  margin: var(--s-lg) 0 var(--s-xs);
+}
+#schedule .month-title:first-of-type { margin-top: var(--s-xs); }
+
 .sched {
   display: grid;
-  grid-template-columns: 52px 1fr;
+  grid-template-columns: 52px 1fr auto;
   gap: var(--s-sm);
   align-items: center;
   background: var(--canvas);
@@ -501,6 +521,46 @@ main {
   padding: var(--s-sm) var(--s-md);
   margin-bottom: var(--s-xs);
 }
+
+/* 지난 경기는 한 톤 내려 앞으로 남은 일정이 먼저 눈에 들어오게 한다. */
+.sched.is-past { opacity: 0.72; }
+
+/* 오늘 경기는 골드 테두리로 위치를 잡아 준다. */
+.sched.is-today {
+  border-color: var(--primary);
+  opacity: 1;
+}
+
+/* 지난 경기 결과 */
+.sched-score {
+  display: flex;
+  align-items: center;
+  gap: var(--s-xs);
+  flex: 0 0 auto;
+}
+
+.sched-vs {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.sched-wl {
+  font-size: 12px;
+  font-weight: 600;
+  width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 50%;
+  color: #fff;
+}
+.sched-score.win .sched-wl { background: var(--success); }
+.sched-score.lose .sched-wl { background: var(--error); }
+.sched-score.draw .sched-wl { background: var(--muted-soft); }
 
 /*
  * 홈경기 강조. 왼쪽에 골드 띠를 세우고 카드 배경을 크림 카드로 올린다.
