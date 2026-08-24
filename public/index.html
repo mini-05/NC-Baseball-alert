@@ -77,14 +77,26 @@
 
   <!-- ─────────── 일정 ─────────── -->
   <section id="panel-schedule" class="panel">
-    <div class="legend">
-      <span class="legend-item"><i class="swatch home"></i>홈경기 (창원)</span>
-      <span class="legend-item"><i class="swatch away"></i>원정</span>
+    <div class="sched-toolbar">
+      <div class="legend">
+        <span class="legend-item"><i class="swatch home"></i>홈경기</span>
+        <span class="legend-item"><i class="swatch away"></i>원정</span>
+      </div>
+      <div class="sched-actions">
+        <button id="btn-today" class="btn-chip">오늘</button>
+        <div class="view-switch" role="tablist">
+          <button class="view-btn is-active" data-view="list">리스트</button>
+          <button class="view-btn" data-view="calendar">달력</button>
+        </div>
+      </div>
     </div>
-    <div id="schedule">
+
+    <div id="schedule-list" class="sched-view is-active">
       <div class="skeleton"></div>
       <div class="skeleton"></div>
     </div>
+
+    <div id="schedule-calendar" class="sched-view"></div>
   </section>
 
   <!-- ─────────── 순위 ─────────── -->

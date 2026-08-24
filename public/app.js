@@ -444,57 +444,188 @@ function renderScheduleItem(g, today) {
   );
 }
 
+/* ─────────── 일정 · 달력 ─────────── */
+
+const WEEKDAYS_MIN = ['일', '월', '화', '수', '목', '금', '토'];
+
+/** 마지막으로 불러온 일정. 리스트/달력 전환과 '오늘' 버튼이 재조회 없이 이 값을 함께 쓴다. */
+let scheduleData = null;
 let scheduleScrolled = false;
+let calendarMonth = null; // 'YYYY-MM'. 달력이 지금 보여주는 달.
+
+/** 리스트 뷰에서 날짜 카드를 찾아 화면 중앙으로 옮긴다. */
+function scrollListToDate(box, date) {
+  const anchor =
+    box.querySelector(`[data-date="${date}"]`) ??
+    [...box.querySelectorAll('[data-date]')].find((n) => n.dataset.date > date);
+  if (anchor) anchor.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  return Boolean(anchor);
+}
+
+function renderScheduleList(box, { games, today }) {
+  clear(box);
+
+  const played = games.filter((g) => g.result);
+  const wins = played.filter((g) => g.result === 'win').length;
+  const losses = played.filter((g) => g.result === 'lose').length;
+  const draws = played.filter((g) => g.result === 'draw').length;
+  const homeCount = games.filter((g) => g.isHome).length;
+
+  box.append(
+    el('p', { class: 'sched-summary' },
+      el('b', { text: `${games.length}경기` }),
+      ' · 홈 ',
+      el('b', { class: 'hl', text: `${homeCount}경기` }),
+      played.length ? ` · ${wins}승 ${draws}무 ${losses}패` : '',
+    ),
+  );
+
+  // 월별로 끊어 긴 목록을 훑기 쉽게 한다.
+  let lastMonth = null;
+  for (const g of games) {
+    const month = g.gameDate.slice(0, 7);
+    if (month !== lastMonth) {
+      lastMonth = month;
+      box.append(el('h2', { class: 'month-title', text: `${Number(month.slice(5))}월` }));
+    }
+    box.append(renderScheduleItem(g, today));
+  }
+
+  // 처음 열었을 때만 자동으로 오늘 근처로 스크롤한다. 이후 이동은 '오늘' 버튼이 맡는다.
+  if (!scheduleScrolled) {
+    scheduleScrolled = scrollListToDate(box, today);
+  }
+}
+
+/**
+ * 달력 뷰. 한 달을 7열 격자로 그리고, 경기가 있는 날짜에 홈/원정 점과
+ * 결과 색(승 초록 테두리 · 패 빨강 테두리)을 얹는다.
+ *
+ * 날짜를 누르면 리스트 뷰로 전환해 그 날짜로 스크롤한다 — 달력은 훑어보는 용도,
+ * 상세 확인은 리스트가 맡는 방식으로 역할을 나눴다.
+ */
+function renderCalendar(box, { games, today }) {
+  clear(box);
+
+  const byDate = new Map();
+  for (const g of games) {
+    if (!byDate.has(g.gameDate)) byDate.set(g.gameDate, []);
+    byDate.get(g.gameDate).push(g);
+  }
+
+  const [y, m] = calendarMonth.split('-').map(Number);
+  const first = new Date(Date.UTC(y, m - 1, 1));
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const leadBlanks = first.getUTCDay(); // 1일이 무슨 요일인지 (0=일)
+
+  const monthDates = games.map((g) => g.gameDate.slice(0, 7));
+  const canPrev = monthDates.some((d) => d < calendarMonth);
+  const canNext = monthDates.some((d) => d > calendarMonth);
+
+  const nav = el('div', { class: 'cal-nav' },
+    el('button', { class: `cal-arrow${canPrev ? '' : ' is-disabled'}`, 'data-nav': '-1', text: '‹' }),
+    el('span', { class: 'cal-title', text: `${y}년 ${m}월` }),
+    el('button', { class: `cal-arrow${canNext ? '' : ' is-disabled'}`, 'data-nav': '1', text: '›' }),
+  );
+
+  const grid = el('div', { class: 'cal-grid' },
+    ...WEEKDAYS_MIN.map((w) => el('div', { class: 'cal-dow', text: w })),
+  );
+
+  for (let i = 0; i < leadBlanks; i++) grid.append(el('div', { class: 'cal-cell is-blank' }));
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = `${calendarMonth}-${String(d).padStart(2, '0')}`;
+    const dayGames = byDate.get(date) ?? [];
+    const g = dayGames[0]; // 같은 날 더블헤더는 드물게만 있어 첫 경기만 표시한다.
+
+    const cellClasses = ['cal-cell', date === today && 'cal-today', g && 'has-game']
+      .filter(Boolean).join(' ');
+
+    const dot = g
+      ? el('span', {
+          class: `cal-dot ${g.isHome ? 'home' : 'away'}${g.result ? ` r-${g.result}` : ''}${g.cancelled ? ' is-off' : ''}`,
+        })
+      : null;
+
+    grid.append(
+      el('button', { class: cellClasses, type: 'button', 'data-date': date, disabled: !g },
+        el('span', { class: 'cal-daynum', text: String(d) }),
+        dot,
+      ),
+    );
+  }
+
+  box.append(nav, grid);
+}
+
+function renderScheduleView() {
+  if (!scheduleData) return;
+
+  const active = document.querySelector('.view-btn.is-active')?.dataset.view ?? 'list';
+  $('#schedule-list').classList.toggle('is-active', active === 'list');
+  $('#schedule-calendar').classList.toggle('is-active', active === 'calendar');
+
+  if (active === 'list') {
+    renderScheduleList($('#schedule-list'), scheduleData);
+  } else {
+    calendarMonth ??= scheduleData.today.slice(0, 7);
+    renderCalendar($('#schedule-calendar'), scheduleData);
+  }
+}
+
+$$('.view-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    $$('.view-btn').forEach((b) => b.classList.toggle('is-active', b === btn));
+    renderScheduleView();
+  });
+});
+
+$('#schedule-calendar').addEventListener('click', (ev) => {
+  const nav = ev.target.closest('[data-nav]');
+  if (nav && !nav.classList.contains('is-disabled')) {
+    const [y, m] = calendarMonth.split('-').map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + Number(nav.dataset.nav), 1));
+    calendarMonth = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    renderCalendar($('#schedule-calendar'), scheduleData);
+    return;
+  }
+
+  const cell = ev.target.closest('[data-date]');
+  if (cell && !cell.disabled) {
+    document.querySelector('.view-btn[data-view="list"]').click();
+    // scrollIntoView 는 필요한 레이아웃을 동기적으로 계산하므로,
+    // 리스트를 새로 그린 직후 바로 불러도 위치가 정확하다.
+    scrollListToDate($('#schedule-list'), cell.dataset.date);
+  }
+});
+
+$('#btn-today').addEventListener('click', () => {
+  if (!scheduleData) return;
+  const active = document.querySelector('.view-btn.is-active')?.dataset.view;
+
+  if (active === 'calendar') {
+    calendarMonth = scheduleData.today.slice(0, 7);
+    renderCalendar($('#schedule-calendar'), scheduleData);
+  } else {
+    scrollListToDate($('#schedule-list'), scheduleData.today);
+  }
+});
 
 async function loadSchedule() {
-  const box = $('#schedule');
+  const box = $('#schedule-list');
   try {
-    const { games, today } = await api('/api/schedule');
-    clear(box);
+    scheduleData = await api('/api/schedule');
 
-    if (!games.length) {
+    if (!scheduleData.games.length) {
+      clear(box);
       box.append(
         el('p', { class: 'empty' }, '일정이 없어요.', el('br'), '비시즌이거나 일정이 아직 나오지 않았습니다.'),
       );
       return;
     }
 
-    const played = games.filter((g) => g.result);
-    const wins = played.filter((g) => g.result === 'win').length;
-    const losses = played.filter((g) => g.result === 'lose').length;
-    const draws = played.filter((g) => g.result === 'draw').length;
-    const homeCount = games.filter((g) => g.isHome).length;
-
-    box.append(
-      el('p', { class: 'sched-summary' },
-        el('b', { text: `${games.length}경기` }),
-        ' · 홈 ',
-        el('b', { class: 'hl', text: `${homeCount}경기` }),
-        played.length ? ` · ${wins}승 ${draws}무 ${losses}패` : '',
-      ),
-    );
-
-    // 월별로 끊어 긴 목록을 훑기 쉽게 한다.
-    let lastMonth = null;
-    for (const g of games) {
-      const month = g.gameDate.slice(0, 7);
-      if (month !== lastMonth) {
-        lastMonth = month;
-        box.append(el('h2', { class: 'month-title', text: `${Number(month.slice(5))}월` }));
-      }
-      box.append(renderScheduleItem(g, today));
-    }
-
-    // 처음 열었을 때 오늘 근처가 보이게 한다. 시즌 전체를 담아 목록이 길기 때문이다.
-    if (!scheduleScrolled) {
-      const anchor =
-        box.querySelector(`[data-date="${today}"]`) ??
-        [...box.querySelectorAll('[data-date]')].find((n) => n.dataset.date > today);
-      if (anchor) {
-        anchor.scrollIntoView({ block: 'center' });
-        scheduleScrolled = true;
-      }
-    }
+    renderScheduleView();
   } catch (err) {
     clear(box);
     box.append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
