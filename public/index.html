@@ -50,8 +50,18 @@
 <header class="topbar">
   <div class="brand">
     <!-- Anthropic 스파이크 마크를 본뜬 4방향 방사형 글리프. 브랜드 워드마크 접두사 역할. -->
-    <svg class="spike" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M12 1.5 L13.5 9.6 L21.2 6.2 L15.4 12 L21.2 17.8 L13.5 14.4 L12 22.5 L10.5 14.4 L2.8 17.8 L8.6 12 L2.8 6.2 L10.5 9.6 Z" />
+    <!--
+      공식 구단 로고는 상표/저작권 보호 대상이라 그대로 쓸 수 없어, 대신
+      "다이노스"를 나타내는 오리지널 공룡 실루엣(스테고사우루스형 등판)을
+      직접 그렸다. fill 은 부모에 .dino-mark 로 지정해 자식 도형에 상속시킨다.
+    -->
+    <svg class="dino-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <ellipse cx="12" cy="14" rx="7" ry="4.5" />
+      <path d="M17 11 C20 9 22 6 21 4 C20 2.5 18 3.5 17.5 5.5 L16 10 Z" />
+      <path d="M6 12 C2 11 0 8 1 6 C2 5 5 7 7 11 Z" />
+      <path d="M9 10 L10 6.5 L11 10 Z M12 9.5 L13 5.5 L14 9.5 Z M15 10 L16 6.5 L17 10 Z" />
+      <rect x="8" y="17" width="3" height="5" rx="1" />
+      <rect x="14" y="17" width="3" height="5" rx="1" />
     </svg>
     <span class="wordmark">NC 다이노스</span>
   </div>
@@ -183,8 +193,13 @@
 </main>
 
 <footer class="footer">
-  <svg class="spike" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="M12 1.5 L13.5 9.6 L21.2 6.2 L15.4 12 L21.2 17.8 L13.5 14.4 L12 22.5 L10.5 14.4 L2.8 17.8 L8.6 12 L2.8 6.2 L10.5 9.6 Z" />
+  <svg class="dino-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <ellipse cx="12" cy="14" rx="7" ry="4.5" />
+    <path d="M17 11 C20 9 22 6 21 4 C20 2.5 18 3.5 17.5 5.5 L16 10 Z" />
+    <path d="M6 12 C2 11 0 8 1 6 C2 5 5 7 7 11 Z" />
+    <path d="M9 10 L10 6.5 L11 10 Z M12 9.5 L13 5.5 L14 9.5 Z M15 10 L16 6.5 L17 10 Z" />
+    <rect x="8" y="17" width="3" height="5" rx="1" />
+    <rect x="14" y="17" width="3" height="5" rx="1" />
   </svg>
   <p>경기 정보 출처 · 네이버 스포츠</p>
 </footer>

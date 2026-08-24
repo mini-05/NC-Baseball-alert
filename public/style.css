@@ -115,7 +115,7 @@ body {
 }
 
 /* 브랜드 글리프 */
-.spike { width: 16px; height: 16px; fill: var(--ink); flex: 0 0 auto; }
+.dino-mark { width: 18px; height: 18px; fill: var(--ink); flex: 0 0 auto; }
 
 /* 아이콘 심볼 정의만 담는 숨은 SVG. 화면을 차지하지 않는다. */
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
@@ -749,8 +749,8 @@ main {
  * 결과를 원 배지 대신 날짜 칸 테두리 색으로 표시한다. cal-today 보다 뒤에 있어
  * 오늘이면서 결과가 나온 날은 이 색이 우선한다. 승=빨강·패=파랑·무=노랑.
  */
-.cal-cell.result-win { box-shadow: inset 0 0 0 1.5px var(--error); }
-.cal-cell.result-lose { box-shadow: inset 0 0 0 1.5px var(--accent-blue); }
+.cal-cell.result-win { box-shadow: inset 0 0 0 1.5px var(--accent-blue); }
+.cal-cell.result-lose { box-shadow: inset 0 0 0 1.5px var(--error); }
 .cal-cell.result-draw { box-shadow: inset 0 0 0 1.5px var(--accent-yellow); }
 
 /* 상대팀 이름. 항상 검정(ink)으로 고정한다 — 결과는 테두리가 맡는다. */
@@ -978,7 +978,7 @@ main {
   padding: var(--s-xl) var(--s-lg) calc(env(safe-area-inset-bottom) + var(--s-xl));
   text-align: center;
 }
-.footer .spike { fill: var(--on-dark); margin-bottom: var(--s-xs); }
+.footer .dino-mark { width: 24px; height: 24px; fill: var(--on-dark); margin-bottom: var(--s-xs); }
 .footer p { margin: 0; font-size: 13px; }
 
 .toast {
