@@ -67,14 +67,20 @@ export async function loadStates(db, gameIds) {
   );
 }
 
-/** 현재 상태로 스냅샷을 덮어쓴다. */
-export function upsertStateStmt(db, g) {
+/**
+ * 현재 상태로 스냅샷을 덮어쓴다.
+ * @param {string|null} scoreboardJson 이닝별 점수(전광판) JSON 문자열. 이번 틱에
+ *   못 가져왔으면 null 을 넘긴다 — COALESCE 로 기존에 저장된 값을 그대로 둔다
+ *   (한 번 채워진 전광판이 일시적인 조회 실패로 비워지지 않도록).
+ */
+export function upsertStateStmt(db, g, scoreboardJson = null) {
   return db
     .prepare(
       `INSERT INTO game_state
          (game_id, game_date, start_at, stadium, home_code, home_name, away_code, away_name,
-          home_score, away_score, phase, series, status_code, status_info, cancelled, suspended, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          home_score, away_score, phase, series, status_code, status_info, cancelled, suspended,
+          scoreboard, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(game_id) DO UPDATE SET
          home_score=excluded.home_score,
          away_score=excluded.away_score,
@@ -86,6 +92,7 @@ export function upsertStateStmt(db, g) {
          suspended=excluded.suspended,
          start_at=excluded.start_at,
          stadium=excluded.stadium,
+         scoreboard=COALESCE(excluded.scoreboard, game_state.scoreboard),
          updated_at=excluded.updated_at`,
     )
     .bind(
@@ -94,6 +101,7 @@ export function upsertStateStmt(db, g) {
       g.homeScore, g.awayScore, g.phase, g.series,
       g.statusCode, g.statusInfo,
       g.cancelled ? 1 : 0, g.suspended ? 1 : 0,
+      scoreboardJson,
       nowIso(),
     );
 }
@@ -173,6 +181,20 @@ export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } =
       teamCode,
     );
 
+    // 전광판도 같은 관점(팀/상대)으로 재배열해 내려준다. 아직 없으면(경기 전,
+    // 혹은 조회 실패가 이어진 경우) null — 클라이언트가 있는지 없는지로만 판단한다.
+    let scoreboard = null;
+    if (r.scoreboard) {
+      try {
+        const raw = JSON.parse(r.scoreboard);
+        const teamSide = p.isHome ? raw.home : raw.away;
+        const oppSide = p.isHome ? raw.away : raw.home;
+        scoreboard = { team: teamSide, opp: oppSide };
+      } catch {
+        scoreboard = null; // 저장된 값이 깨졌으면 조용히 생략한다.
+      }
+    }
+
     return {
       gameId: r.game_id,
       gameDate: r.game_date,
@@ -190,6 +212,7 @@ export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } =
       isPostseason: isPostseason(r.series),
       statusInfo: r.status_info,
       cancelled: Boolean(r.cancelled),
+      scoreboard,
       events: byGame.get(r.game_id) ?? [],
     };
   });

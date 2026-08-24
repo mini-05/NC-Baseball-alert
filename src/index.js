@@ -6,6 +6,7 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
+  fetchScoreboard,
 } from './kbo.js';
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
@@ -62,14 +63,25 @@ async function poll(env, opener) {
 
   const prevStates = await loadStates(env.DB, games.map((g) => g.gameId));
 
+  // 전광판은 경기 전에는 존재하지 않으니 그 경우만 조회를 건너뛴다.
+  // 단일 팀만 폴링하므로 한 틱에 많아야 한두 건이라 병렬로 불러도 부담이 없다.
+  const scoreboards = new Map(
+    await Promise.all(
+      games
+        .filter((g) => g.phase !== 'before')
+        .map(async (g) => [g.gameId, await fetchScoreboard(g.gameId)]),
+    ),
+  );
+
   const writes = [];
   const pending = [];
 
   for (const game of games) {
     const prev = prevStates.get(game.gameId) ?? null;
+    const board = scoreboards.get(game.gameId);
 
     // 스냅샷은 이벤트 발생 여부와 무관하게 항상 최신으로 맞춘다.
-    writes.push(upsertStateStmt(env.DB, game));
+    writes.push(upsertStateStmt(env.DB, game, board ? JSON.stringify(board) : null));
 
     for (const ev of detectEvents(prev, game, env.TEAM_CODE)) {
       pending.push({ game, ev });

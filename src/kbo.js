@@ -355,3 +355,42 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
     note,
   };
 }
+
+/* ─────────────────────────── 전광판 ─────────────────────────── */
+
+const RECORD_URL = 'https://api-gw.sports.naver.com/schedule/games';
+
+/**
+ * 경기 하나의 이닝별 점수(전광판)를 가져온다.
+ *
+ * 경기 시작 전에는 `recordData` 가 null 로 온다(정상). 진행 중·종료 후에는
+ * `scoreBoard.inn.{home,away}` 에 이닝별 점수 배열이, `scoreBoard.rheb` 에
+ * 팀별 R(득점)·H(안타)·E(실책)·B(볼넷) 합계가 들어 있다. 홈/원정 구분은
+ * schedule API 의 homeCode/awayCode 와 같은 관례(gameInfo.hCode/aCode)를 쓴다.
+ *
+ * 실패하거나 아직 데이터가 없으면 null 을 준다 — 전광판은 부가 정보라
+ * 이것 때문에 폴링 전체가 실패해서는 안 된다.
+ */
+export async function fetchScoreboard(gameId) {
+  try {
+    const res = await fetch(`${RECORD_URL}/${gameId}/record`, { headers: HEADERS });
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const board = json?.result?.recordData?.scoreBoard;
+    if (!board?.inn || !board?.rheb) return null;
+
+    const side = (team) => ({
+      innings: Array.isArray(board.inn[team]) ? board.inn[team].map(Number) : [],
+      r: Number(board.rheb[team]?.r ?? 0),
+      h: Number(board.rheb[team]?.h ?? 0),
+      e: Number(board.rheb[team]?.e ?? 0),
+      b: Number(board.rheb[team]?.b ?? 0),
+    });
+
+    return { home: side('home'), away: side('away') };
+  } catch (err) {
+    console.error('scoreboard fetch failed', gameId, err.message);
+    return null;
+  }
+}

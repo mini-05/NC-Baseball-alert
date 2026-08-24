@@ -11,7 +11,7 @@
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
-         seasonYearOf, filterCurrentSeason } from '../src/kbo.js';
+         seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
 import { isPollWindow } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor } from '../src/db.js';
@@ -473,6 +473,51 @@ async function testHomeOnly() {
   check('모르는 범위는 빈 배열', (await subscribersFor(fakeDb(rows), 'start', 'nope', true)).length === 0);
 }
 
+/* ══ 9. 전광판 조회 ══ */
+
+/** 네이버 record 응답을 흉내 낸다. 실제 2026-08-22 SS@NC 경기 응답을 그대로 옮겨 왔다. */
+function fakeRecordResponse(scoreBoard) {
+  return {
+    ok: true,
+    json: async () => ({
+      code: 200, success: true,
+      result: { recordData: scoreBoard ? { scoreBoard } : null },
+    }),
+  };
+}
+
+async function testScoreboard() {
+  const originalFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = async () => fakeRecordResponse({
+      rheb: { away: { r: 8, b: 1, e: 2, h: 10 }, home: { r: 6, b: 0, e: 1, h: 12 } },
+      inn: { away: [1, 1, 0, 3, 0, 0, 0, 2, 1], home: [2, 1, 0, 3, 0, 0, 0, 0, 0] },
+    });
+    const sb = await fetchScoreboard('20260822SSNC02026');
+    check('전광판 파싱 — 이닝 배열', JSON.stringify(sb.away.innings) === '[1,1,0,3,0,0,0,2,1]');
+    check('전광판 파싱 — R/H/E/B', sb.home.r === 6 && sb.home.h === 12 && sb.home.e === 1 && sb.home.b === 0);
+    check('전광판 파싱 — 원정 R', sb.away.r === 8);
+
+    // 경기 전에는 recordData 자체가 null — 정상이며 오류가 아니다.
+    globalThis.fetch = async () => fakeRecordResponse(null);
+    check('경기 전 → null', (await fetchScoreboard('20260825NCLG02026')) === null);
+
+    // HTTP 오류나 예상과 다른 응답 형태도 예외를 던지지 않고 null 로 흡수한다
+    // (전광판은 부가 정보라 이것 때문에 폴링 전체가 실패하면 안 된다).
+    globalThis.fetch = async () => ({ ok: false, json: async () => ({}) });
+    check('HTTP 오류 → null', (await fetchScoreboard('x')) === null);
+
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    check('네트워크 예외 → null (throw 안 함)', (await fetchScoreboard('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ success: true, result: {} }) });
+    check('스키마가 달라져도 null', (await fetchScoreboard('x')) === null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 /* ══ 실행 ══ */
 
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
@@ -484,6 +529,7 @@ console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
+console.log('\n[9] 전광판 조회');            await testScoreboard();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);

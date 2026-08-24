@@ -96,6 +96,26 @@ function serialize(sub) {
 
 /* ─────────── 탭 ─────────── */
 
+/**
+ * .topbar(제목+탭 메뉴) 는 sticky 로 화면 위에 고정된다. 일정 탭의 .sched-fixed
+ * 가 그 바로 아래에 이어 붙으려면 정확한 높이가 필요한데, 폰트 로딩·글자 크기
+ * 설정 등으로 실제 렌더 높이가 미묘하게 달라질 수 있어 하드코딩하지 않고
+ * ResizeObserver 로 실측해 CSS 변수에 반영한다.
+ */
+{
+  const topbar = $('.topbar');
+  const syncTopbarHeight = () => {
+    document.documentElement.style.setProperty('--topbar-h', `${topbar.offsetHeight}px`);
+  };
+
+  // ResizeObserver 는 관측 시작 시 콜백을 한 번 비동기로 보내주는 게 스펙이지만,
+  // 그 첫 콜백이 오기 전 스크롤이 먼저 일어나면 --topbar-h 가 비어 있어
+  // .sched-fixed 가 topbar 와 겹친다. 그래서 최초 값은 여기서 동기적으로
+  // 먼저 채워 두고, 이후 폰트 로딩 등으로 실제 높이가 바뀌는 경우만 관측자에 맡긴다.
+  syncTopbarHeight();
+  if ('ResizeObserver' in window) new ResizeObserver(syncTopbarHeight).observe(topbar);
+}
+
 $$('.tab').forEach((tab) => {
   tab.addEventListener('click', () => {
     $$('.tab').forEach((t) => t.classList.toggle('is-active', t === tab));
@@ -306,6 +326,8 @@ function renderGame(g) {
     ? el('div', { class: 'game-times', text: timeParts.join(' · ') })
     : null;
 
+  const scoreboard = renderScoreboard(g.scoreboard, mine.name, opp.name);
+
   const timeline = g.events.length
     ? el('ul', { class: 'timeline' },
         g.events.map((e) =>
@@ -336,8 +358,48 @@ function renderGame(g) {
       team(opp, done && diff > 0),
     ),
     verdict,
+    scoreboard,
     times,
     timeline,
+  );
+}
+
+/**
+ * 전광판(이닝별 점수 표). 경기 전이거나 서버가 아직 못 가져왔으면(g.scoreboard
+ * 가 null) 아무것도 그리지 않는다 — 없는 데이터를 빈 표로 보여주지 않는다.
+ * 가로 폭이 좁은 화면에서 연장전(10회 이상)까지 다 담기면 넘칠 수 있어
+ * 바깥을 가로 스크롤 컨테이너로 감싼다.
+ */
+function renderScoreboard(sb, teamLabel, oppLabel) {
+  if (!sb) return null;
+
+  const innings = Math.max(sb.team.innings.length, sb.opp.innings.length, 9);
+  const at = (arr, i) => (arr[i] != null ? String(arr[i]) : '');
+
+  const row = (label, side, isMine) =>
+    el('tr', { class: isMine ? 'mine' : null },
+      el('th', { text: label }),
+      ...Array.from({ length: innings }, (_, i) => el('td', { text: at(side.innings, i) })),
+      el('td', { class: 'sb-total', text: String(side.r) }),
+      el('td', { text: String(side.h) }),
+      el('td', { text: String(side.e) }),
+      el('td', { text: String(side.b) }),
+    );
+
+  return el('div', { class: 'scorebox-wrap' },
+    el('table', { class: 'scorebox' },
+      el('thead', {},
+        el('tr', {},
+          el('th'),
+          ...Array.from({ length: innings }, (_, i) => el('th', { text: String(i + 1) })),
+          el('th', { text: 'R' }),
+          el('th', { text: 'H' }),
+          el('th', { text: 'E' }),
+          el('th', { text: 'B' }),
+        ),
+      ),
+      el('tbody', {}, row(teamLabel, sb.team, true), row(oppLabel, sb.opp, false)),
+    ),
   );
 }
 
@@ -489,13 +551,16 @@ function renderScheduleList(box, { games, today }) {
   const draws = played.filter((g) => g.result === 'draw').length;
   const homeCount = games.filter((g) => g.isHome).length;
 
-  box.append(
-    el('p', { class: 'sched-summary' },
-      el('b', { text: `${games.length}경기` }),
-      ' · 홈 ',
-      el('b', { class: 'hl', text: `${homeCount}경기` }),
-      played.length ? ` · ${wins}승 ${draws}무 ${losses}패` : '',
-    ),
+  // 요약줄은 카드 목록과 달리 #sched-fixed 안에 고정된 요소라, 매번 새로 만들지 않고
+  // 내용만 갈아 끼운다 — '경기 알림' 제목부터 이 줄까지는 그대로 있고 카드만 스크롤되게
+  // 하려는 것이 목적이라, 애초에 스크롤 영역(box) 안에 넣지 않는다.
+  const summary = $('#sched-summary');
+  clear(summary);
+  summary.append(
+    el('b', { text: `${games.length}경기` }),
+    ' · 홈 ',
+    el('b', { class: 'hl', text: `${homeCount}경기` }),
+    played.length ? ` · ${wins}승 ${draws}무 ${losses}패` : '',
   );
 
   // 월별로 끊어 긴 목록을 훑기 쉽게 한다.
@@ -511,8 +576,8 @@ function renderScheduleList(box, { games, today }) {
 }
 
 /**
- * 달력 뷰. 한 달을 7열 격자로 그리고, 경기가 있는 날짜에 상대팀 이름과
- * 결과 색(승 남색 · 패 빨강 · 무 회색)을 얹는다. 홈경기는 배경을 한 단계
+ * 달력 뷰. 한 달을 7열 격자로 그리고, 경기가 있는 날짜에 상대팀 이름(검정)과
+ * 결과 배지(승 파랑 · 패 빨강 · 무 회색)를 얹는다. 홈경기는 배경을 한 단계
  * 진한 크림으로 칠해 원정과 구분한다.
  *
  * 날짜를 누르면 리스트 뷰로 전환해 그 날짜로 스크롤한다 — 달력은 훑어보는 용도,
@@ -561,14 +626,18 @@ function renderCalendar(box, { games, today }) {
       g?.cancelled && 'is-off',
     ].filter(Boolean).join(' ');
 
-    const opp = g
-      ? el('span', { class: `cal-opp${g.result ? ` ${g.result}` : ''}`, text: g.oppName })
+    const opp = g ? el('span', { class: 'cal-opp', text: g.oppName }) : null;
+    // 승/패/무는 텍스트 색이 아니라 별도의 색 배지로 표시한다 — 상대팀 이름은
+    // 항상 검정으로 고정해 어떤 결과든 이름 자체는 똑같이 읽히게 한다.
+    const badge = g?.result
+      ? el('span', { class: `cal-badge ${g.result}`, text: RESULT_LABEL[g.result] })
       : null;
 
     grid.append(
       el('button', { class: cellClasses, type: 'button', 'data-date': date, disabled: !g },
         el('span', { class: 'cal-daynum', text: String(d) }),
         opp,
+        badge,
       ),
     );
   }
@@ -582,6 +651,8 @@ function renderScheduleView() {
   const active = document.querySelector('.view-btn.is-active')?.dataset.view ?? 'list';
   $('#schedule-list').classList.toggle('is-active', active === 'list');
   $('#schedule-calendar').classList.toggle('is-active', active === 'calendar');
+  // 요약줄은 리스트 전용 정보라, 고정 영역에 상시 존재하는 대신 리스트일 때만 보여준다.
+  $('#sched-summary').hidden = active !== 'list';
 
   if (active === 'list') {
     renderScheduleList($('#schedule-list'), scheduleData);

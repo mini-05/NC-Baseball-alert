@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS game_state (
   status_info   TEXT,                   -- "3회말", "경기취소" 등
   cancelled     INTEGER NOT NULL DEFAULT 0,
   suspended     INTEGER NOT NULL DEFAULT 0,
+  scoreboard    TEXT,                    -- 이닝별 점수(전광판). JSON. 경기 전이면 NULL
   updated_at    TEXT NOT NULL
 );
 

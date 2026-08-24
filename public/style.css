@@ -52,6 +52,9 @@
   --success: #5db872;
   --warning: #d4a017;
   --error: #c64545;
+  /* 달력의 '승' 배지 전용. NC 남색(--surface-dark)은 너무 어두워 작은 배지에서는
+     검정에 가깝게 보이므로, 뚜렷하게 "파란색"으로 읽히는 값을 따로 둔다. */
+  --win-blue: #2f6fed;
 
   /* ── 라운드 (계층적) ── */
   --r-sm: 6px;
@@ -131,7 +134,17 @@ body {
 
 /* ─────────── 상단 ─────────── */
 
+/*
+ * 화면 맨 위에 붙인다(sticky). 일정 탭에서 "제목부터 요약줄까지 고정, 카드만
+ * 스크롤"을 만들기 위한 전제이지만, 어느 탭에서든 늘 상단 메뉴가 보이는 편이
+ * 자연스러워 전 탭 공통으로 적용했다. JS 가 실측 높이를 --topbar-h 로 넣어
+ * .sched-fixed 가 바로 그 아래에 이어 붙게 한다.
+ */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: var(--canvas);
   max-width: 720px;
   margin: 0 auto;
   padding: calc(env(safe-area-inset-top) + 24px) var(--s-lg) 0;
@@ -357,6 +370,51 @@ main {
 .verdict.lose { color: var(--error); }
 .verdict.draw, .verdict.off { color: var(--muted); }
 
+/* 전광판. 연장전까지 담기면 가로 폭을 넘을 수 있어 가로 스크롤로 흡수한다. */
+.scorebox-wrap {
+  margin-top: var(--s-sm);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scorebox {
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.scorebox th, .scorebox td {
+  padding: 4px 6px;
+  text-align: center;
+  min-width: 18px;
+}
+
+.scorebox thead th {
+  color: var(--muted-soft);
+  font-weight: 500;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.card-dark .scorebox thead th { color: var(--on-dark-soft); border-bottom-color: var(--surface-dark-elevated); }
+
+.scorebox tbody th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--body);
+  padding-right: var(--s-sm);
+}
+.card-dark .scorebox tbody th { color: var(--on-dark); }
+
+.scorebox tbody tr.mine th, .scorebox tbody tr.mine td { color: var(--ink); }
+.card-dark .scorebox tbody tr.mine th, .card-dark .scorebox tbody tr.mine td { color: var(--on-dark); }
+
+/* R(득점) 칸은 왼쪽에 구분선을 둬 이닝 점수와 합계를 시각적으로 나눈다. */
+.scorebox td.sb-total {
+  font-weight: 700;
+  border-left: 1px solid var(--hairline-soft);
+}
+.card-dark .scorebox td.sb-total { border-left-color: var(--surface-dark-elevated); }
+
 /* 기록 카드의 시작·종료 시각 */
 .game-times {
   margin-top: var(--s-xs);
@@ -493,9 +551,11 @@ main {
 
 .sched-summary {
   margin: 0 4px var(--s-md);
+  padding-bottom: var(--s-sm);
   font-size: 14px;
   color: var(--muted);
 }
+.sched-summary[hidden] { display: none; }
 .sched-summary b { color: var(--ink); font-weight: 600; }
 .sched-summary b.hl { color: var(--primary-active); }
 
@@ -520,20 +580,21 @@ main {
  * ::after 가 이 요소를 기준으로 자리 잡을 수 있는 이유는 sticky 도 relative 처럼
  * absolute 자식의 위치 기준(containing block)이 되기 때문이다.
  */
-.sched-toolbar {
+/*
+ * '경기 알림' 제목(.topbar, 전역)부터 이 요약줄까지 화면에 고정하고, 그 아래
+ * 카드 목록만 스크롤되게 한다. .topbar 도 sticky 이므로, 이 블록은 그 바로
+ * 아래에 이어 붙어야 한다 — 정확한 높이는 폰트 로딩 등으로 미묘하게 달라질 수
+ * 있어 하드코딩 대신 JS 가 .topbar 실측 높이를 --topbar-h 로 넣어 준다.
+ */
+.sched-fixed {
   position: sticky;
-  top: env(safe-area-inset-top);
+  top: var(--topbar-h, 0px);
   z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-sm);
-  padding: 10px 0 var(--s-sm);
-  margin-bottom: var(--s-sm);
   background: var(--canvas);
+  padding-top: 10px;
 }
 
-.sched-toolbar::after {
+.sched-fixed::after {
   content: '';
   position: absolute;
   left: 0;
@@ -542,6 +603,14 @@ main {
   height: 26px;
   background: linear-gradient(to bottom, var(--canvas), transparent);
   pointer-events: none;
+}
+
+.sched-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-sm);
+  padding-bottom: var(--s-sm);
 }
 
 .sched-actions { display: flex; align-items: center; gap: var(--s-xs); }
@@ -662,11 +731,7 @@ main {
 .cal-cell.is-home-game { background: var(--surface-cream-strong); }
 .cal-cell.is-off { opacity: 0.5; }
 
-/*
- * 상대팀 이름. 결과가 나온 경기는 승/패/무 색으로, 아직 안 끝난 경기는
- * 기본 텍스트 색으로 둔다. 승리는 NC 남색(팀 고유색과 같은 계열), 패배는
- * 시맨틱 error 빨강, 무승부는 회색 — 세 값 모두 기존 토큰을 그대로 재사용한다.
- */
+/* 상대팀 이름. 결과와 무관하게 항상 검정(ink)으로 고정한다 — 결과 표시는 배지가 맡는다. */
 .cal-opp {
   max-width: 100%;
   font-size: 9.5px;
@@ -675,11 +740,21 @@ main {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--muted);
+  color: var(--ink);
 }
-.cal-opp.win { color: var(--surface-dark); }
-.cal-opp.lose { color: var(--error); }
-.cal-opp.draw { color: var(--muted); font-weight: 500; }
+
+/* 상대팀 이름 아래(DOM 순서상 "뒤")에 놓는 결과 배지. 승=파랑·패=빨강·무=회색. */
+.cal-badge {
+  font-size: 7.5px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--r-pill);
+  color: #fff;
+}
+.cal-badge.win { background: var(--win-blue); }
+.cal-badge.lose { background: var(--error); }
+.cal-badge.draw { background: var(--muted-soft); }
 .cal-cell.is-off .cal-opp { text-decoration: line-through; }
 
 .sched {
