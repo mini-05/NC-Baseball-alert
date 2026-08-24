@@ -1,5 +1,24 @@
 /* NC 다이노스 경기 알림 — PWA 클라이언트 */
 
+/*
+ * 테마. 최대한 이르게(파일 맨 위에서) 적용해 깜빡임을 줄인다.
+ * CSP(script-src 'self')가 인라인 스크립트를 막아 <head> 에서 더 일찍 적용할 수는
+ * 없다 — 'unsafe-inline' 을 허용하는 대신 이 정도 지연을 감수했다.
+ * 'auto' 는 저장하지 않는다: 값이 없으면 곧 시스템 설정(prefers-color-scheme)을
+ * 그대로 따르는 것이 'auto' 이기 때문이다.
+ */
+const THEME_KEY = 'theme';
+
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') {
+    document.documentElement.setAttribute('data-theme', theme);
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+}
+
+applyTheme(localStorage.getItem(THEME_KEY));
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
@@ -130,6 +149,48 @@ $$('.tab').forEach((tab) => {
     }
   });
 });
+
+/**
+ * 좌우 스와이프로 탭을 넘긴다. 탭 버튼 클릭과 같은 경로(.tab.click())를 타서
+ * 스크롤-투데이 같은 부수 동작도 그대로 적용된다.
+ *
+ * 전광판(.scorebox-wrap)은 자체 가로 스크롤 표라, 그 안에서 시작한 터치는
+ * 스와이프 판정에서 제외한다 — 표를 넘겨 보려는 손짓이 탭 전환으로 새면 안 된다.
+ */
+{
+  const TAB_ORDER = ['history', 'schedule', 'standings', 'settings'];
+  const SWIPE_MIN_X = 60; // 오탭 방지용 최소 이동 거리
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTarget = null;
+
+  const main = $('main');
+
+  main.addEventListener('touchstart', (ev) => {
+    const t = ev.touches[0];
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+    touchStartTarget = ev.target;
+  }, { passive: true });
+
+  main.addEventListener('touchend', (ev) => {
+    if (touchStartTarget?.closest('.scorebox-wrap')) return;
+
+    const t = ev.changedTouches[0];
+    const dx = t.clientX - touchStartX;
+    const dy = t.clientY - touchStartY;
+
+    // 가로로 충분히, 세로보다 뚜렷하게 움직인 경우만 스와이프로 본다.
+    if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+
+    const activeTab = document.querySelector('.tab.is-active')?.dataset.tab;
+    const i = TAB_ORDER.indexOf(activeTab);
+    if (i < 0) return;
+
+    const next = TAB_ORDER[dx < 0 ? i + 1 : i - 1]; // 왼쪽으로 밀면 다음 탭
+    if (next) document.querySelector(`.tab[data-tab="${next}"]`)?.click();
+  }, { passive: true });
+}
 
 /* ─────────── 순위 · 포스트시즌 ─────────── */
 
@@ -624,20 +685,17 @@ function renderCalendar(box, { games, today }) {
       g && 'has-game',
       g?.isHome && 'is-home-game',
       g?.cancelled && 'is-off',
+      // 승/패/무를 원 배지 대신 셀 테두리 색으로 표시한다. 홈/원정 구분(배경 명도)과
+      // 별개로, 결과가 있는 날짜는 어느 쪽이든 이 테두리가 붙는다.
+      g?.result && `result-${g.result}`,
     ].filter(Boolean).join(' ');
 
     const opp = g ? el('span', { class: 'cal-opp', text: g.oppName }) : null;
-    // 승/패/무는 텍스트 색이 아니라 별도의 색 배지로 표시한다 — 상대팀 이름은
-    // 항상 검정으로 고정해 어떤 결과든 이름 자체는 똑같이 읽히게 한다.
-    const badge = g?.result
-      ? el('span', { class: `cal-badge ${g.result}`, text: RESULT_LABEL[g.result] })
-      : null;
 
     grid.append(
       el('button', { class: cellClasses, type: 'button', 'data-date': date, disabled: !g },
         el('span', { class: 'cal-daynum', text: String(d) }),
         opp,
-        badge,
       ),
     );
   }
@@ -786,6 +844,21 @@ async function disablePush() {
   setPushUi('off', '이 기기에서 알림을 받으려면 켜 주세요.');
   toast('알림이 꺼졌어요');
 }
+
+/* ─────────── 테마 전환 ─────────── */
+
+$$('.theme-btn').forEach((btn) => {
+  btn.classList.toggle('is-active', btn.dataset.theme === (localStorage.getItem(THEME_KEY) ?? 'auto'));
+
+  btn.addEventListener('click', () => {
+    const theme = btn.dataset.theme;
+    if (theme === 'auto') localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, theme);
+
+    applyTheme(theme);
+    $$('.theme-btn').forEach((b) => b.classList.toggle('is-active', b === btn));
+  });
+});
 
 $('#btn-toggle').addEventListener('click', async () => {
   const btn = $('#btn-toggle');

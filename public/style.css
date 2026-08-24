@@ -52,9 +52,10 @@
   --success: #5db872;
   --warning: #d4a017;
   --error: #c64545;
-  /* 달력의 '승' 배지 전용. NC 남색(--surface-dark)은 너무 어두워 작은 배지에서는
-     검정에 가깝게 보이므로, 뚜렷하게 "파란색"으로 읽히는 값을 따로 둔다. */
-  --win-blue: #2f6fed;
+  /* 달력 날짜 테두리 전용 색. NC 남색(--surface-dark)은 작은 테두리에서 검정에
+     가깝게 보이므로, 뚜렷하게 읽히는 파랑·노랑을 따로 둔다. */
+  --accent-blue: #2f6fed;
+  --accent-yellow: #d9a521;
 
   /* ── 라운드 (계층적) ── */
   --r-sm: 6px;
@@ -89,28 +90,15 @@
  * (surface-dark / dark-soft / dark-elevated / on-dark)만으로 구성해,
  * "네 번째 표면 톤을 만들지 말라"는 규칙을 지킨다.
  */
+/*
+ * 다크 모드 값. data-theme="dark" 를 명시하면 시스템 설정과 무관하게 적용되고,
+ * data-theme 가 없으면(자동) prefers-color-scheme 를 따른다. data-theme="light"
+ * 는 시스템이 다크여도 라이트 값(:root 기본값)을 강제로 유지한다.
+ */
 @media (prefers-color-scheme: dark) {
-  :root {
-    /* 다크 모드에서는 NC 네이비가 바탕이 된다. */
-    --canvas: #071d3d;
-    --surface-soft: #0c2749;
-    --surface-card: #0c2749;
-    --surface-cream-strong: #12335c;
-    --hairline: #143a68;
-    --hairline-soft: #0f2e55;
-
-    --ink: #faf9f5;
-    --body-strong: #e7edf5;
-    --body: #cfdae8;
-    --muted: #9fb2c9;
-    --muted-soft: #7e93ad;
-
-    /* 라이트 모드의 다크 표면보다 한 단계 더 깊게 두어 대비를 유지한다. */
-    --surface-dark: #04122a;
-    --surface-dark-soft: #071d3d;
-    --surface-dark-elevated: #12335c;
-  }
+  :root:not([data-theme='light']) { --canvas: #071d3d; --surface-soft: #0c2749; --surface-card: #0c2749; --surface-cream-strong: #12335c; --hairline: #143a68; --hairline-soft: #0f2e55; --ink: #faf9f5; --body-strong: #e7edf5; --body: #cfdae8; --muted: #9fb2c9; --muted-soft: #7e93ad; --surface-dark: #04122a; --surface-dark-soft: #071d3d; --surface-dark-elevated: #12335c; }
 }
+:root[data-theme='dark'] { --canvas: #071d3d; --surface-soft: #0c2749; --surface-card: #0c2749; --surface-cream-strong: #12335c; --hairline: #143a68; --hairline-soft: #0f2e55; --ink: #faf9f5; --body-strong: #e7edf5; --body: #cfdae8; --muted: #9fb2c9; --muted-soft: #7e93ad; --surface-dark: #04122a; --surface-dark-soft: #071d3d; --surface-dark-elevated: #12335c; }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
@@ -650,6 +638,32 @@ main {
 }
 .view-btn.is-active { background: var(--canvas); color: var(--ink); }
 
+/* 테마 전환. 세그먼트 구조는 위 view-switch 와 같다. */
+.theme-row { flex-direction: column; align-items: flex-start; gap: var(--s-sm); }
+
+.theme-switch {
+  display: flex;
+  align-self: stretch;
+  background: var(--surface-soft);
+  border-radius: var(--r-pill);
+  padding: 2px;
+}
+
+.theme-btn {
+  flex: 1;
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 7px 0;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+.theme-btn.is-active { background: var(--canvas); color: var(--ink); }
+
 /* ── 달력 ── */
 
 .cal-nav {
@@ -722,16 +736,24 @@ main {
 }
 .cal-cell:disabled .cal-daynum { color: var(--muted-soft); }
 
-/* 오늘은 골드 테두리로 짚어 준다. */
+/* 오늘은 골드 테두리로 짚어 준다. 결과가 나온 날은 아래 result-* 테두리가 덮어쓴다. */
 .cal-today { box-shadow: inset 0 0 0 1.5px var(--primary); }
 
 /* 경기가 있는 날의 배경. 홈은 원정보다 한 단계 진한 크림으로 — 일정 탭의
-   홈경기 강조와 같은 명도 차를 그대로 가져온다. */
+   홈경기 강조와 같은 명도 차를 그대로 가져온다. 홈/원정 모두 결과 테두리는 똑같이 붙는다. */
 .cal-cell.has-game { background: var(--surface-soft); }
 .cal-cell.is-home-game { background: var(--surface-cream-strong); }
 .cal-cell.is-off { opacity: 0.5; }
 
-/* 상대팀 이름. 결과와 무관하게 항상 검정(ink)으로 고정한다 — 결과 표시는 배지가 맡는다. */
+/*
+ * 결과를 원 배지 대신 날짜 칸 테두리 색으로 표시한다. cal-today 보다 뒤에 있어
+ * 오늘이면서 결과가 나온 날은 이 색이 우선한다. 승=빨강·패=파랑·무=노랑.
+ */
+.cal-cell.result-win { box-shadow: inset 0 0 0 1.5px var(--error); }
+.cal-cell.result-lose { box-shadow: inset 0 0 0 1.5px var(--accent-blue); }
+.cal-cell.result-draw { box-shadow: inset 0 0 0 1.5px var(--accent-yellow); }
+
+/* 상대팀 이름. 항상 검정(ink)으로 고정한다 — 결과는 테두리가 맡는다. */
 .cal-opp {
   max-width: 100%;
   font-size: 9.5px;
@@ -742,19 +764,6 @@ main {
   text-overflow: ellipsis;
   color: var(--ink);
 }
-
-/* 상대팀 이름 아래(DOM 순서상 "뒤")에 놓는 결과 배지. 승=파랑·패=빨강·무=회색. */
-.cal-badge {
-  font-size: 7.5px;
-  font-weight: 700;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: var(--r-pill);
-  color: #fff;
-}
-.cal-badge.win { background: var(--win-blue); }
-.cal-badge.lose { background: var(--error); }
-.cal-badge.draw { background: var(--muted-soft); }
 .cal-cell.is-off .cal-opp { text-decoration: line-through; }
 
 .sched {
