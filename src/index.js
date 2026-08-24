@@ -34,17 +34,22 @@ const REGULAR_SEASON_GAMES = 144;
  */
 async function tick(env) {
   const kst = kstNow();
+  // loadDailyPlan 도 내부적으로 이 값을 쓰지만, 하루 계획이 캐시에 있으면
+  // 그쪽에서는 조회하지 않는다. 여기서 한 번 구해 poll() 에도 그대로 넘겨,
+  // 경기 시간대 동안 1분마다 반복되는 poll() 이 같은 값을 또 캐시 조회하지 않게 한다.
+  const opener = await resolveSeasonOpener(env, kst.year);
   const plan = await loadDailyPlan(env, kst.date);
 
   if (plan.games.length === 0) return { skipped: 'no-games-today' };
   if (!isPollWindow(plan)) return { skipped: 'outside-window' };
 
-  return poll(env);
+  return poll(env, opener);
 }
 
-async function poll(env) {
+/** opener 를 생략하면(예: /api/admin/poll 에서 tick() 없이 직접 호출) 직접 구한다. */
+async function poll(env, opener) {
   const kst = kstNow();
-  const opener = await resolveSeasonOpener(env, kst.year);
+  opener ??= await resolveSeasonOpener(env, kst.year);
 
   // 자정을 넘겨 끝나는 경기가 있어 어제~오늘을 함께 본다.
   // 시범경기·올스타전·지난 시즌 경기는 알림 대상이 아니므로 여기서 걸러 낸다.
@@ -138,14 +143,26 @@ const json = (data, status = 200) =>
     },
   });
 
+/**
+ * endpoint 를 검증해 통과하면 null, 실패하면 바로 반환할 오류 Response 를 준다.
+ * 네 개의 API 핸들러가 같은 "검증 후 400 응답" 모양을 반복하고 있어 한곳으로 모았다.
+ */
+function endpointOrError(endpoint, env, { warn = false } = {}) {
+  const check = validateEndpoint(endpoint, env.EXTRA_PUSH_HOSTS ?? '');
+  if (check.ok) return null;
+
+  if (warn) console.warn('rejected endpoint:', check.reason);
+  return json({ error: check.reason }, 400);
+}
+
 /** 요청 본문에서 검증된 endpoint 와 그 구독 레코드를 꺼낸다. */
 async function requireSubscription(request, env) {
   const parsed = await readJson(request);
   if (!parsed.ok) return { error: json({ error: parsed.reason }, 400) };
 
   const endpoint = parsed.data.endpoint;
-  const check = validateEndpoint(endpoint, env.EXTRA_PUSH_HOSTS ?? '');
-  if (!check.ok) return { error: json({ error: check.reason }, 400) };
+  const epError = endpointOrError(endpoint, env);
+  if (epError) return { error: epError };
 
   const sub = await getSubscription(env.DB, endpoint);
   if (!sub) return { error: json({ error: '등록되지 않은 구독입니다.' }, 404) };
@@ -174,7 +191,9 @@ async function handleApi(request, env, url) {
   if (path === '/api/history' && method === 'GET') {
     const days = Math.min(Math.max(Number(url.searchParams.get('days')) || 30, 1), 120);
     const { year } = kstNow();
-    return json({ games: await listHistory(env.DB, { limitDays: days, seasonYear: year }) });
+    return json({
+      games: await listHistory(env.DB, { limitDays: days, seasonYear: year, teamCode: env.TEAM_CODE }),
+    });
   }
 
   /**
@@ -206,11 +225,8 @@ async function handleApi(request, env, url) {
 
     const { endpoint, keys } = parsed.data;
 
-    const epCheck = validateEndpoint(endpoint, env.EXTRA_PUSH_HOSTS ?? '');
-    if (!epCheck.ok) {
-      console.warn('rejected endpoint:', epCheck.reason);
-      return json({ error: epCheck.reason }, 400);
-    }
+    const epError = endpointOrError(endpoint, env, { warn: true });
+    if (epError) return epError;
 
     const keyCheck = validateKeys(keys?.p256dh, keys?.auth);
     if (!keyCheck.ok) return json({ error: keyCheck.reason }, 400);
@@ -230,8 +246,8 @@ async function handleApi(request, env, url) {
     const parsed = await readJson(request);
     if (!parsed.ok) return json({ error: parsed.reason }, 400);
 
-    const check = validateEndpoint(parsed.data.endpoint, env.EXTRA_PUSH_HOSTS ?? '');
-    if (!check.ok) return json({ error: check.reason }, 400);
+    const epError = endpointOrError(parsed.data.endpoint, env);
+    if (epError) return epError;
 
     // 없는 구독을 지워도 성공으로 답한다. 존재 여부를 알려 줄 이유가 없다.
     await deleteSubscription(env.DB, parsed.data.endpoint);
@@ -242,8 +258,8 @@ async function handleApi(request, env, url) {
 
   if (path === '/api/settings' && method === 'GET') {
     const endpoint = url.searchParams.get('endpoint');
-    const check = validateEndpoint(endpoint, env.EXTRA_PUSH_HOSTS ?? '');
-    if (!check.ok) return json({ error: check.reason }, 400);
+    const epError = endpointOrError(endpoint, env);
+    if (epError) return epError;
 
     const settings = await getSettings(env.DB, endpoint);
     return settings ? json({ settings }) : json({ error: '등록되지 않은 구독입니다.' }, 404);

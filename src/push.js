@@ -67,6 +67,11 @@ async function hkdf(salt, ikm, info, length) {
 
 /* ---------- VAPID ---------- */
 
+// VAPID 키는 배포마다 고정이라, 한 번 import 한 CryptoKey 를 격리 인스턴스 생명 동안
+// 재사용한다. broadcast() 가 구독자 N명에게 보낼 때마다 같은 키를 다시 import 하는
+// crypto.subtle 호출(N회)을 1회로 줄인다.
+let cachedVapidKey = null; // { publicKeyB64, privateKeyB64, key }
+
 /**
  * base64url 로 저장된 VAPID 키쌍을 ECDSA 서명용 CryptoKey 로 되살린다.
  * 개인키(d)만으로는 JWK 를 구성할 수 없어 공개키에서 x, y 를 떼어 함께 넣는다.
@@ -76,6 +81,14 @@ async function importVapidKey(publicKeyB64, privateKeyB64) {
   // 그대로 두면 서명 단계에서야 알 수 없는 예외로 터지므로 여기서 정리한다.
   const pubB64 = String(publicKeyB64 ?? '').trim().replace(/^["']|["']$/g, '');
   const privB64 = String(privateKeyB64 ?? '').trim().replace(/^["']|["']$/g, '');
+
+  if (
+    cachedVapidKey &&
+    cachedVapidKey.publicKeyB64 === pubB64 &&
+    cachedVapidKey.privateKeyB64 === privB64
+  ) {
+    return cachedVapidKey.key;
+  }
 
   if (!privB64) {
     throw new Error('VAPID_PRIVATE_KEY 시크릿이 비어 있습니다. wrangler secret put 으로 등록하세요.');
@@ -108,13 +121,15 @@ async function importVapidKey(publicKeyB64, privateKeyB64) {
   };
 
   try {
-    return await crypto.subtle.importKey(
+    const key = await crypto.subtle.importKey(
       'jwk',
       jwk,
       { name: 'ECDSA', namedCurve: 'P-256' },
       false,
       ['sign'],
     );
+    cachedVapidKey = { publicKeyB64: pubB64, privateKeyB64: privB64, key };
+    return key;
   } catch (err) {
     // 개인키와 공개키가 서로 다른 키쌍에서 나온 경우가 대표적이다.
     throw new Error(

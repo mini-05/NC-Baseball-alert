@@ -84,10 +84,11 @@ export function detectEvents(prev, cur, teamCode) {
   }
 
   // 3) 득점 — 점수가 변한 경기 중 상태에서만. 어느 팀이 냈는지 구분해 알린다.
-  const prevTeamScore = prev.homeCode === teamCode ? prev.homeScore : prev.awayScore;
-  const prevOppScore = prev.homeCode === teamCode ? prev.awayScore : prev.homeScore;
-  const teamGained = p.teamScore - prevTeamScore;
-  const oppGained = p.oppScore - prevOppScore;
+  // prev 스냅샷에는 팀명이 없지만(db.js 저장 컬럼에 없음) perspective() 는 점수만
+  // 봐도 정상 동작한다 — teamName/oppName 을 쓰지 않으므로 undefined 여도 무해하다.
+  const pPrev = perspective(prev, teamCode);
+  const teamGained = p.teamScore - pPrev.teamScore;
+  const oppGained = p.oppScore - pPrev.oppScore;
 
   if (cur.phase === 'live' && (teamGained !== 0 || oppGained !== 0)) {
     const who =

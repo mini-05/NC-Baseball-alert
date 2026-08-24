@@ -234,9 +234,10 @@ function formatStart(iso) {
 }
 
 function renderGame(g) {
-  const isHome = g.homeCode === teamCode;
-  const mine = { name: isHome ? g.homeName : g.awayName, score: isHome ? g.homeScore : g.awayScore };
-  const opp = { name: isHome ? g.awayName : g.homeName, score: isHome ? g.awayScore : g.homeScore };
+  // 홈/원정 관점은 서버가 이미 계산해 보낸다(perspective()) — /api/schedule 과 같은 방식.
+  const isHome = g.isHome;
+  const mine = { name: g.teamName, score: g.teamScore };
+  const opp = { name: g.oppName, score: g.oppScore };
 
   const done = g.phase === 'result' && !g.cancelled;
   const diff = mine.score - opp.score;
@@ -301,12 +302,7 @@ function renderGame(g) {
     ? el('ul', { class: 'timeline' },
         g.events.map((e) =>
           el('li', { class: 'tl-item' },
-            el('span', {
-              class: 'tl-time',
-              text: new Date(e.createdAt).toLocaleTimeString('ko-KR', {
-                hour: '2-digit', minute: '2-digit', hour12: false,
-              }),
-            }),
+            el('span', { class: 'tl-time', text: clockOf(e.createdAt) }),
             icon(e.kind),
             el('span', { class: 'tl-body' },
               el('b', { class: 'tl-kind', text: KIND_LABEL[e.kind] ?? e.kind }),
@@ -375,18 +371,19 @@ async function loadStandings() {
 
 /* ─────────── 일정 ─────────── */
 
-/** 오늘부터 며칠 뒤인지. 0이면 오늘, 1이면 내일. */
-function daysFromToday(dateStr) {
-  const today = new Date();
-  // KST 기준 오늘 날짜를 구한다. (앱은 국내 사용자를 전제로 한다)
-  const kst = new Date(today.getTime() + 9 * 3600000).toISOString().slice(0, 10);
-  const [ay, am, ad] = kst.split('-').map(Number);
+/**
+ * dateStr 이 today 로부터 며칠 뒤인지. 0이면 오늘, 1이면 내일.
+ * today 는 서버가 이미 계산해 준 KST 날짜 문자열('YYYY-MM-DD')을 그대로 받는다 —
+ * 일정 목록의 매 행마다 new Date() 로 "오늘"을 다시 구할 이유가 없다.
+ */
+function daysFromToday(dateStr, today) {
+  const [ay, am, ad] = today.split('-').map(Number);
   const [by, bm, bd] = dateStr.split('-').map(Number);
   return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400000);
 }
 
-function relativeDay(dateStr) {
-  const d = daysFromToday(dateStr);
+function relativeDay(dateStr, today) {
+  const d = daysFromToday(dateStr, today);
   if (d === 0) return '오늘';
   if (d === 1) return '내일';
   if (d === 2) return '모레';
@@ -396,7 +393,7 @@ function relativeDay(dateStr) {
 const RESULT_LABEL = { win: '승', lose: '패', draw: '무' };
 
 function renderScheduleItem(g, today) {
-  const rel = relativeDay(g.gameDate);
+  const rel = relativeDay(g.gameDate, today);
   const isPast = g.gameDate < today;
   const isToday = g.gameDate === today;
 
@@ -446,7 +443,6 @@ function renderScheduleItem(g, today) {
 
 /* ─────────── 일정 · 달력 ─────────── */
 
-const WEEKDAYS_MIN = ['일', '월', '화', '수', '목', '금', '토'];
 
 /** 마지막으로 불러온 일정. 리스트/달력 전환과 '오늘' 버튼이 재조회 없이 이 값을 함께 쓴다. */
 let scheduleData = null;
@@ -529,7 +525,7 @@ function renderCalendar(box, { games, today }) {
   );
 
   const grid = el('div', { class: 'cal-grid' },
-    ...WEEKDAYS_MIN.map((w) => el('div', { class: 'cal-dow', text: w })),
+    ...WEEKDAYS.map((w) => el('div', { class: 'cal-dow', text: w })),
   );
 
   for (let i = 0; i < leadBlanks; i++) grid.append(el('div', { class: 'cal-cell is-blank' }));

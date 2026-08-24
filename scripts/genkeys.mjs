@@ -7,8 +7,7 @@
  * 개인키는 `wrangler secret put VAPID_PRIVATE_KEY` 로 등록한다. (파일에 커밋하지 말 것)
  */
 
-const b64url = (buf) =>
-  Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+import { bytesToB64url } from '../src/push.js';
 
 const pair = await crypto.subtle.generateKey(
   { name: 'ECDSA', namedCurve: 'P-256' },
@@ -16,7 +15,7 @@ const pair = await crypto.subtle.generateKey(
   ['sign', 'verify'],
 );
 
-const publicKey = b64url(await crypto.subtle.exportKey('raw', pair.publicKey));
+const publicKey = bytesToB64url(await crypto.subtle.exportKey('raw', pair.publicKey));
 const jwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
 
 console.log('\nVAPID 키쌍이 생성됐습니다.\n');

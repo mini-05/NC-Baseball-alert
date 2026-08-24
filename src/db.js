@@ -1,7 +1,7 @@
 /** D1 접근을 한곳에 모은다. 나머지 코드는 SQL 을 직접 쓰지 않는다. */
 
 import { KIND_COLUMN, SCOPE_COLUMN } from './detect.js';
-import { isPostseason } from './kbo.js';
+import { isPostseason, perspective } from './kbo.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -126,7 +126,7 @@ export async function insertEvent(db, game, ev) {
  * 이번 시즌 경기만 돌려준다. gameId 끝 4자리가 시즌 연도이므로 SQL 에서 바로 거른다.
  * 지난 시즌에 쌓인 행이 남아 있어도 화면에 섞이지 않는다.
  */
-export async function listHistory(db, { limitDays = 30, seasonYear } = {}) {
+export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } = {}) {
   const season = String(seasonYear);
   const seasonFilter = `substr(game_id, -4) = ?`;
 
@@ -163,26 +163,36 @@ export async function listHistory(db, { limitDays = 30, seasonYear } = {}) {
     });
   }
 
-  return (games.results ?? []).map((r) => ({
-    gameId: r.game_id,
-    gameDate: r.game_date,
-    startAt: r.start_at,
-    stadium: r.stadium,
-    homeCode: r.home_code,
-    homeName: r.home_name,
-    awayCode: r.away_code,
-    awayName: r.away_name,
-    homeScore: r.home_score,
-    awayScore: r.away_score,
-    phase: r.phase,
-    series: r.series,
-    // 시리즈 태그(한국시리즈·준PO 등)를 붙일지 여부를 서버가 명시적으로 정한다.
-    // 정규시즌 경기에는 태그가 붙지 않는다.
-    isPostseason: isPostseason(r.series),
-    statusInfo: r.status_info,
-    cancelled: Boolean(r.cancelled),
-    events: byGame.get(r.game_id) ?? [],
-  }));
+  return (games.results ?? []).map((r) => {
+    // 홈/원정 관점을 서버에서 한 번만 계산해 내려준다. /api/schedule 이 이미 같은
+    // 방식(perspective())으로 isHome/teamScore/oppScore 를 계산해 보내고 있어,
+    // 클라이언트가 두 엔드포인트마다 따로 홈/원정을 되짚을 필요가 없어진다.
+    const p = perspective(
+      { homeCode: r.home_code, awayCode: r.away_code, homeName: r.home_name,
+        awayName: r.away_name, homeScore: r.home_score, awayScore: r.away_score },
+      teamCode,
+    );
+
+    return {
+      gameId: r.game_id,
+      gameDate: r.game_date,
+      startAt: r.start_at,
+      stadium: r.stadium,
+      isHome: p.isHome,
+      teamName: p.teamName,
+      oppName: p.oppName,
+      teamScore: p.teamScore,
+      oppScore: p.oppScore,
+      phase: r.phase,
+      series: r.series,
+      // 시리즈 태그(한국시리즈·준PO 등)를 붙일지 여부를 서버가 명시적으로 정한다.
+      // 정규시즌 경기에는 태그가 붙지 않는다.
+      isPostseason: isPostseason(r.series),
+      statusInfo: r.status_info,
+      cancelled: Boolean(r.cancelled),
+      events: byGame.get(r.game_id) ?? [],
+    };
+  });
 }
 
 /**

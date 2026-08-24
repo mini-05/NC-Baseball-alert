@@ -9,7 +9,7 @@
  */
 
 import {
-  fetchGames, filterTeam, filterCurrentSeason, fetchStandings,
+  fetchGames, filterTeam, filterCurrentSeason, fetchStandings, perspective,
   kstDateOffset, kstIsoToEpoch, seasonYearOf, TEAM_CODES,
 } from './kbo.js';
 import { getCache, putCache } from './db.js';
@@ -154,9 +154,7 @@ export async function loadSchedule(env, year) {
 
   const schedule = games
     .map((g) => {
-      const isHome = g.homeCode === env.TEAM_CODE;
-      const teamScore = isHome ? g.homeScore : g.awayScore;
-      const oppScore = isHome ? g.awayScore : g.homeScore;
+      const p = perspective(g, env.TEAM_CODE);
 
       return {
         gameId: g.gameId,
@@ -164,17 +162,17 @@ export async function loadSchedule(env, year) {
         startAt: g.startAt,
         stadium: g.stadium,
         series: g.series,
-        isHome,
-        oppName: isHome ? g.awayName : g.homeName,
+        isHome: p.isHome,
+        oppName: p.oppName,
         phase: g.phase,
         cancelled: g.cancelled,
         statusInfo: g.statusInfo,
         // 지난 경기의 결과. 아직 안 끝난 경기는 화면에서 phase 로 걸러 쓴다.
-        teamScore,
-        oppScore,
+        teamScore: p.teamScore,
+        oppScore: p.oppScore,
         result:
           g.phase === 'result' && !g.cancelled
-            ? teamScore > oppScore ? 'win' : teamScore < oppScore ? 'lose' : 'draw'
+            ? p.teamScore > p.oppScore ? 'win' : p.teamScore < p.oppScore ? 'lose' : 'draw'
             : null,
       };
     })
