@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>NC 다이노스 경기 알림</title>
+<meta name="theme-color" content="#faf9f5" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="NC 알림" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/icon-180.png" />
+<link rel="icon" href="/icon-192.png" />
+
+<!--
+  DESIGN.md 는 Copernicus(디스플레이 세리프)와 StyreneB(본문 산세리프)를 지정하지만
+  둘 다 Anthropic 라이선스 폰트라 공개 웹폰트가 없다. 문서가 명시한 대체재를 쓴다:
+  세리프 → Cormorant Garamond, 산세리프 → Inter.
+  다만 두 폰트 모두 한글 글리프가 없으므로, 폰트 폴백 체인으로 라틴/숫자는 대체재가,
+  한글은 Noto Serif KR / 시스템 한글 폰트가 렌더링하게 한다. (style.css 참고)
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Inter:wght@400;500;600&family=Noto+Serif+KR:wght@400;500&display=swap" rel="stylesheet" />
+<!-- 본문 한글 서체. 토스가 실제로 쓰는 Pretendard. -->
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" rel="stylesheet" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<!--
+  Tossface 아이콘 심볼. 이모지 폰트 전체는 12MB, 필요한 서브셋만 골라도 4MB라
+  같은 저작물의 SVG 판을 인라인 심볼로 넣었다 (7KB). scripts/gentossface.py 로 생성한다.
+  Tossface © Viva Republica — https://toss.im/tossface
+-->
+<svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <!-- 야구공 — 경기 시작 -->
+  <symbol id="tf-start" viewBox="0 0 40 40"><g><g><g><circle cx="20" cy="20" r="17.5" fill="#e5e8eb"/></g><path d="m8.359,6.986c-.497.444-.967.914-1.41,1.411,2.074,2.489,8.474,11.786-.071,23.183.445.506.92.983,1.42,1.434,9.694-12.676,2.257-23.366.061-26.027Z" fill="#a3b5c9"/><path d="m33.122,31.58c-8.546-11.396-2.146-20.694-.072-23.183-.443-.497-.913-.967-1.41-1.411-2.196,2.661-9.633,13.351.061,26.027.5-.451.975-.928,1.42-1.434Z" fill="#a3b5c9"/></g></g><path d="m13.156,21h-1.956c-.552,0-1-.448-1-1s.448-1,1-1h1.956c.552,0,1,.448,1,1s-.448,1-1,1Z" fill="#fa2d4c"/><path d="m10.583,16.313c-.441,0-.846-.295-.965-.742-.143-.533.173-1.082.707-1.225l1.889-.506c.533-.146,1.082.174,1.225.707s-.173,1.082-.707,1.225l-1.889.506c-.086.023-.174.035-.259.035Z" fill="#fa2d4c"/><path d="m8.775,11.944c-.346,0-.682-.179-.867-.5-.276-.478-.113-1.09.366-1.366l1.693-.978c.478-.278,1.09-.113,1.366.366.276.478.113,1.09-.366,1.366l-1.693.978c-.157.091-.33.134-.499.134Z" fill="#fa2d4c"/><path d="m12.473,26.194c-.085,0-.172-.011-.259-.035l-1.889-.506c-.533-.143-.85-.691-.707-1.225.143-.533.688-.854,1.225-.707l1.889.506c.533.143.85.691.707,1.225-.12.447-.523.742-.965.742Z" fill="#fa2d4c"/><path d="m10.467,31.033c-.169,0-.341-.043-.499-.134l-1.694-.978c-.478-.276-.642-.888-.366-1.366.275-.479.886-.644,1.366-.366l1.694.978c.478.276.642.888.366,1.366-.185.321-.521.5-.867.5Z" fill="#fa2d4c"/><path d="m28.799,21h-1.956c-.552,0-1-.448-1-1s.448-1,1-1h1.956c.552,0,1,.448,1,1s-.448,1-1,1Z" fill="#fa2d4c"/><path d="m29.417,16.313c-.085,0-.173-.011-.259-.035l-1.889-.506c-.534-.143-.85-.691-.707-1.225.143-.533.691-.851,1.225-.707l1.889.506c.534.143.85.691.707,1.225-.12.447-.524.742-.965.742Z" fill="#fa2d4c"/><path d="m31.225,11.944c-.169,0-.342-.043-.499-.134l-1.693-.978c-.479-.276-.642-.888-.366-1.366.275-.479.887-.644,1.366-.366l1.693.978c.479.276.642.888.366,1.366-.185.321-.521.5-.867.5Z" fill="#fa2d4c"/><path d="m27.527,26.194c-.442,0-.846-.295-.965-.742-.143-.534.174-1.082.707-1.225l1.889-.506c.537-.146,1.082.174,1.225.707.143.534-.174,1.082-.707,1.225l-1.889.506c-.087.023-.174.035-.259.035Z" fill="#fa2d4c"/><path d="m29.533,31.033c-.346,0-.682-.179-.867-.5-.276-.479-.112-1.09.366-1.366l1.694-.978c.478-.277,1.09-.113,1.366.366.276.479.112,1.09-.366,1.366l-1.694.978c-.158.091-.33.134-.499.134Z" fill="#fa2d4c"/></symbol>
+  <!-- 불꽃 — 득점 -->
+  <symbol id="tf-score" viewBox="0 0 40 40"><rect x="0" y="0" width="40" height="40" fill="none"/><g><path d="m31.22,11.07c.409,2.729.884,4.291-1.068,4.291-2.656,0-2.657-6.286-7.152-9.867-4.447-3.542-7.764-2.681-7.834-2.662-.001.001-.003.003-.004.004,3.704,3.092,1.638,8.174-.786,9.575-2.326,1.344-4.981-.351-3.591-4.34-3.057,4.18-5.696,9.245-5.696,14.292,0,8.235,6.676,14.911,14.911,14.911s14.911-6.676,14.911-14.911c0-3.891-1.572-7.793-3.691-11.293Z" fill="#ef4452"/><path d="m20,20.018s6.484,3.734,6.484,8.951c0,3.581-2.903,6.484-6.484,6.484-3.581,0-6.484-2.903-6.484-6.484,0-5.217,6.484-8.951,6.484-8.951Z" fill="#ff7978"/></g></symbol>
+  <!-- 비 — 우천 취소 -->
+  <symbol id="tf-cancel" viewBox="0 0 40 40"><rect y="0" width="40" height="40" fill="none"/><path d="m16.61,33.29c.186-.711,1.675-2.485,2.422-3.343.175-.202.504-.116.558.146.231,1.113.662,3.389.476,4.101-.25.954-1.225,1.526-2.18,1.276-.954-.25-1.526-1.225-1.276-2.18Z" fill="#88c5ff"/><path d="m24.645,33.29c.186-.711,1.675-2.485,2.422-3.343.175-.202.504-.116.558.146.231,1.113.662,3.389.476,4.101-.25.954-1.225,1.526-2.18,1.276-.954-.25-1.526-1.225-1.276-2.18Z" fill="#88c5ff"/><path d="m8.575,33.29c.186-.711,1.675-2.485,2.422-3.343.175-.202.504-.116.558.146.231,1.113.662,3.389.476,4.101-.25.954-1.225,1.526-2.18,1.276-.954-.25-1.526-1.225-1.276-2.18Z" fill="#88c5ff"/><g><polygon points="30.43 27.282 9.356 27.282 9.356 16.364 30.15 17.767 30.43 27.282" fill="#e5e8eb"/><circle cx="22.733" cy="12.004" r="8.707" fill="#e5e8eb"/><circle cx="30.116" cy="19.898" r="7.384" fill="#e5e8eb"/><circle cx="9.356" cy="20.426" r="6.856" fill="#e5e8eb"/><circle cx="14.026" cy="13.266" r="5.612" fill="#e5e8eb"/></g></symbol>
+  <!-- 체커기 — 경기 종료 -->
+  <symbol id="tf-end" viewBox="0 0 40 40"><g><path d="m14.084,16.083c-2.447.138-4.894-.137-7.341-1.239,0-2.447,0-4.894,0-7.341,2.447,1.101,4.894,1.377,7.341,1.239,0,2.447,0,4.894,0,7.341Z" fill="#3d3d3d"/><path d="m21.425,14.844c-2.447.551-4.894,1.101-7.341,1.239,0-2.447,0-4.894,0-7.341,2.447-.137,4.894-.688,7.341-1.239v7.341Z" fill="#d3d3d3"/><path d="m28.766,13.605c-2.447.138-4.894.688-7.341,1.239v-7.341c2.447-.55,4.894-1.101,7.341-1.239v7.341Z" fill="#3d3d3d"/><path d="m36.107,14.844c-2.447-1.101-4.894-1.376-7.341-1.239v-7.341c2.24-.126,4.48.094,6.719.976.378.149.622.528.622.934v6.67Z" fill="#d3d3d3"/><path d="m14.084,23.424c-2.447.138-4.894-.138-7.341-1.239,0-2.447,0-4.894,0-7.341,2.447,1.101,4.894,1.376,7.341,1.239,0,2.447,0,4.894,0,7.341Z" fill="#d3d3d3"/><path d="m21.425,22.185c-2.447.551-4.894,1.101-7.341,1.239,0-2.447,0-4.894,0-7.341,2.447-.138,4.894-.688,7.341-1.239v7.341Z" fill="#3d3d3d"/><path d="m28.766,20.946c-2.447.138-4.894.689-7.341,1.239v-7.341c2.447-.55,4.894-1.101,7.341-1.239v7.341Z" fill="#d3d3d3"/><path d="m36.107,22.185c-2.447-1.101-4.894-1.376-7.341-1.239v-7.341c2.447-.138,4.894.138,7.341,1.239v7.341Z" fill="#3d3d3d"/><path d="m14.084,30.765c-2.447.138-4.894-.138-7.341-1.239,0-2.447,0-4.894,0-7.341,2.447,1.101,4.894,1.376,7.341,1.239,0,2.447,0,4.894,0,7.341Z" fill="#3d3d3d"/><path d="m21.425,29.526c-2.447.551-4.894,1.101-7.341,1.239,0-2.447,0-4.894,0-7.341,2.447-.138,4.894-.689,7.341-1.239v7.341Z" fill="#d3d3d3"/><path d="m28.766,28.287c-2.447.138-4.894.688-7.341,1.239v-7.341c2.447-.551,4.894-1.101,7.341-1.239v7.341Z" fill="#3d3d3d"/><path d="m34.794,29.012c-2.009-.672-4.019-.838-6.028-.725v-7.341c2.447-.138,4.894.138,7.341,1.239v5.886c0,.681-.667,1.157-1.313.941Z" fill="#d3d3d3"/></g><path d="m5.893,35.838c-.553,0-1-.447-1-1V5.162c0-.553.447-1,1-1s1,.447,1,1v29.676c0,.553-.447,1-1,1Z" fill="#3d3d3d"/><circle cx="5.893" cy="5.162" r="2" fill="#3d3d3d"/></symbol>
+  <!-- 트로피 — 포스트시즌 -->
+  <symbol id="tf-post" viewBox="0 0 40 40"><g opacity="0"><rect width="40" height="40" fill="#fff"/></g><rect x="18.5" y="25" width="3" height="6.667" fill="#fa0"/><path d="m29.674,20.245c-1.21,0-2.419-.333-3.571-.999-2.919-1.688-4.958-5.244-4.958-8.647v-1.146l7.978-2.178h5.88c1.378,0,2.5,1.122,2.5,2.5v1.806c0,3.216-1.638,6.157-4.274,7.674-1.146.66-2.35.989-3.554.989Zm-5.42-8.53c.376,1.983,1.692,3.975,3.351,4.934,1.369.792,2.758.793,4.127.006,1.709-.984,2.771-2.928,2.771-5.074v-1.306h-4.978l-5.271,1.439Z" fill="#ffcd00"/><path d="m10.326,20.245c-1.204,0-2.408-.33-3.555-.99-2.636-1.517-4.274-4.458-4.274-7.674v-1.806c0-1.378,1.122-2.5,2.5-2.5h5.88l7.978,2.178v1.146c0,3.403-2.039,6.959-4.958,8.647-1.151.666-2.361.999-3.571.999Zm-4.829-9.969v1.306c0,2.146,1.062,4.09,2.771,5.074,1.37.788,2.758.786,4.127-.006,1.659-.959,2.975-2.951,3.351-4.934l-5.271-1.439h-4.978Z" fill="#ffcd00"/><path d="m32.078,16.588c0,6.735-5.512,12.182-12.271,12.077-6.669-.104-11.886-5.842-11.886-12.511V5.333c0-1.105.895-2,2-2h20.157c1.105,0,2,.895,2,2v11.255Z" fill="#ffcd00"/><path d="m27.335,37.167h-14.67c-.819,0-1.397-.802-1.138-1.579l.926-2.779c.327-.98,1.244-1.641,2.277-1.641h10.54c1.033,0,1.95.661,2.277,1.641l.926,2.779c.259.777-.319,1.579-1.138,1.579Z" fill="#ffcd00"/></symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <!--
+      공식 구단 로고는 상표/저작권 보호 대상이라 그대로 쓸 수 없어, 대신
+      "다이노스"를 나타내는 오리지널 브라키오사우루스 실루엣(긴 목·작은 머리·
+      두꺼운 몸통·가는 꼬리)을 직접 그렸다. fill 은 부모의 .dino-mark 클래스로
+      지정해 자식 도형에 상속시킨다.
+    -->
+    <svg class="dino-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <ellipse cx="10" cy="15" rx="6" ry="4" />
+      <path d="M13 12 C14 9 16 5.5 18 3.3 C18.6 2.6 19.7 2.5 20.3 3.1 C20.9 3.7 20.6 4.5 19.9 4.9 C18 6.3 16.2 9.5 15.1 12.7 Z" />
+      <ellipse cx="19.8" cy="3.3" rx="1.9" ry="1.6" />
+      <path d="M6.5 15 C4 15.3 1.5 16 0.2 17.1 C0 17.3 0.3 17.7 0.6 17.5 C2.6 16.4 4.7 15.7 7.3 15.2 Z" />
+      <rect x="7" y="18" width="2.4" height="4.5" rx="1" />
+      <rect x="12" y="18" width="2.4" height="4.5" rx="1" />
+    </svg>
+    <span class="wordmark">NC 다이노스</span>
+  </div>
+
+  <h1 class="display">경기 알림</h1>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-tab="history" role="tab">기록</button>
+    <button class="tab" data-tab="schedule" role="tab">일정</button>
+    <button class="tab" data-tab="standings" role="tab">순위</button>
+    <button class="tab" data-tab="settings" role="tab">알림</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ─────────── 기록 ─────────── -->
+  <section id="panel-history" class="panel is-active">
+    <div id="history">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </section>
+
+  <!-- ─────────── 일정 ─────────── -->
+  <section id="panel-schedule" class="panel">
+    <!-- '경기 알림' 제목부터 이 아래 요약줄까지는 화면에 고정되고, 카드 목록만 그 밑에서 스크롤된다. -->
+    <div class="sched-fixed">
+      <div class="sched-toolbar">
+        <div class="legend">
+          <span class="legend-item"><i class="swatch home"></i>홈경기</span>
+          <span class="legend-item"><i class="swatch away"></i>원정</span>
+        </div>
+        <div class="sched-actions">
+          <button id="btn-today" class="btn-chip">오늘</button>
+          <div class="view-switch" role="tablist">
+            <button class="view-btn is-active" data-view="list">리스트</button>
+            <button class="view-btn" data-view="calendar">달력</button>
+          </div>
+        </div>
+      </div>
+      <p id="sched-summary" class="sched-summary"></p>
+    </div>
+
+    <div id="schedule-list" class="sched-view is-active">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+
+    <div id="schedule-calendar" class="sched-view"></div>
+  </section>
+
+  <!-- ─────────── 순위 ─────────── -->
+  <section id="panel-standings" class="panel">
+    <div id="outlook"></div>
+    <div id="table">
+      <div class="skeleton"></div>
+    </div>
+    <p class="fineprint" id="standings-updated"></p>
+  </section>
+
+  <!-- ─────────── 알림 ─────────── -->
+  <section id="panel-settings" class="panel">
+    <!-- 알림이 꺼져 있으면 코랄 콜아웃(callout-card-coral)으로, 켜져 있으면 크림 카드로 바뀐다. -->
+    <div class="card hero" id="push-card">
+      <h2 class="hero-title">푸시 알림</h2>
+      <p id="push-desc" class="hero-desc">확인하고 있어요…</p>
+      <button id="btn-toggle" class="btn btn-primary" disabled>확인 중</button>
+      <button id="btn-test" class="btn btn-link" hidden>테스트 알림 보내기</button>
+    </div>
+
+    <h3 class="eyebrow">언제 알릴까요</h3>
+    <div class="card card-rows">
+      <label class="row">
+        <span class="row-text"><b>경기 시작</b><span>플레이볼 순간</span></span>
+        <span class="sw"><input type="checkbox" data-key="start" disabled /><i></i></span>
+      </label>
+      <label class="row">
+        <span class="row-text"><b>경기 취소</b><span>우천 등으로 취소될 때</span></span>
+        <span class="sw"><input type="checkbox" data-key="cancel" disabled /><i></i></span>
+      </label>
+      <label class="row">
+        <span class="row-text"><b>득점</b><span>점수가 바뀔 때마다</span></span>
+        <span class="sw"><input type="checkbox" data-key="score" disabled /><i></i></span>
+      </label>
+      <label class="row">
+        <span class="row-text"><b>경기 종료</b><span>최종 결과</span></span>
+        <span class="sw"><input type="checkbox" data-key="end" disabled /><i></i></span>
+      </label>
+    </div>
+
+    <h3 class="eyebrow">어떤 경기를 알릴까요</h3>
+    <div class="card card-rows">
+      <label class="row">
+        <span class="row-text"><b>정규시즌</b><span>3월~10월 페넌트레이스</span></span>
+        <span class="sw"><input type="checkbox" data-key="regular" disabled /><i></i></span>
+      </label>
+      <label class="row">
+        <span class="row-text"><b>포스트시즌</b><span>와일드카드 · 준PO · PO · 한국시리즈</span></span>
+        <span class="sw"><input type="checkbox" data-key="postseason" disabled /><i></i></span>
+      </label>
+      <label class="row">
+        <span class="row-text"><b>홈경기만</b><span>켜면 창원 홈경기 알림만 받아요</span></span>
+        <span class="sw"><input type="checkbox" data-key="homeOnly" disabled /><i></i></span>
+      </label>
+    </div>
+    <p class="fineprint">설정은 이 기기에만 적용돼요.</p>
+
+    <h3 class="eyebrow">화면</h3>
+    <div class="card card-rows">
+      <div class="row theme-row">
+        <span class="row-text"><b>테마</b><span>기기 설정을 따르거나 직접 골라요</span></span>
+        <div class="theme-switch" role="tablist">
+          <button class="theme-btn" data-theme="light" type="button">라이트</button>
+          <button class="theme-btn" data-theme="dark" type="button">다크</button>
+          <button class="theme-btn is-active" data-theme="auto" type="button">자동</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card card-dark" id="ios-hint" hidden>
+      <h3>iPhone에서 알림 받기</h3>
+      <p>
+        iOS는 홈 화면에 추가한 앱에서만 알림을 지원해요.
+        Safari 공유 버튼에서 <b>홈 화면에 추가</b>를 누른 뒤,
+        홈 화면 아이콘으로 다시 열어 주세요.
+      </p>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <svg class="dino-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <ellipse cx="10" cy="15" rx="6" ry="4" />
+    <path d="M13 12 C14 9 16 5.5 18 3.3 C18.6 2.6 19.7 2.5 20.3 3.1 C20.9 3.7 20.6 4.5 19.9 4.9 C18 6.3 16.2 9.5 15.1 12.7 Z" />
+    <ellipse cx="19.8" cy="3.3" rx="1.9" ry="1.6" />
+    <path d="M6.5 15 C4 15.3 1.5 16 0.2 17.1 C0 17.3 0.3 17.7 0.6 17.5 C2.6 16.4 4.7 15.7 7.3 15.2 Z" />
+    <rect x="7" y="18" width="2.4" height="4.5" rx="1" />
+    <rect x="12" y="18" width="2.4" height="4.5" rx="1" />
+  </svg>
+  <p>경기 정보 출처 · 네이버 스포츠</p>
+</footer>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+name = "nc-baseball-alert"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# 1분마다 깨어나지만, 핸들러가 "오늘 우리 팀 경기 계획"을 먼저 보고
+# 경기가 없는 날·시간이면 외부 API를 호출하지 않고 즉시 끝낸다. (src/season.js)
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nc-alert"
+database_id = "be0b57d8-fca2-40be-a739-4c505345ccc7"
+
+[vars]
+# 알림 대상 팀 코드. 네이버 API의 teamCode 기준(NC 다이노스 = "NC")
+TEAM_CODE = "NC"
+# Web Push 구독자에게 노출되는 VAPID 공개키 (npm run genkeys 로 생성)
+VAPID_PUBLIC_KEY = "BMzulyDZtGsJMXf0nRIKTjtuGPZoULFu_1JE38CrTkgMNFY6ZHk1Pv_g-vbUJCsQkqLyLkqNN7_0aiQq0vf7WNw"
+VAPID_SUBJECT = "mailto:jen117@naver.com"
+
+# 푸시 엔드포인트 호스트 허용 목록에 추가할 도메인 (쉼표 구분).
+# 기본 목록(src/security.js)에 없는 브라우저가 등장했을 때 코드 수정 없이 풀어 주는 용도.
+# 로그에 "허용되지 않은 푸시 호스트"가 찍히면 그 호스트를 여기에 넣는다.
+EXTRA_PUSH_HOSTS = ""
+
+# 아래 두 값은 vars 가 아니라 시크릿으로 넣는다. 저장소에 커밋하지 말 것.
+#   wrangler secret put VAPID_PRIVATE_KEY   # 푸시 서명용 개인키 (필수)
+#   wrangler secret put ADMIN_TOKEN         # /api/admin/* 접근용 (선택)
+#
+# ADMIN_TOKEN 을 설정하지 않으면 관리자 엔드포인트는 항상 401 로 잠긴다(기본 거부).
