@@ -100,6 +100,14 @@ $$('.tab').forEach((tab) => {
   tab.addEventListener('click', () => {
     $$('.tab').forEach((t) => t.classList.toggle('is-active', t === tab));
     $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${tab.dataset.tab}`));
+
+    // 일정 탭을 열 때 리스트가 기본으로 보이는 뷰라면 오늘 경기 위치로 맞춘다.
+    // 패널이 display:none 인 동안은 scrollIntoView 가 아무 효과가 없으므로,
+    // 반드시 패널이 보이게 된 "이 시점"에 호출해야 한다.
+    if (tab.dataset.tab === 'schedule' &&
+        document.querySelector('.view-btn.is-active')?.dataset.view === 'list') {
+      scrollListToToday();
+    }
   });
 });
 
@@ -446,16 +454,30 @@ function renderScheduleItem(g, today) {
 
 /** 마지막으로 불러온 일정. 리스트/달력 전환과 '오늘' 버튼이 재조회 없이 이 값을 함께 쓴다. */
 let scheduleData = null;
-let scheduleScrolled = false;
 let calendarMonth = null; // 'YYYY-MM'. 달력이 지금 보여주는 달.
 
-/** 리스트 뷰에서 날짜 카드를 찾아 화면 중앙으로 옮긴다. */
+/**
+ * 리스트 뷰에서 날짜 카드를 찾아 화면 중앙으로 옮긴다.
+ * 그 날짜에 경기가 없으면(휴식일) 그 이후 가장 가까운 경기로 대신한다 —
+ * "오늘 경기, 없으면 내일 경기"를 일반화한 동작이다.
+ */
 function scrollListToDate(box, date) {
   const anchor =
     box.querySelector(`[data-date="${date}"]`) ??
     [...box.querySelectorAll('[data-date]')].find((n) => n.dataset.date > date);
   if (anchor) anchor.scrollIntoView({ block: 'center', behavior: 'smooth' });
   return Boolean(anchor);
+}
+
+/** 리스트가 켜질 때마다 호출한다: 오늘(없으면 다음) 경기를 화면 중앙으로. */
+function scrollListToToday() {
+  if (scheduleData) scrollListToDate($('#schedule-list'), scheduleData.today);
+}
+
+/** 리스트/달력 버튼 상태를 바꾸고 해당 뷰를 다시 그린다. 스크롤은 호출부가 필요할 때 따로 한다. */
+function activateScheduleView(view) {
+  $$('.view-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.view === view));
+  renderScheduleView();
 }
 
 function renderScheduleList(box, { games, today }) {
@@ -486,16 +508,12 @@ function renderScheduleList(box, { games, today }) {
     }
     box.append(renderScheduleItem(g, today));
   }
-
-  // 처음 열었을 때만 자동으로 오늘 근처로 스크롤한다. 이후 이동은 '오늘' 버튼이 맡는다.
-  if (!scheduleScrolled) {
-    scheduleScrolled = scrollListToDate(box, today);
-  }
 }
 
 /**
- * 달력 뷰. 한 달을 7열 격자로 그리고, 경기가 있는 날짜에 홈/원정 점과
- * 결과 색(승 초록 테두리 · 패 빨강 테두리)을 얹는다.
+ * 달력 뷰. 한 달을 7열 격자로 그리고, 경기가 있는 날짜에 상대팀 이름과
+ * 결과 색(승 남색 · 패 빨강 · 무 회색)을 얹는다. 홈경기는 배경을 한 단계
+ * 진한 크림으로 칠해 원정과 구분한다.
  *
  * 날짜를 누르면 리스트 뷰로 전환해 그 날짜로 스크롤한다 — 달력은 훑어보는 용도,
  * 상세 확인은 리스트가 맡는 방식으로 역할을 나눴다.
@@ -535,19 +553,22 @@ function renderCalendar(box, { games, today }) {
     const dayGames = byDate.get(date) ?? [];
     const g = dayGames[0]; // 같은 날 더블헤더는 드물게만 있어 첫 경기만 표시한다.
 
-    const cellClasses = ['cal-cell', date === today && 'cal-today', g && 'has-game']
-      .filter(Boolean).join(' ');
+    const cellClasses = [
+      'cal-cell',
+      date === today && 'cal-today',
+      g && 'has-game',
+      g?.isHome && 'is-home-game',
+      g?.cancelled && 'is-off',
+    ].filter(Boolean).join(' ');
 
-    const dot = g
-      ? el('span', {
-          class: `cal-dot ${g.isHome ? 'home' : 'away'}${g.result ? ` r-${g.result}` : ''}${g.cancelled ? ' is-off' : ''}`,
-        })
+    const opp = g
+      ? el('span', { class: `cal-opp${g.result ? ` ${g.result}` : ''}`, text: g.oppName })
       : null;
 
     grid.append(
       el('button', { class: cellClasses, type: 'button', 'data-date': date, disabled: !g },
         el('span', { class: 'cal-daynum', text: String(d) }),
-        dot,
+        opp,
       ),
     );
   }
@@ -572,8 +593,9 @@ function renderScheduleView() {
 
 $$('.view-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
-    $$('.view-btn').forEach((b) => b.classList.toggle('is-active', b === btn));
-    renderScheduleView();
+    activateScheduleView(btn.dataset.view);
+    // 리스트가 켜질 때마다("리스트 상태 on") 오늘 경기 위치로 다시 맞춘다.
+    if (btn.dataset.view === 'list') scrollListToToday();
   });
 });
 
@@ -589,9 +611,10 @@ $('#schedule-calendar').addEventListener('click', (ev) => {
 
   const cell = ev.target.closest('[data-date]');
   if (cell && !cell.disabled) {
-    document.querySelector('.view-btn[data-view="list"]').click();
-    // scrollIntoView 는 필요한 레이아웃을 동기적으로 계산하므로,
-    // 리스트를 새로 그린 직후 바로 불러도 위치가 정확하다.
+    // activateScheduleView 로 직접 전환한다(view-btn.click() 을 거치면 위의
+    // "오늘로 스크롤"이 먼저 실행돼 방금 고른 날짜로 다시 스크롤하는 두 번째
+    // 애니메이션과 겹친다). 여기서는 고른 날짜로 곧장 한 번만 스크롤한다.
+    activateScheduleView('list');
     scrollListToDate($('#schedule-list'), cell.dataset.date);
   }
 });
@@ -604,7 +627,7 @@ $('#btn-today').addEventListener('click', () => {
     calendarMonth = scheduleData.today.slice(0, 7);
     renderCalendar($('#schedule-calendar'), scheduleData);
   } else {
-    scrollListToDate($('#schedule-list'), scheduleData.today);
+    scrollListToToday();
   }
 });
 
@@ -622,6 +645,8 @@ async function loadSchedule() {
     }
 
     renderScheduleView();
+    // 오늘 경기 위치로 맞추는 시점은 여기가 아니라 "일정 탭을 열 때"·"리스트로
+    // 전환할 때"다(패널이 안 보이는 동안은 스크롤이 무효하다). .tab 클릭 핸들러 참고.
   } catch (err) {
     clear(box);
     box.append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));

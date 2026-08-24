@@ -513,12 +513,35 @@ main {
 .sched-view { display: none; }
 .sched-view.is-active { display: block; }
 
+/*
+ * 화면 맨 위에 붙어(sticky) '홈경기·원정·오늘·리스트·달력' 줄이 항상 보이게 한다.
+ * 그 아래로 스크롤되는 카드는 이 줄에 그냥 가려지는 대신, ::after 로 얹은
+ * 옅은 그라데이션 띠를 먼저 통과하며 점점 옅어지다 사라진다 — 경계가 부드럽게 느껴지도록.
+ * ::after 가 이 요소를 기준으로 자리 잡을 수 있는 이유는 sticky 도 relative 처럼
+ * absolute 자식의 위치 기준(containing block)이 되기 때문이다.
+ */
 .sched-toolbar {
+  position: sticky;
+  top: env(safe-area-inset-top);
+  z-index: 5;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--s-sm);
+  padding: 10px 0 var(--s-sm);
   margin-bottom: var(--s-sm);
+  background: var(--canvas);
+}
+
+.sched-toolbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 26px;
+  background: linear-gradient(to bottom, var(--canvas), transparent);
+  pointer-events: none;
 }
 
 .sched-actions { display: flex; align-items: center; gap: var(--s-xs); }
@@ -613,36 +636,51 @@ main {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 2px;
+  padding: 0 2px;
   border-radius: var(--r-md);
   font: inherit;
   cursor: pointer;
+  overflow: hidden;
 }
 .cal-cell:disabled { cursor: default; }
 .cal-cell.is-blank { visibility: hidden; }
 
 .cal-daynum {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--body);
   font-variant-numeric: tabular-nums;
 }
 .cal-cell:disabled .cal-daynum { color: var(--muted-soft); }
 
-/* 오늘은 골드 테두리로, 경기 있는 날은 은은한 배경으로 짚어 준다. */
+/* 오늘은 골드 테두리로 짚어 준다. */
 .cal-today { box-shadow: inset 0 0 0 1.5px var(--primary); }
-.cal-cell.has-game { background: var(--surface-soft); }
 
-.cal-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--hairline);
+/* 경기가 있는 날의 배경. 홈은 원정보다 한 단계 진한 크림으로 — 일정 탭의
+   홈경기 강조와 같은 명도 차를 그대로 가져온다. */
+.cal-cell.has-game { background: var(--surface-soft); }
+.cal-cell.is-home-game { background: var(--surface-cream-strong); }
+.cal-cell.is-off { opacity: 0.5; }
+
+/*
+ * 상대팀 이름. 결과가 나온 경기는 승/패/무 색으로, 아직 안 끝난 경기는
+ * 기본 텍스트 색으로 둔다. 승리는 NC 남색(팀 고유색과 같은 계열), 패배는
+ * 시맨틱 error 빨강, 무승부는 회색 — 세 값 모두 기존 토큰을 그대로 재사용한다.
+ */
+.cal-opp {
+  max-width: 100%;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
 }
-.cal-dot.home { background: var(--primary); }
-.cal-dot.away { background: var(--muted-soft); }
-.cal-dot.r-win { box-shadow: 0 0 0 2px var(--success); background: var(--success); }
-.cal-dot.r-lose { box-shadow: 0 0 0 2px var(--error); background: var(--error); }
-.cal-dot.is-off { background: var(--muted-soft); opacity: 0.5; }
+.cal-opp.win { color: var(--surface-dark); }
+.cal-opp.lose { color: var(--error); }
+.cal-opp.draw { color: var(--muted); font-weight: 500; }
+.cal-cell.is-off .cal-opp { text-decoration: line-through; }
 
 .sched {
   display: grid;
