@@ -315,6 +315,10 @@ npm run gentossface -- <tossface 저장소 경로>
 
 `HT`(KIA) `SS`(삼성) `LG` `OB`(두산) `KT` `SK`(SSG) `LT`(롯데) `NC` `WO`(키움) `HH`(한화)
 
+## 작업 기록
+
+이 프로젝트가 어떤 순서로, 어떤 이유로 만들어졌는지는 [WORKLOG.md](WORKLOG.md)에 정리했다.
+
 ## 라이선스
 
 MIT. 사용한 외부 저작물(Tossface · es-hangul · Pretendard 등)의 출처와 라이선스는
