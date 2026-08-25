@@ -11,7 +11,7 @@ import {
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
-  loadDailyPlan, isPollWindow, loadStandings, loadSchedule,
+  loadDailyPlan, isPollWindow, loadStandings, loadSchedule, loadTodayStatus,
   invalidatePlan, resolveSeasonOpener, invalidateStandings, invalidateSchedule,
 } from './season.js';
 import {
@@ -219,12 +219,24 @@ async function handleApi(request, env, url) {
 
   /** 순위와 포스트시즌 진출 상황. 비시즌이면 standings 가 null 이다. */
   if (path === '/api/standings' && method === 'GET') {
-    const { year } = kstNow();
+    const { year, date } = kstNow();
     const standings = await loadStandings(env, year);
     if (!standings) return json({ standings: null, outlook: null });
 
+    // 팀별 잔여 경기와 "오늘 경기가 순위에 들어갔는지"를 붙여 내려준다.
+    // 캐시된 순위 자체는 건드리지 않고 응답에서만 덧붙인다 — 잔여 경기 수는
+    // 시즌 상수(여기)에 달려 있고, 오늘 상태는 순위보다 빨리 바뀌기 때문이다.
+    const todayStatus = await loadTodayStatus(env, date, year);
+
     return json({
-      standings,
+      standings: {
+        ...standings,
+        teams: standings.teams.map((t) => ({
+          ...t,
+          remaining: Math.max(0, REGULAR_SEASON_GAMES - t.games),
+          todayGame: todayStatus[t.code] ?? null,
+        })),
+      },
       outlook: postseasonOutlook(standings, env.TEAM_CODE, REGULAR_SEASON_GAMES),
     });
   }

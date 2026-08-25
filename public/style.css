@@ -320,6 +320,40 @@ main {
 
 .game-status { margin-left: auto; font-weight: 500; }
 
+/* ─────────── 경기 카드 접기·펼치기 (<details>) ─────────── */
+
+/*
+ * 기본 삼각형 마커를 지우고 오른쪽에 직접 그린 화살표를 쓴다.
+ * ::-webkit-details-marker 는 구형 사파리용이라 함께 남긴다.
+ */
+.game > summary { list-style: none; cursor: pointer; position: relative; }
+.game > summary::-webkit-details-marker { display: none; }
+
+/* 접힌 상태에서는 결과 줄이 카드의 전부라 아래 여백이 필요 없다. */
+.game:not([open]) > summary .matchup { margin-bottom: 0; }
+
+/* 펼침 화살표. 열리면 180도 돈다. game-meta 줄 오른쪽 끝에 맞춘다. */
+.game > summary::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--muted-soft);
+  border-bottom: 1.5px solid var(--muted-soft);
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+.game[open] > summary::after { transform: rotate(-135deg); }
+.card-dark.game > summary::after { border-color: var(--on-dark-soft); }
+
+/* 화살표 자리를 비워 둔다 — 상태 텍스트("종료", "7회말")와 겹치지 않게. */
+.game > summary .game-meta { padding-right: 18px; }
+
+/* 펼쳤을 때 결과 줄과 상세(전광판·시각·타임라인) 사이 간격. */
+.game[open] > summary { margin-bottom: var(--s-md); }
+
 .matchup {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
@@ -446,14 +480,14 @@ main {
 
 .table-card { padding: var(--s-md) var(--s-sm); }
 
-/* 순위 | 팀 | 승-무-패 | 승률 | 승차 */
+/* 순위 | 팀 | 승-무-패 | 승률 | 승차 | 잔여 */
 .thead,
 .trow {
   display: grid;
-  grid-template-columns: 32px 1fr auto 46px 42px;
+  grid-template-columns: 28px 1fr auto 44px 38px 34px;
   align-items: center;
-  gap: var(--s-xs);
-  padding: 10px var(--s-xs);
+  gap: 5px;
+  padding: 10px 4px;
 }
 
 .thead {
@@ -483,6 +517,29 @@ main {
 
 .tname { font-size: 15px; color: var(--body); }
 .trow.mine .tname { font-weight: 600; color: var(--ink); }
+
+/*
+ * 오늘 경기 반영 표시. 팀명 바로 뒤에 붙는다(따로 칸을 만들지 않는다).
+ * 반영됨은 체크, 미반영은 점 — 모양이 서로 확실히 달라 색 없이도 구분된다.
+ */
+.tmark {
+  margin-left: 5px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted-soft);
+}
+.tmark.done { color: var(--accent-blue); }
+/* 점은 체크보다 눈에 덜 띄어 한 톤 진하게 준다 — 둘 다 한눈에 읽혀야 한다. */
+.tmark.pending { font-size: 13px; color: var(--muted); }
+
+/* 잔여 경기 수. 승차와 같은 위계의 보조 숫자다. */
+.tleft {
+  font-size: 13px;
+  color: var(--muted-soft);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.thead .tleft { font-size: 12px; }
 
 .trec { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -714,6 +771,8 @@ main {
   appearance: none;
   border: 0;
   background: none;
+  /* 홈경기 하단 띠(::after)가 이 칸을 기준으로 자리 잡는다. */
+  position: relative;
   aspect-ratio: 1;
   display: flex;
   flex-direction: column;
@@ -736,13 +795,45 @@ main {
 }
 .cal-cell:disabled .cal-daynum { color: var(--muted-soft); }
 
-/* 오늘은 골드 테두리로 짚어 준다. 결과가 나온 날은 아래 result-* 테두리가 덮어쓴다. */
-.cal-today { box-shadow: inset 0 0 0 1.5px var(--primary); }
+/*
+ * 오늘은 날짜 숫자를 원으로 감싼다. 칸 테두리를 쓰지 않는 이유: 테두리 자리는
+ * 경기 결과(result-*)가 이미 쓰고 있어, 오늘이면서 결과가 나온 날에는 둘 중
+ * 하나가 가려진다. 숫자를 감싸면 둘이 겹치지 않고 함께 보인다.
+ */
+.cal-today .cal-daynum {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--on-primary);
+  font-weight: 700;
+}
+.cal-cell.cal-today:disabled .cal-daynum { color: var(--on-primary); }
 
-/* 경기가 있는 날의 배경. 홈은 원정보다 한 단계 진한 크림으로 — 일정 탭의
-   홈경기 강조와 같은 명도 차를 그대로 가져온다. 홈/원정 모두 결과 테두리는 똑같이 붙는다. */
+/*
+ * 홈경기는 칸 전체를 골드 계열로 채우고, 원정은 옅은 배경만 둔다.
+ * 명도 차만으로는 작은 칸에서 잘 안 읽혀 색상 자체를 다르게 했다.
+ * 아래쪽 굵은 골드 띠까지 더해 색을 구별하기 어려운 경우에도 형태로 구분된다.
+ */
 .cal-cell.has-game { background: var(--surface-soft); }
-.cal-cell.is-home-game { background: var(--surface-cream-strong); }
+
+.cal-cell.is-home-game {
+  background: var(--surface-cream-strong); /* color-mix 미지원 브라우저 폴백 */
+  background: color-mix(in srgb, var(--primary) 26%, var(--canvas));
+}
+.cal-cell.is-home-game::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--primary);
+}
+.cal-cell.is-home-game .cal-opp { font-weight: 700; }
+
 .cal-cell.is-off { opacity: 0.5; }
 
 /*

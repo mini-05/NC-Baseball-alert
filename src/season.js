@@ -214,3 +214,48 @@ export async function loadStandings(env, year) {
 export async function invalidateStandings(env, year) {
   await putCache(env.DB, `standings:${year}`, null, -1);
 }
+
+/**
+ * 오늘 경기의 팀별 진행 상태. 순위표에서 "이 팀 순위에 오늘 경기가 들어갔는지"를
+ * 표시하는 데 쓴다. 우리 팀만 보는 loadDailyPlan 과 달리 10개 구단을 모두 본다.
+ *
+ * 반환: 팀코드 → 'done'(종료) | 'pending'(경기 전·진행 중)
+ * 오늘 경기가 없는 팀은 키 자체가 없다 — 기다릴 것이 없다는 뜻이다.
+ *
+ * 취소된 경기는 순위에 반영될 일이 자체가 없으므로 제외한다. 남겨 두면
+ * 그 팀만 하루 종일 '대기' 표시가 붙은 채로 남는다.
+ *
+ * ponytail: 'done' 은 "경기가 끝났다"이지 "순위표 숫자가 이미 갱신됐다"가
+ * 아니다. 둘 사이에는 종료 직후 짧은 공백이 있다(크론이 종료를 감지하면
+ * invalidateStandings 로 캐시를 비워 곧 따라잡는다). 이 공백까지 정확히
+ * 구분하려면 10개 구단의 시즌 전체 완료 경기 수를 세어 gameCount 와
+ * 대조해야 해서, 표시 하나를 위해 치를 비용이 아니다.
+ */
+export async function loadTodayStatus(env, today, year) {
+  const key = `today:${today}`;
+  const cached = await getCache(env.DB, key);
+  if (cached) return cached;
+
+  const status = {};
+  try {
+    const opener = await resolveSeasonOpener(env, year);
+    const games = filterCurrentSeason(await fetchGames(today, today), year, opener);
+
+    for (const g of games) {
+      if (g.cancelled) continue;
+      const s = g.phase === 'result' ? 'done' : 'pending';
+      status[g.homeCode] = s;
+      status[g.awayCode] = s;
+    }
+  } catch (err) {
+    // 순위표에 붙는 부가 표시일 뿐이라, 실패해도 순위 자체는 그대로 보여준다.
+    console.error('today status fetch failed', err.message);
+    return {};
+  }
+
+  // 아직 안 끝난 경기가 있을 때만 짧게 잡는다. 다 끝났거나 경기가 없는 날은
+  // 남은 하루 동안 값이 바뀌지 않으므로 길게 잡아 외부 호출을 아낀다.
+  const pending = Object.values(status).some((s) => s === 'pending');
+  await putCache(env.DB, key, status, pending ? 3 * MIN : 6 * HOUR);
+  return status;
+}
