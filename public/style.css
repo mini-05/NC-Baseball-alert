@@ -57,6 +57,14 @@
   --accent-blue: #2f6fed;
   --accent-yellow: #d9a521;
 
+  /* 달력 홈/원정 배경 전용 색. 다크 모드의 일반 표면 톤(surface-soft·
+     surface-cream-strong)은 "네 번째 표면을 만들지 말라"는 규칙 때문에
+     서로 너무 가깝게 잡혀 있어(위 참고), 그대로 재사용하면 작은 칸에서
+     구분이 거의 안 된다. 범례 스와치도 이 값을 그대로 쓴다 — 범례와
+     실제 칸 색이 달랐던 것도 이번에 같이 바로잡는다. */
+  --cal-away-bg: var(--surface-soft);
+  --cal-home-bg: var(--surface-cream-strong);
+
   /* ── 라운드 (계층적) ── */
   --r-sm: 6px;
   --r-md: 8px;   /* 버튼, 입력, 탭 */
@@ -96,9 +104,19 @@
  * 는 시스템이 다크여도 라이트 값(:root 기본값)을 강제로 유지한다.
  */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) { --canvas: #071d3d; --surface-soft: #0c2749; --surface-card: #0c2749; --surface-cream-strong: #12335c; --hairline: #143a68; --hairline-soft: #0f2e55; --ink: #faf9f5; --body-strong: #e7edf5; --body: #cfdae8; --muted: #9fb2c9; --muted-soft: #7e93ad; --surface-dark: #04122a; --surface-dark-soft: #071d3d; --surface-dark-elevated: #12335c; }
+  :root:not([data-theme='light']) { --canvas: #071d3d; --surface-soft: #0c2749; --surface-card: #0c2749; --surface-cream-strong: #12335c; --hairline: #143a68; --hairline-soft: #0f2e55; --ink: #faf9f5; --body-strong: #e7edf5; --body: #cfdae8; --muted: #9fb2c9; --muted-soft: #7e93ad; --surface-dark: #04122a; --surface-dark-soft: #071d3d; --surface-dark-elevated: #12335c;
+    /* surface-soft·surface-cream-strong 은 다크 모드에서 서로 5~10 정도밖에
+       안 갈라져 있어(위 네 값 참고) 그대로 재사용하면 달력에서 안 갈린다.
+       라이트 모드의 --surface-dark-elevated 값(#1e457c, NC 공식 보조 네이비)을
+       홈 배경으로 끌어와 원정(surface-soft)과 뚜렷하게 갈라 둔다. */
+    --cal-away-bg: #0c2749;
+    --cal-home-bg: #1e457c;
+  }
 }
-:root[data-theme='dark'] { --canvas: #071d3d; --surface-soft: #0c2749; --surface-card: #0c2749; --surface-cream-strong: #12335c; --hairline: #143a68; --hairline-soft: #0f2e55; --ink: #faf9f5; --body-strong: #e7edf5; --body: #cfdae8; --muted: #9fb2c9; --muted-soft: #7e93ad; --surface-dark: #04122a; --surface-dark-soft: #071d3d; --surface-dark-elevated: #12335c; }
+:root[data-theme='dark'] { --canvas: #071d3d; --surface-soft: #0c2749; --surface-card: #0c2749; --surface-cream-strong: #12335c; --hairline: #143a68; --hairline-soft: #0f2e55; --ink: #faf9f5; --body-strong: #e7edf5; --body: #cfdae8; --muted: #9fb2c9; --muted-soft: #7e93ad; --surface-dark: #04122a; --surface-dark-soft: #071d3d; --surface-dark-elevated: #12335c;
+  --cal-away-bg: #0c2749;
+  --cal-home-bg: #1e457c;
+}
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
@@ -591,8 +609,10 @@ main {
 .legend-item { display: inline-flex; align-items: center; gap: 6px; }
 
 .swatch { width: 10px; height: 10px; border-radius: 3px; }
-.swatch.home { background: var(--primary); }
-.swatch.away { background: var(--hairline); }
+/* 달력 칸과 같은 색을 쓴다(--cal-home-bg/--cal-away-bg) — 범례가 실제로
+   보여 주는 색과 다르면 범례로서 의미가 없다. */
+.swatch.home { background: var(--cal-home-bg); }
+.swatch.away { background: var(--cal-away-bg); }
 
 .sched-summary {
   margin: 0 4px var(--s-md);
@@ -814,8 +834,8 @@ main {
 
 /* 경기가 있는 날의 배경. 홈은 원정보다 한 단계 진한 크림으로 — 일정 탭의
    홈경기 강조와 같은 명도 차를 그대로 가져온다. */
-.cal-cell.has-game { background: var(--surface-soft); }
-.cal-cell.is-home-game { background: var(--surface-cream-strong); }
+.cal-cell.has-game { background: var(--cal-away-bg); }
+.cal-cell.is-home-game { background: var(--cal-home-bg); }
 
 /* 홈경기는 배경 대신 글자 굵기로 한 번 더 강조한다. 색에 기대지 않는
    구분이라 색약이거나 화면이 어두워도 알아보기 쉽다. */
