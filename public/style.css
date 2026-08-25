@@ -812,26 +812,14 @@ main {
 }
 .cal-cell.cal-today:disabled .cal-daynum { color: var(--on-primary); }
 
-/*
- * 홈경기는 칸 전체를 골드 계열로 채우고, 원정은 옅은 배경만 둔다.
- * 명도 차만으로는 작은 칸에서 잘 안 읽혀 색상 자체를 다르게 했다.
- * 아래쪽 굵은 골드 띠까지 더해 색을 구별하기 어려운 경우에도 형태로 구분된다.
- */
+/* 경기가 있는 날의 배경. 홈은 원정보다 한 단계 진한 크림으로 — 일정 탭의
+   홈경기 강조와 같은 명도 차를 그대로 가져온다. */
 .cal-cell.has-game { background: var(--surface-soft); }
+.cal-cell.is-home-game { background: var(--surface-cream-strong); }
 
-.cal-cell.is-home-game {
-  background: var(--surface-cream-strong); /* color-mix 미지원 브라우저 폴백 */
-  background: color-mix(in srgb, var(--primary) 26%, var(--canvas));
-}
-.cal-cell.is-home-game::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: var(--primary);
-}
+/* 홈경기는 배경 대신 글자 굵기로 한 번 더 강조한다. 색에 기대지 않는
+   구분이라 색약이거나 화면이 어두워도 알아보기 쉽다. */
+.cal-cell.is-home-game .cal-daynum { font-weight: 700; }
 .cal-cell.is-home-game .cal-opp { font-weight: 700; }
 
 .cal-cell.is-off { opacity: 0.5; }
