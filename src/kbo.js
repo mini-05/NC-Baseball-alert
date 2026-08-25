@@ -377,7 +377,8 @@ export async function fetchScoreboard(gameId) {
     if (!res.ok) return null;
 
     const json = await res.json();
-    const board = json?.result?.recordData?.scoreBoard;
+    const record = json?.result?.recordData;
+    const board = record?.scoreBoard;
     if (!board?.inn || !board?.rheb) return null;
 
     const side = (team) => ({
@@ -388,7 +389,15 @@ export async function fetchScoreboard(gameId) {
       b: Number(board.rheb[team]?.b ?? 0),
     });
 
-    return { home: side('home'), away: side('away') };
+    // 홈런은 별도 필드가 아니라 etcRecords(기타 기록: 홈런·3루타·실책 등)
+    // 안에 how:'홈런' 으로 섞여 온다. 어느 팀 홈런인지는 안 가리고 개수만 센다 —
+    // 득점 감지가 애초에 "이번 틱에 점수가 늘었다"만 보는 것과 같은 해상도라,
+    // 누구 홈런인지까지 구분하는 건 지금 쓰임에 비해 과하다.
+    const hr = Array.isArray(record?.etcRecords)
+      ? record.etcRecords.filter((r) => r.how === '홈런').length
+      : 0;
+
+    return { home: side('home'), away: side('away'), hr };
   } catch (err) {
     console.error('scoreboard fetch failed', gameId, err.message);
     return null;

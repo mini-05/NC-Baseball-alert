@@ -303,6 +303,19 @@ function testDetect() {
     ks({ statusCode: 'STARTED', homeTeamScore: 1, awayTeamScore: 0 }), T,
   );
   check('포스트시즌 득점 제목', ksScore[0]?.title === '[한국시리즈] NC 1점 득점!', ksScore[0]?.title);
+
+  // ── 홈런 표시 — index.js 가 poll() 에서 game.hr 을 채워 넘기는 것을 흉내낸다 ──
+  const withHr = (game, hr) => Object.assign(game, { hr });
+
+  const hrScored = detectEvents(withHr(live(1, 0), 0), withHr(live(2, 0), 1), T);
+  check('홈런 있으면 문구 끝에 (홈런)', hrScored[0]?.body.endsWith(' (홈런)'), hrScored[0]?.body);
+
+  const noHrScored = detectEvents(withHr(live(1, 0), 1), withHr(live(2, 0), 1), T);
+  check('홈런 개수 그대로면 표시 없음', !noHrScored[0]?.body.includes('홈런'), noHrScored[0]?.body);
+
+  // 전광판 조회에 실패해 hr 이 직전 값을 그대로 이어받은 경우(둘 다 1) — 새 홈런이 아니다.
+  const carriedOver = detectEvents(withHr(live(1, 0), 1), withHr(live(1, 1), 1), T);
+  check('hr 이 안 늘면 실점이어도 표시 없음', !carriedOver[0]?.body.includes('홈런'), carriedOver[0]?.body);
 }
 
 /* ══ 5. 포스트시즌 진출 판정 ══ */
@@ -476,12 +489,12 @@ async function testHomeOnly() {
 /* ══ 9. 전광판 조회 ══ */
 
 /** 네이버 record 응답을 흉내 낸다. 실제 2026-08-22 SS@NC 경기 응답을 그대로 옮겨 왔다. */
-function fakeRecordResponse(scoreBoard) {
+function fakeRecordResponse(scoreBoard, etcRecords) {
   return {
     ok: true,
     json: async () => ({
       code: 200, success: true,
-      result: { recordData: scoreBoard ? { scoreBoard } : null },
+      result: { recordData: scoreBoard ? { scoreBoard, etcRecords } : null },
     }),
   };
 }
@@ -498,6 +511,17 @@ async function testScoreboard() {
     check('전광판 파싱 — 이닝 배열', JSON.stringify(sb.away.innings) === '[1,1,0,3,0,0,0,2,1]');
     check('전광판 파싱 — R/H/E/B', sb.home.r === 6 && sb.home.h === 12 && sb.home.e === 1 && sb.home.b === 0);
     check('전광판 파싱 — 원정 R', sb.away.r === 8);
+    check('etcRecords 없으면 홈런 0', sb.hr === 0, sb.hr);
+
+    // etcRecords 는 홈런 외에 실책·도루 같은 다른 기록도 섞여 온다 — how 로만 걸러야 한다.
+    globalThis.fetch = async () => fakeRecordResponse(
+      { rheb: { away: { r: 1, b: 0, e: 0, h: 1 }, home: { r: 4, b: 1, e: 0, h: 5 } },
+        inn: { away: [0], home: [4] } },
+      [{ how: '홈런', result: '오스탄 1호' }, { how: '실책', result: '수비 실책' },
+       { how: '홈런', result: '박건우 2호' }],
+    );
+    const withHr = await fetchScoreboard('20260822SSNC02026');
+    check('etcRecords 에서 홈런 개수만 셈', withHr.hr === 2, withHr.hr);
 
     // 경기 전에는 recordData 자체가 null — 정상이며 오류가 아니다.
     globalThis.fetch = async () => fakeRecordResponse(null);
