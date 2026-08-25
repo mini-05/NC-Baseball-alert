@@ -50,20 +50,36 @@ export async function loadStates(db, gameIds) {
     .all();
 
   return new Map(
-    (results ?? []).map((r) => [
-      r.game_id,
-      {
-        gameId: r.game_id,
-        homeCode: r.home_code,
-        awayCode: r.away_code,
-        homeScore: r.home_score,
-        awayScore: r.away_score,
-        phase: r.phase,
-        series: r.series,
-        cancelled: Boolean(r.cancelled),
-        suspended: Boolean(r.suspended),
-      },
-    ]),
+    (results ?? []).map((r) => {
+      // 직전 틱까지 확인된 홈런 기록 문자열 목록. 저장된 전광판 JSON에서
+      // 꺼낸다 — 이 값을 위해 새 컬럼을 두지 않고 이미 있는 scoreboard 에
+      // 얹었다. Array.isArray 로 거르는 이유: 예전에 hr 을 개수(숫자)로
+      // 저장했던 적이 있어(되돌린 이력), 그 시절 값이 아직 남아 있어도
+      // 배열이 아니면 빈 목록으로 취급해 조용히 무시한다.
+      let hr = [];
+      try {
+        const parsed = JSON.parse(r.scoreboard)?.hr;
+        if (Array.isArray(parsed)) hr = parsed;
+      } catch {
+        /* 전광판이 없거나(경기 전) 깨졌으면 빈 목록으로 취급 */
+      }
+
+      return [
+        r.game_id,
+        {
+          gameId: r.game_id,
+          homeCode: r.home_code,
+          awayCode: r.away_code,
+          homeScore: r.home_score,
+          awayScore: r.away_score,
+          phase: r.phase,
+          series: r.series,
+          cancelled: Boolean(r.cancelled),
+          suspended: Boolean(r.suspended),
+          hr,
+        },
+      ];
+    }),
   );
 }
 

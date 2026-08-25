@@ -303,6 +303,26 @@ function testDetect() {
     ks({ statusCode: 'STARTED', homeTeamScore: 1, awayTeamScore: 0 }), T,
   );
   check('포스트시즌 득점 제목', ksScore[0]?.title === '[한국시리즈] NC 1점 득점!', ksScore[0]?.title);
+
+  // ── 홈런 표시 — index.js 가 poll() 에서 game.hr 을 채워 넘기는 것을 흉내낸다.
+  // hr 은 "오스틴33호(8회3점 손주환)" 같은 원문 문자열 목록이지 개수가 아니다.
+  const withHr = (game, hr) => Object.assign(game, { hr });
+  const HR1 = '오스틴33호(8회3점 손주환)';
+  const HR2 = '박건우5호(3회1점 김진수)';
+
+  const hrScored = detectEvents(withHr(live(1, 0), []), withHr(live(4, 0), [HR1]), T);
+  check('새 홈런이 원문 그대로 붙음', hrScored[0]?.body.endsWith(` · ${HR1}`), hrScored[0]?.body);
+
+  const noHrScored = detectEvents(withHr(live(1, 0), [HR1]), withHr(live(2, 0), [HR1]), T);
+  check('목록이 그대로면(새 홈런 없음) 표시 없음', !noHrScored[0]?.body.includes(HR1), noHrScored[0]?.body);
+
+  // 전광판 조회 실패로 hr 목록이 직전 값을 그대로 이어받은 경우 — 새 홈런이 아니다.
+  const carriedOver = detectEvents(withHr(live(1, 0), [HR1]), withHr(live(1, 1), [HR1]), T);
+  check('hr 목록이 안 늘면 실점이어도 표시 없음', !carriedOver[0]?.body.includes(HR1), carriedOver[0]?.body);
+
+  // 한 틱에 둘 이상 새로 생기면(드물지만) 둘 다 붙인다.
+  const twoHr = detectEvents(withHr(live(1, 0), []), withHr(live(5, 0), [HR1, HR2]), T);
+  check('한 틱에 홈런 2개면 둘 다 표시', twoHr[0]?.body.includes(HR1) && twoHr[0]?.body.includes(HR2), twoHr[0]?.body);
 }
 
 /* ══ 5. 포스트시즌 진출 판정 ══ */
@@ -476,12 +496,12 @@ async function testHomeOnly() {
 /* ══ 9. 전광판 조회 ══ */
 
 /** 네이버 record 응답을 흉내 낸다. 실제 2026-08-22 SS@NC 경기 응답을 그대로 옮겨 왔다. */
-function fakeRecordResponse(scoreBoard) {
+function fakeRecordResponse(scoreBoard, etcRecords) {
   return {
     ok: true,
     json: async () => ({
       code: 200, success: true,
-      result: { recordData: scoreBoard ? { scoreBoard } : null },
+      result: { recordData: scoreBoard ? { scoreBoard, etcRecords } : null },
     }),
   };
 }
@@ -498,6 +518,22 @@ async function testScoreboard() {
     check('전광판 파싱 — 이닝 배열', JSON.stringify(sb.away.innings) === '[1,1,0,3,0,0,0,2,1]');
     check('전광판 파싱 — R/H/E/B', sb.home.r === 6 && sb.home.h === 12 && sb.home.e === 1 && sb.home.b === 0);
     check('전광판 파싱 — 원정 R', sb.away.r === 8);
+    check('etcRecords 없으면 홈런 빈 목록', Array.isArray(sb.hr) && sb.hr.length === 0, JSON.stringify(sb.hr));
+
+    // 실제 2026-08-25 NC@LG 10회말 응답에서 그대로 옮겨 왔다(오스틴 8회 3점 홈런).
+    // etcRecords 는 홈런 외에 결승타·실책·도루 같은 다른 기록도 섞여 온다 —
+    // how 로만 걸러야 하고, result 는 재가공 없이 원문 그대로 뽑아야 한다.
+    globalThis.fetch = async () => fakeRecordResponse(
+      { rheb: { away: { r: 4, b: 6, e: 0, h: 10 }, home: { r: 5, b: 5, e: 1, h: 11 } },
+        inn: { away: [0], home: [0] } },
+      [
+        { result: '홍창기(10회 2사 만루서 우중간 안타)', how: '결승타' },
+        { result: '오스틴33호(8회3점 손주환)', how: '홈런' },
+        { result: '오지환(3회)', how: '실책' },
+      ],
+    );
+    const withHr = await fetchScoreboard('20260825NCLG02026');
+    check('etcRecords 에서 홈런만 원문 그대로', JSON.stringify(withHr.hr) === '["오스틴33호(8회3점 손주환)"]', JSON.stringify(withHr.hr));
 
     // 경기 전에는 recordData 자체가 null — 정상이며 오류가 아니다.
     globalThis.fetch = async () => fakeRecordResponse(null);

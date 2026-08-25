@@ -377,7 +377,8 @@ export async function fetchScoreboard(gameId) {
     if (!res.ok) return null;
 
     const json = await res.json();
-    const board = json?.result?.recordData?.scoreBoard;
+    const record = json?.result?.recordData;
+    const board = record?.scoreBoard;
     if (!board?.inn || !board?.rheb) return null;
 
     const side = (team) => ({
@@ -388,7 +389,19 @@ export async function fetchScoreboard(gameId) {
       b: Number(board.rheb[team]?.b ?? 0),
     });
 
-    return { home: side('home'), away: side('away') };
+    /*
+     * 홈런은 별도 필드가 아니라 etcRecords(기타 기록: 홈런·3루타·실책 등) 안에
+     * how:'홈런' 으로 섞여 온다. result 문자열에 "누가·몇 회·몇 점"이 이미
+     * 다 들어 있다("오스틴33호(8회3점 손주환)") — 실제 타자 기록(rbi)과
+     * 대조해 확인했다. 숫자를 다시 뽑아내 재조합하지 않고 이 문자열을
+     * 그대로 쓴다: 몇 점 중 몇 점이 홈런인지를 이쪽에서 잘못 계산해
+     * 되돌릴 일이 없게 하려는 것이다.
+     */
+    const hr = Array.isArray(record?.etcRecords)
+      ? record.etcRecords.filter((r) => r.how === '홈런').map((r) => r.result)
+      : [];
+
+    return { home: side('home'), away: side('away'), hr };
   } catch (err) {
     console.error('scoreboard fetch failed', gameId, err.message);
     return null;
