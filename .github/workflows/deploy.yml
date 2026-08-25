@@ -1,0 +1,60 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+# GITHUB_TOKEN 최소 권한.
+# 기본값은 저장소 쓰기까지 열려 있어, 워크플로 안에서 실행되는 코드가 탈취되면
+# 저장소 자체를 고칠 수 있다. 이 워크플로는 코드를 읽기만 하면 되므로 그것만 남긴다.
+permissions:
+  contents: read
+
+# 배포가 겹치면 나중 것이 먼저 끝나 옛 코드가 최종본이 될 수 있다. 한 번에 하나만 돈다.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  # 프로젝트 코드(테스트·의존성)를 실행하는 곳. 여기에는 시크릿을 주지 않는다.
+  # 배포 job 과 분리해 둔 이유가 이것이다 — 악성 의존성이 있더라도
+  # 이 job 의 환경에는 훔칠 자격 증명이 없다.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # 서드파티 action 은 커밋 SHA 로 고정한다. @v4 같은 태그는 이동할 수 있어,
+      # 태그가 탈취되면 다음 실행부터 다른 코드가 돌아간다. SHA 는 이동하지 않는다.
+      # 갱신은 Dependabot(.github/dependabot.yml)이 PR 로 올려 준다.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # postinstall 스크립트를 막는다. 의존성 하나가 오염돼도 설치 시점에
+      # 임의 코드가 돌지 않는다. 이 프로젝트는 이 옵션으로도 테스트와
+      # wrangler 번들링(deploy --dry-run)이 모두 정상 동작하는 것을 확인했다.
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    # 이 environment 에 'Required reviewers' 를 걸면 배포 전에 승인이 필요해진다.
+    # main 에 코드가 들어가는 것과 프로덕션에 나가는 것을 분리하는 마지막 관문이다.
+    # (GitHub > Settings > Environments > production)
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      # 토큰은 이 step 에만 준다. 앞의 설치·빌드 단계 환경에는 들어가지 않는다.
+      #
+      # ACCOUNT_ID 를 함께 주는 이유: wrangler.toml 에 account_id 가 없어서,
+      # 이것이 없으면 wrangler 가 계정 목록을 조회하려 든다. 그러면 토큰에
+      # Account Settings:Read 까지 있어야 한다. ID 를 직접 알려 주면 토큰을
+      # Workers Scripts:Edit + D1:Edit 최소 권한으로 유지할 수 있다.
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
