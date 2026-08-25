@@ -967,12 +967,30 @@ async function initPush() {
     console.error('initPush failed', err);
   });
 
+  /*
+   * 자동 갱신. 새로고침 없이 화면이 따라오게 하는 경로는 두 가지다.
+   *
+   *  - 60초 주기 폴링: 서버 크론이 1분마다 도는 만큼(wrangler.toml) 데이터
+   *    자체가 1분 단위로 바뀐다. 더 자주 물어도 같은 응답이라 주기를 맞췄다.
+   *  - 푸시 수신 즉시: 득점·시작·종료가 감지되면 서비스 워커가 알려준다(sw.js).
+   *    알림을 켠 기기에서는 폴링을 기다리지 않고 그 순간 반영된다.
+   *
+   * 화면을 보고 있지 않을 때는 요청하지 않는다. 세 호출부(주기·복귀·푸시)가
+   * 모두 이 함수를 지나므로 판단을 여기 한 곳에만 둔다.
+   */
+  const refresh = () => {
+    if (document.hidden) return;
+    loadHistory();
+    loadStandings();
+    loadSchedule();
+  };
+
+  setInterval(refresh, 60_000);
+
   // 앱을 다시 볼 때 최신 상태로 갱신한다.
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      loadHistory();
-      loadStandings();
-      loadSchedule();
-    }
+  document.addEventListener('visibilitychange', refresh);
+
+  navigator.serviceWorker?.addEventListener('message', (ev) => {
+    if (ev.data?.type === 'refresh') refresh();
   });
 })();
