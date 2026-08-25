@@ -309,6 +309,11 @@ npm run gentossface -- <tossface 저장소 경로>
 
 점검 결과와 남아 있는 위험은 [SECURITY.md](SECURITY.md)에 정리했습니다.
 
+## 배포 자동화
+
+`main` 병합 시 GitHub Actions가 자동으로 배포합니다. Cloudflare API 토큰
+갱신 절차는 [DEPLOY.md](DEPLOY.md)에 정리했습니다.
+
 ## 다른 팀으로 바꾸기
 
 `wrangler.toml` 의 `TEAM_CODE` 를 바꾸고 재배포하면 됩니다.
