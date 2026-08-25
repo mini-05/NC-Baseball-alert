@@ -48,6 +48,32 @@ jobs:
         with:
           node-version: 22
       - run: npm ci --ignore-scripts
+      # 임시 진단. wrangler deploy 가 3회 연속 "Authentication error [code: 10000]"로
+      # 실패해, 토큰 문자열이 유효한지 · Account ID가 그 토큰이 접근 가능한
+      # 계정인지를 Cloudflare API로 직접 나눠서 확인한다. 응답 JSON 에는
+      # 토큰 값 자체가 담기지 않으니 로그에 찍어도 안전하다. 원인이 확인되면
+      # 이 스텝은 지운다.
+      - name: "[진단] 토큰·계정 검증"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "::group::토큰 문자열 자체가 Cloudflare에 유효한 토큰인지"
+          curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" | tee /tmp/verify.json
+          echo "::endgroup::"
+
+          echo "::group::CLOUDFLARE_ACCOUNT_ID 길이·형태 (값 자체는 안 찍음)"
+          echo "length=${#CLOUDFLARE_ACCOUNT_ID}"
+          echo "$CLOUDFLARE_ACCOUNT_ID" | grep -qE '^[0-9a-f]{32}$' \
+            && echo "형태: 32자리 16진수 — 정상 패턴" \
+            || echo "형태: 32자리 16진수가 아님 — 잘못된 값을 복사했을 가능성"
+          echo "::endgroup::"
+
+          echo "::group::이 토큰으로 그 Account ID에 접근 가능한지"
+          curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" | tee /tmp/account.json
+          echo "::endgroup::"
       # 토큰은 이 step 에만 준다. 앞의 설치·빌드 단계 환경에는 들어가지 않는다.
       #
       # ACCOUNT_ID 를 함께 주는 이유: wrangler.toml 에 account_id 가 없어서,
