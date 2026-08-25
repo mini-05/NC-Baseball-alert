@@ -50,32 +50,20 @@ export async function loadStates(db, gameIds) {
     .all();
 
   return new Map(
-    (results ?? []).map((r) => {
-      // 직전 틱까지 누적된 홈런 개수. 저장된 전광판에서 꺼낸다 — 이 값을
-      // 위해 새 컬럼을 두지 않고, 이미 있는 scoreboard JSON에 얹었다.
-      let hr = 0;
-      try {
-        hr = JSON.parse(r.scoreboard)?.hr ?? 0;
-      } catch {
-        /* 전광판이 없거나(경기 전) 깨졌으면 0으로 취급 */
-      }
-
-      return [
-        r.game_id,
-        {
-          gameId: r.game_id,
-          homeCode: r.home_code,
-          awayCode: r.away_code,
-          homeScore: r.home_score,
-          awayScore: r.away_score,
-          phase: r.phase,
-          series: r.series,
-          cancelled: Boolean(r.cancelled),
-          suspended: Boolean(r.suspended),
-          hr,
-        },
-      ];
-    }),
+    (results ?? []).map((r) => [
+      r.game_id,
+      {
+        gameId: r.game_id,
+        homeCode: r.home_code,
+        awayCode: r.away_code,
+        homeScore: r.home_score,
+        awayScore: r.away_score,
+        phase: r.phase,
+        series: r.series,
+        cancelled: Boolean(r.cancelled),
+        suspended: Boolean(r.suspended),
+      },
+    ]),
   );
 }
 
