@@ -464,10 +464,17 @@ function renderScoreboard(sb, teamLabel, oppLabel) {
   );
 }
 
+/**
+ * 진행 중인 경기가 있는지. 회차와 초·말이 계속 바뀌는 상태라는 뜻이라,
+ * 자동 갱신 주기를 여기에 맞춘다. 판단 기준은 카드에 'Live' 를 붙이는 것과 같다.
+ */
+let liveGame = false;
+
 async function loadHistory() {
   const box = $('#history');
   try {
     const { games } = await api('/api/history?days=30');
+    liveGame = games.some((g) => g.phase === 'live' && !g.cancelled);
     clear(box);
 
     if (!games.length) {
@@ -968,15 +975,19 @@ async function initPush() {
   });
 
   /*
-   * 자동 갱신. 새로고침 없이 화면이 따라오게 하는 경로는 두 가지다.
+   * 자동 갱신. 새로고침 없이 화면이 따라오게 하는 경로는 세 가지다.
    *
-   *  - 60초 주기 폴링: 서버 크론이 1분마다 도는 만큼(wrangler.toml) 데이터
-   *    자체가 1분 단위로 바뀐다. 더 자주 물어도 같은 응답이라 주기를 맞췄다.
+   *  - 20초 주기(경기 중에만): 회차와 초·말이 바뀌는 곳은 경기 카드뿐이라
+   *    기록만 다시 부른다. 서버 크론이 1분 간격이라 원본은 1분마다 갱신되는데,
+   *    그 시점이 클라이언트 주기와 어긋나면 60초 주기로는 이미 바뀐 값을 다시
+   *    60초 가까이 못 보게 된다(최악 2분). 20초로 좁혀 그 어긋남을 줄인다.
+   *  - 60초 주기: 순위·일정까지 함께 맞춘다. 이 둘은 경기가 끝나야 바뀌므로
+   *    짧은 주기에 끼울 이유가 없다 — 일정은 시즌 전체라 응답도 크다.
    *  - 푸시 수신 즉시: 득점·시작·종료가 감지되면 서비스 워커가 알려준다(sw.js).
    *    알림을 켠 기기에서는 폴링을 기다리지 않고 그 순간 반영된다.
    *
-   * 화면을 보고 있지 않을 때는 요청하지 않는다. 세 호출부(주기·복귀·푸시)가
-   * 모두 이 함수를 지나므로 판단을 여기 한 곳에만 둔다.
+   * 화면을 보고 있지 않을 때는 요청하지 않는다. 모든 호출부가 아래 두 함수를
+   * 지나므로 판단을 여기 한 곳에만 둔다.
    */
   const refresh = () => {
     if (document.hidden) return;
@@ -985,7 +996,13 @@ async function initPush() {
     loadSchedule();
   };
 
+  const refreshLive = () => {
+    if (document.hidden || !liveGame) return;
+    loadHistory();
+  };
+
   setInterval(refresh, 60_000);
+  setInterval(refreshLive, 20_000);
 
   // 앱을 다시 볼 때 최신 상태로 갱신한다.
   document.addEventListener('visibilitychange', refresh);
