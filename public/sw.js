@@ -23,7 +23,14 @@ self.addEventListener('push', (event) => {
     data: { url: '/' },
   };
 
-  event.waitUntil(self.registration.showNotification(data.title ?? 'NC 다이노스', options));
+  event.waitUntil(Promise.all([
+    self.registration.showNotification(data.title ?? 'NC 다이노스', options),
+    // 앱이 열려 있으면 화면도 그 자리에서 갱신하게 알린다 — 알림만 뜨고
+    // 내용은 새로고침해야 바뀌는 상황을 없앤다. (app.js 의 refresh)
+    self.clients.matchAll({ type: 'window' }).then((list) => {
+      for (const client of list) client.postMessage({ type: 'refresh' });
+    }),
+  ]));
 });
 
 self.addEventListener('notificationclick', (event) => {
