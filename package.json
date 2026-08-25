@@ -17,7 +17,7 @@
     "tail": "wrangler tail"
   },
   "devDependencies": {
-    "wrangler": "^3.90.0"
+    "wrangler": "^4.125.0"
   },
   "dependencies": {
     "es-hangul": "^2.4.0"
