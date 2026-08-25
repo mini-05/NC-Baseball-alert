@@ -98,12 +98,23 @@ export function detectEvents(prev, cur, teamCode) {
           ? `${p.teamName} ${teamGained}점 득점!`
           : `${p.oppName} ${oppGained}점 실점`;
 
+    /*
+     * 이번 틱 사이에 새로 생긴 홈런 기록만 골라 원문 그대로 붙인다.
+     * (cur.hr·prev.hr 는 fetchScoreboard() 가 etcRecords 에서 뽑아 온
+     * "오스틴33호(8회3점 손주환)" 형태의 문자열 목록 — kbo.js 참고.)
+     * "몇 점 중 몇 점이 홈런인지"를 여기서 다시 계산하지 않는다 — 원문에
+     * 이미 선수명·이닝·타점이 다 있어서, 굳이 뽑아 재조합하면 잘못 계산할
+     * 여지만 늘어난다.
+     */
+    const newHomeruns = (cur.hr ?? []).filter((r) => !(prev.hr ?? []).includes(r));
+
     push(
       'score',
       // 점수 조합을 키에 넣어, 같은 경기의 서로 다른 득점 상황이 각각 발송되게 한다.
       `${cur.gameId}:score:${cur.homeScore}-${cur.awayScore}`,
       `${t}${who}`,
-      `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}`,
+      `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}`
+        + (newHomeruns.length ? ` · ${newHomeruns.join(', ')}` : ''),
     );
   }
 
