@@ -25,7 +25,7 @@ jobs:
       # 서드파티 action 은 커밋 SHA 로 고정한다. @v4 같은 태그는 이동할 수 있어,
       # 태그가 탈취되면 다음 실행부터 다른 코드가 돌아간다. SHA 는 이동하지 않는다.
       # 갱신은 Dependabot(.github/dependabot.yml)이 PR 로 올려 준다.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -43,7 +43,7 @@ jobs:
     # (GitHub > Settings > Environments > production)
     environment: production
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
