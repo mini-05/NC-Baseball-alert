@@ -49,6 +49,12 @@ jobs:
           node-version: 22
       - run: npm ci --ignore-scripts
       # 토큰은 이 step 에만 준다. 앞의 설치·빌드 단계 환경에는 들어가지 않는다.
+      #
+      # ACCOUNT_ID 를 함께 주는 이유: wrangler.toml 에 account_id 가 없어서,
+      # 이것이 없으면 wrangler 가 계정 목록을 조회하려 든다. 그러면 토큰에
+      # Account Settings:Read 까지 있어야 한다. ID 를 직접 알려 주면 토큰을
+      # Workers Scripts:Edit + D1:Edit 최소 권한으로 유지할 수 있다.
       - run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
