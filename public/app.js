@@ -212,6 +212,13 @@ function renderTable(standings) {
   const tiers = standings.tiers ?? [];
   const rows = [];
 
+  /*
+   * 오늘 경기가 아직 안 끝난 팀이 하나라도 있을 때만 반영 표시를 붙인다.
+   * 다 끝났거나 경기가 없는 날은 표시할 것이 없으므로 아예 그리지 않는다 —
+   * 모든 줄에 체크가 붙어 있는 화면은 아무 정보도 주지 않는다.
+   */
+  const showMarks = standings.teams.some((t) => t.todayGame === 'pending');
+
   for (const t of standings.teams) {
     // 이 순위에서 시작하는 진출 구간이 있으면 라벨을 먼저 넣는다.
     const tier = tiers.find((x) => x.from === t.rank);
@@ -219,13 +226,23 @@ function renderTable(standings) {
 
     const isMine = t.code === teamCode;
 
+    // 팀명 바로 뒤에 붙인다. 따로 칸을 만들면 좁은 화면에서 이름이 밀린다.
+    const mark = showMarks && t.todayGame
+      ? el('span', {
+          class: `tmark ${t.todayGame}`,
+          text: t.todayGame === 'done' ? '✓' : '•',
+          title: t.todayGame === 'done' ? '오늘 경기 반영됨' : '오늘 경기 미반영',
+        })
+      : null;
+
     rows.push(
       el('div', { class: `trow${isMine ? ' mine' : ''}` },
         el('span', { class: 'trank', text: String(t.rank) }),
-        el('span', { class: 'tname', text: t.name }),
+        el('span', { class: 'tname' }, t.name, mark),
         el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
         el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
         el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
+        el('span', { class: 'tleft', text: String(t.remaining ?? '') }),
       ),
     );
 
@@ -243,6 +260,7 @@ function renderTable(standings) {
         el('span', { class: 'trec', text: '승-무-패' }),
         el('span', { class: 'tpct', text: '승률' }),
         el('span', { class: 'tgb', text: '승차' }),
+        el('span', { class: 'tleft', text: '잔여' }),
       ),
       ...rows,
     ),
@@ -322,7 +340,16 @@ function formatStart(iso) {
   return `${h < 12 ? '오전' : '오후'} ${h % 12 || 12}:${m[2]}`;
 }
 
-function renderGame(g) {
+/**
+ * 사용자가 직접 여닫은 경기. gameId → 열림 여부.
+ *
+ * 자동 갱신(20·60초)이 카드를 통째로 다시 그리므로, 이 기억이 없으면 펼쳐 둔
+ * 경기가 갱신될 때마다 도로 접힌다. 명시적으로 누른 경기만 여기에 남고,
+ * 나머지는 그때그때의 기본값(가장 최근 경기만 펼침)을 따른다.
+ */
+const gameOpenState = new Map();
+
+function renderGame(g, defaultOpen) {
   // 홈/원정 관점은 서버가 이미 계산해 보낸다(perspective()) — /api/schedule 과 같은 방식.
   const isHome = g.isHome;
   const mine = { name: g.teamName, score: g.teamScore };
@@ -404,25 +431,50 @@ function renderGame(g) {
       )
     : null;
 
+  /*
+   * 접기·펼치기는 <details> 에 맡긴다 — 클릭 토글·키보드·스크린리더가 전부
+   * 브라우저 기본 동작이라 직접 구현할 것이 없다.
+   *
+   * <summary>(항상 보임)에 경기 결과를, 그 아래(펼쳤을 때만 보임)에 전광판·
+   * 시각·타임라인을 둔다. 접힌 상태에서 "결과만 간단히"가 그대로 나온다.
+   */
+  const open = gameOpenState.get(g.gameId) ?? defaultOpen;
+
   // 진행 중인 경기는 다크 표면에 올린다. 크림 카드 사이에서 확실히 구분되고,
   // 크림↔다크 교차가 이 디자인 시스템의 페이싱 방식이다.
-  return el('article', { class: `card${isLive ? ' card-dark' : ''}` },
-    el('div', { class: 'game-meta' },
-      seriesTag,
-      isLive ? el('span', { class: 'tag live', text: 'Live' }) : null,
-      el('span', { text: `${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}` }),
-      el('span', { class: 'game-status', text: status }),
+  const card = el('details', { class: `card game${isLive ? ' card-dark' : ''}`, open: open || null },
+    el('summary', { class: 'game-summary' },
+      el('div', { class: 'game-meta' },
+        seriesTag,
+        isLive ? el('span', { class: 'tag live', text: 'Live' }) : null,
+        el('span', { text: `${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}` }),
+        el('span', { class: 'game-status', text: status }),
+      ),
+      el('div', { class: 'matchup' },
+        team(mine, done && diff < 0),
+        el('span', { class: 'colon', text: ':' }),
+        team(opp, done && diff > 0),
+      ),
+      verdict,
     ),
-    el('div', { class: 'matchup' },
-      team(mine, done && diff < 0),
-      el('span', { class: 'colon', text: ':' }),
-      team(opp, done && diff > 0),
-    ),
-    verdict,
     scoreboard,
     times,
     timeline,
   );
+
+  /*
+   * 기본값과 다를 때만 기억한다.
+   *
+   * open 속성을 달고 만든 <details> 는 DOM 에 붙을 때 toggle 이 한 번 발생한다.
+   * 그것까지 "사용자가 폈다"로 저장하면, 기본으로 펼쳐졌던 어제 경기가 오늘
+   * 경기 시작 후에도 계속 펼쳐진 채로 남는다. 기본값과 같아지면 기억을 지워
+   * 그 뒤로는 다시 기본 규칙을 따르게 한다.
+   */
+  card.addEventListener('toggle', () => {
+    if (card.open === defaultOpen) gameOpenState.delete(g.gameId);
+    else gameOpenState.set(g.gameId, card.open);
+  });
+  return card;
 }
 
 /**
@@ -484,6 +536,16 @@ async function loadHistory() {
       return;
     }
 
+    /*
+     * 기본으로 펼칠 경기 하나를 고른다: "이미 시작한 것 중 가장 최근 경기".
+     * 서버가 최신순으로 주므로 앞에서부터 처음 걸리는 것이 그것이다.
+     *
+     * 오늘 경기가 시작되면 그 경기가 이 자리를 가져가고, 직전까지 펼쳐져 있던
+     * 어제 경기는 자동으로 접힌다 — 규칙 하나로 두 경우가 모두 처리된다.
+     * 아직 시작 전인 경기는 펼쳐 봐야 보여 줄 내용이 없어 건너뛴다.
+     */
+    const featured = games.find((g) => g.phase !== 'before')?.gameId ?? null;
+
     const byDay = new Map();
     for (const g of games) {
       if (!byDay.has(g.gameDate)) byDay.set(g.gameDate, []);
@@ -491,7 +553,10 @@ async function loadHistory() {
     }
 
     for (const [date, list] of byDay) {
-      box.append(el('h2', { class: 'day-title', text: formatDay(date) }), ...list.map(renderGame));
+      box.append(
+        el('h2', { class: 'day-title', text: formatDay(date) }),
+        ...list.map((g) => renderGame(g, g.gameId === featured)),
+      );
     }
   } catch (err) {
     clear(box);
@@ -768,13 +833,19 @@ $('#btn-today').addEventListener('click', () => {
 });
 
 async function loadSchedule() {
-  const box = $('#schedule-list');
+  // 비어 있거나 실패했을 때의 안내는 지금 켜져 있는 뷰에 띄운다.
+  // 기본이 달력이라, 리스트에만 넣으면 아무것도 안 보이는 화면이 된다.
+  const box = () =>
+    document.querySelector('.view-btn.is-active')?.dataset.view === 'calendar'
+      ? $('#schedule-calendar')
+      : $('#schedule-list');
+
   try {
     scheduleData = await api('/api/schedule');
 
     if (!scheduleData.games.length) {
-      clear(box);
-      box.append(
+      clear(box());
+      box().append(
         el('p', { class: 'empty' }, '일정이 없어요.', el('br'), '비시즌이거나 일정이 아직 나오지 않았습니다.'),
       );
       return;
@@ -784,8 +855,8 @@ async function loadSchedule() {
     // 오늘 경기 위치로 맞추는 시점은 여기가 아니라 "일정 탭을 열 때"·"리스트로
     // 전환할 때"다(패널이 안 보이는 동안은 스크롤이 무효하다). .tab 클릭 핸들러 참고.
   } catch (err) {
-    clear(box);
-    box.append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
+    clear(box());
+    box().append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
   }
 }
 

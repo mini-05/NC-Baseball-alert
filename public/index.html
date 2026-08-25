@@ -97,20 +97,22 @@
         <div class="sched-actions">
           <button id="btn-today" class="btn-chip">오늘</button>
           <div class="view-switch" role="tablist">
-            <button class="view-btn is-active" data-view="list">리스트</button>
-            <button class="view-btn" data-view="calendar">달력</button>
+            <button class="view-btn" data-view="list">리스트</button>
+            <button class="view-btn is-active" data-view="calendar">달력</button>
           </div>
         </div>
       </div>
       <p id="sched-summary" class="sched-summary"></p>
     </div>
 
-    <div id="schedule-list" class="sched-view is-active">
+    <div id="schedule-list" class="sched-view">
       <div class="skeleton"></div>
       <div class="skeleton"></div>
     </div>
 
-    <div id="schedule-calendar" class="sched-view"></div>
+    <div id="schedule-calendar" class="sched-view is-active">
+      <div class="skeleton"></div>
+    </div>
   </section>
 
   <!-- ─────────── 순위 ─────────── -->
