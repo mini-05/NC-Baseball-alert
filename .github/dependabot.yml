@@ -1,0 +1,14 @@
+version: 2
+
+# SHA 로 고정한 action 은 스스로 갱신되지 않아, 보안 패치가 나와도 옛 코드가 계속 돈다.
+# 고정과 갱신은 짝이어야 한다 — 여기서 매주 PR 로 올려 준다.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
