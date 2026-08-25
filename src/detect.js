@@ -98,12 +98,16 @@ export function detectEvents(prev, cur, teamCode) {
           ? `${p.teamName} ${teamGained}점 득점!`
           : `${p.oppName} ${oppGained}점 실점`;
 
+    // 이번 틱 사이에 홈런이 하나라도 새로 생겼으면 표시한다. 홈런 자체는
+    // fetchScoreboard() 가 etcRecords 에서 세어 cur.hr 로 넘겨받는다(kbo.js).
+    const newHomerun = cur.hr > (prev.hr ?? 0);
+
     push(
       'score',
       // 점수 조합을 키에 넣어, 같은 경기의 서로 다른 득점 상황이 각각 발송되게 한다.
       `${cur.gameId}:score:${cur.homeScore}-${cur.awayScore}`,
       `${t}${who}`,
-      `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}`,
+      `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}${newHomerun ? ' (홈런)' : ''}`,
     );
   }
 

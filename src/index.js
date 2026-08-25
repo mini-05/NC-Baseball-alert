@@ -83,6 +83,11 @@ async function poll(env, opener) {
     // 스냅샷은 이벤트 발생 여부와 무관하게 항상 최신으로 맞춘다.
     writes.push(upsertStateStmt(env.DB, game, board ? JSON.stringify(board) : null));
 
+    // 이번 틱에 전광판을 못 가져왔으면(board null) 홈런 개수는 직전 값을
+    // 그대로 이어받는다 — 저장 쪽의 COALESCE(위 upsertStateStmt)와 같은 이유로,
+    // 일시적 조회 실패가 "홈런이 취소됐다"로 잘못 읽히지 않게 한다.
+    game.hr = board?.hr ?? prev?.hr ?? 0;
+
     for (const ev of detectEvents(prev, game, env.TEAM_CODE)) {
       pending.push({ game, ev });
     }
