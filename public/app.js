@@ -135,20 +135,49 @@ function serialize(sub) {
   if ('ResizeObserver' in window) new ResizeObserver(syncTopbarHeight).observe(topbar);
 }
 
+const TAB_KEY = 'tab';
+
+/**
+ * 탭을 켠다. 없는 이름이면 아무것도 바꾸지 않고 false 를 준다.
+ *
+ * 탭 목록을 따로 두지 않고 그때그때 DOM 에서 찾는다 — 탭이 늘거나 줄어도
+ * index.html 만 고치면 되고 이 파일은 그대로다.
+ */
+function activateTab(name) {
+  const tabs = $$('.tab');
+  const tab = tabs.find((t) => t.dataset.tab === name);
+  if (!tab) return false;
+
+  tabs.forEach((t) => t.classList.toggle('is-active', t === tab));
+  $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${name}`));
+  return true;
+}
+
 $$('.tab').forEach((tab) => {
   tab.addEventListener('click', () => {
-    $$('.tab').forEach((t) => t.classList.toggle('is-active', t === tab));
-    $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${tab.dataset.tab}`));
+    const name = tab.dataset.tab;
+    activateTab(name);
+
+    // 새로고침·앱 재실행 후에도 보던 탭으로 돌아오게 한다. 테마와 같은 방식이다.
+    localStorage.setItem(TAB_KEY, name);
 
     // 일정 탭을 열 때 리스트가 기본으로 보이는 뷰라면 오늘 경기 위치로 맞춘다.
     // 패널이 display:none 인 동안은 scrollIntoView 가 아무 효과가 없으므로,
     // 반드시 패널이 보이게 된 "이 시점"에 호출해야 한다.
-    if (tab.dataset.tab === 'schedule' &&
+    if (name === 'schedule' &&
         document.querySelector('.view-btn.is-active')?.dataset.view === 'list') {
       scrollListToToday();
     }
   });
 });
+
+/*
+ * 마지막으로 보던 탭 복원.
+ *
+ * 저장된 값이 없거나(첫 방문) 그 탭이 사라졌으면 activateTab 이 false 를 주고,
+ * 마크업에 이미 붙어 있는 is-active 가 그대로 기본값이 된다.
+ */
+activateTab(localStorage.getItem(TAB_KEY));
 
 /**
  * 좌우 스와이프로 탭을 넘긴다. 탭 버튼 클릭과 같은 경로(.tab.click())를 타서
@@ -158,7 +187,8 @@ $$('.tab').forEach((tab) => {
  * 스와이프 판정에서 제외한다 — 표를 넘겨 보려는 손짓이 탭 전환으로 새면 안 된다.
  */
 {
-  const TAB_ORDER = ['history', 'schedule', 'standings', 'settings'];
+  // 순서는 마크업의 탭 순서를 그대로 따른다. 탭이 늘어도 고칠 곳이 없다.
+  const TAB_ORDER = $$('.tab').map((t) => t.dataset.tab);
   const SWIPE_MIN_X = 60; // 오탭 방지용 최소 이동 거리
   let touchStartX = 0;
   let touchStartY = 0;
