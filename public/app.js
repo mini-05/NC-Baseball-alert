@@ -297,15 +297,40 @@ function renderTable(standings) {
   );
 }
 
+/**
+ * 순위가 언제 것인지 알려 주는 한 줄.
+ *
+ * 서버가 조회 시각(fetchedAt)을 함께 내려준다. 화면을 그린 시각이 아니라 이
+ * 값을 써야 하는 이유: 네이버 조회가 실패하면 서버가 마지막으로 확인된 순위로
+ * 되돌아가는데(season.js 의 getCacheStale), 그때 렌더 시각을 보여 주면 방금
+ * 받아온 최신 순위처럼 보인다.
+ */
+const STANDINGS_STALE_MS = 30 * 60 * 1000; // 캐시 수명이 10분이라, 이보다 오래됐으면 갱신이 막힌 것이다
+
+function standingsStamp(standings) {
+  if (!standings) return '';
+
+  // 이 기능이 나오기 전에 캐시된 값에는 fetchedAt 이 없다. 캐시가 갱신되면 사라진다.
+  if (!standings.fetchedAt) return '경기 종료 시 갱신';
+
+  const at = new Date(standings.fetchedAt);
+  const time = at.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  // 오늘 것이면 시각만, 지난 날짜면 날짜까지 밝힌다.
+  const when =
+    at.toDateString() === new Date().toDateString()
+      ? time
+      : `${at.getMonth() + 1}월 ${at.getDate()}일 ${time}`;
+
+  return Date.now() - at.getTime() > STANDINGS_STALE_MS
+    ? `${when} 기준 · 최신 순위를 불러오지 못했어요`
+    : `${when} 기준 · 경기 종료 시 갱신`;
+}
+
 function renderStandings({ standings, outlook }) {
   renderTable(standings);
 
   const stamp = $('#standings-updated');
-  if (stamp) {
-    stamp.textContent = standings
-      ? `${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })} 기준 · 경기 종료 시 갱신`
-      : '';
-  }
+  if (stamp) stamp.textContent = standingsStamp(standings);
 
   const slot = $('#outlook');
   clear(slot);
