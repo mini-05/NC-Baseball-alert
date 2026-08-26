@@ -156,6 +156,25 @@ export function upsertStateStmt(db, g, scoreboardJson = null) {
     );
 }
 
+/**
+ * 이번 틱에 받은 원본 상태를 그대로 남긴다. 화면·알림과 무관한 디버깅 전용
+ * 로그다 — 네이버가 상태를 실제로 언제 바꿨는지, 우리가 매 분 제대로
+ * 폴링했는지를 나중에 D1 콘솔에서 SELECT 로 확인하려는 목적.
+ */
+export function insertPollLogStmt(db, g) {
+  return db
+    .prepare(
+      `INSERT INTO poll_log (game_id, status_code, status_info, home_score, away_score, created_at)
+       VALUES (?,?,?,?,?,?)`,
+    )
+    .bind(g.gameId, g.statusCode, g.statusInfo, g.homeScore, g.awayScore, nowIso());
+}
+
+/** poll_log 는 디버깅용이라 오래 둘 필요 없다 — 며칠 지난 건 지운다. */
+export async function prunePollLog(db, olderThanIso) {
+  await db.prepare('DELETE FROM poll_log WHERE created_at < ?').bind(olderThanIso).run();
+}
+
 /* ─────────────── 이벤트 ─────────────── */
 
 /**

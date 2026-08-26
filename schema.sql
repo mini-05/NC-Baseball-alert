@@ -59,6 +59,21 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   updated_at    TEXT NOT NULL
 );
 
+-- 폴링마다 네이버가 준 원본 상태를 그대로 남긴다. 디버깅 전용 — 화면에 안 쓰고
+-- 알림도 안 보낸다. "언제 상태가 바뀌었는지"를 사후에 되짚을 자료가 없어서 만든
+-- 것으로, prunePollLog() 로 며칠 지나면 지운다(db.js 참고).
+CREATE TABLE IF NOT EXISTS poll_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  game_id     TEXT NOT NULL,
+  status_code TEXT,
+  status_info TEXT,
+  home_score  INTEGER,
+  away_score  INTEGER,
+  created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_poll_log_game ON poll_log(game_id, id DESC);
+
 -- 하루 단위 캐시. 오늘 경기가 없으면 크론이 외부 API를 아예 호출하지 않게 한다.
 -- key 예: 'plan:2026-08-23' (오늘의 경기 계획), 'standings:2026' (순위)
 CREATE TABLE IF NOT EXISTS cache (
