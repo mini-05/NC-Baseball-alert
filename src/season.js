@@ -12,7 +12,7 @@ import {
   fetchGames, filterTeam, filterCurrentSeason, fetchStandings, perspective,
   kstDateOffset, kstIsoToEpoch, seasonYearOf, TEAM_CODES,
 } from './kbo.js';
-import { getCache, getCacheStale, putCache, pruneDatedCache } from './db.js';
+import { getCache, getCacheStale, putCache, pruneDatedCache, prunePollLog } from './db.js';
 
 /** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
 const PRE_START_MIN = 90;
@@ -31,6 +31,9 @@ const HOUR = 60 * MIN;
  * 하루 두 행씩이라 1년치를 다 남겨도 700행 남짓이라 부담이 없다.
  */
 const CACHE_KEEP_DAYS = 365;
+
+/** poll_log 는 디버깅용이라 이만큼만 남긴다. */
+const POLL_LOG_KEEP_DAYS = 183;
 
 /**
  * 정규시즌 개막일을 알아낸다.
@@ -124,6 +127,8 @@ export async function loadDailyPlan(env, today) {
    */
   await pruneDatedCache(env.DB, kstDateOffset(-CACHE_KEEP_DAYS))
     .catch((err) => console.error('cache prune failed', err.message));
+  await prunePollLog(env.DB, new Date(Date.now() - POLL_LOG_KEEP_DAYS * 24 * HOUR).toISOString())
+    .catch((err) => console.error('poll log prune failed', err.message));
 
   return plan;
 }

@@ -15,7 +15,7 @@ import {
   invalidatePlan, resolveSeasonOpener, invalidateStandings, invalidateSchedule,
 } from './season.js';
 import {
-  loadStates, upsertStateStmt, insertEvent, listHistory,
+  loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
 } from './db.js';
@@ -82,6 +82,8 @@ async function poll(env, opener) {
 
     // 스냅샷은 이벤트 발생 여부와 무관하게 항상 최신으로 맞춘다.
     writes.push(upsertStateStmt(env.DB, game, board ? JSON.stringify(board) : null));
+    // 디버깅용 원본 상태 로그 — 언제 네이버가 상태를 바꿨는지 나중에 되짚기 위함.
+    writes.push(insertPollLogStmt(env.DB, game));
 
     // 이번 틱에 전광판을 못 가져왔으면(board null) 홈런 목록은 직전 값을
     // 그대로 이어받는다 — 저장 쪽의 COALESCE(위 upsertStateStmt)와 같은 이유로,
