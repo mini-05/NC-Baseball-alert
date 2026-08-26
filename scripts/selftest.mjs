@@ -266,7 +266,38 @@ function testDetect() {
   check('득점 dedup 키에 점수 포함', scored[0]?.dedupKey.endsWith(':score:3-0'), scored[0]?.dedupKey);
   check('정규시즌 scope', scored[0]?.scope === 'regular');
 
+  // app.js 의 tlKind() 가 이 '실점' 문구로 타임라인 아이콘·라벨을 고른다.
+  // 문구를 바꾸면 여기와 app.js 를 같이 고쳐야 한다.
   check('실점 문구', detectEvents(live(1, 0), live(1, 2), T)[0]?.title === '삼성 2점 실점');
+
+  // ── 득점 이닝 — 전광판이 총점과 맞아떨어질 때만 말한다 ──
+  // (statusInfo 는 폴링 순간의 이닝이라 쓰지 않는다. detect.js scoringInning 참고)
+  const withBoard = (h, a, board) => Object.assign(live(h, a), { board });
+  const side = (innings) => ({ innings, r: 0, h: 0, e: 0, b: 0 });
+  const bodyOf = (prev, cur) => detectEvents(prev, cur, T)[0]?.body;
+
+  check('홈 득점 이닝은 말',
+    bodyOf(live(1, 0), withBoard(3, 0, { home: side([0, 0, 1, 0, 2]), away: side([0, 0, 0, 0, 0]) }))
+      === 'NC 3 : 0 삼성 · 5회말');
+
+  check('원정 득점 이닝은 초',
+    bodyOf(live(1, 0), withBoard(1, 2, { home: side([0, 1]), away: side([0, 2]) }))
+      === 'NC 1 : 2 삼성 · 2회초');
+
+  check('이닝별 합이 총점과 다르면 이닝 생략 (두 API 시점 어긋남)',
+    bodyOf(live(1, 0), withBoard(3, 0, { home: side([0, 0, 1]), away: side([0, 0, 0]) }))
+      === 'NC 3 : 0 삼성');
+
+  check('양 팀이 같은 틱에 득점하면 이닝 생략',
+    bodyOf(live(1, 1), withBoard(2, 2, { home: side([1, 1]), away: side([1, 1]) }))
+      === 'NC 2 : 2 삼성');
+
+  check('전광판이 없으면 이닝 생략',
+    bodyOf(live(1, 0), withBoard(2, 0, null)) === 'NC 2 : 0 삼성');
+
+  check('연장 이닝도 그대로 센다',
+    bodyOf(live(3, 3), withBoard(4, 3, { home: side([1, 0, 0, 0, 0, 2, 0, 0, 0, 1]), away: side([]) }))
+      === 'NC 4 : 3 삼성 · 10회말');
 
   const ended = detectEvents(live(5, 3), g({ statusCode: 'RESULT', homeTeamScore: 5, awayTeamScore: 3 }), T);
   check('경기 종료 · 승리', ended[0]?.title === '경기 종료 · NC 승리', ended[0]?.title);

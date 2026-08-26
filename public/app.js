@@ -64,7 +64,14 @@ function icon(name) {
   return svg;
 }
 
-const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', end: '종료', test: '테스트' };
+const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', concede: '실점', end: '종료', test: '테스트' };
+
+/*
+ * 득점·실점 구분. 서버가 알림 제목에 이미 "NC 3점 득점!" / "두산 2점 실점" 으로
+ * 써 두었으므로 여기서 점수를 다시 계산하지 않고 그 문구를 그대로 믿는다.
+ * ponytail: 제목 문구 의존. detect.js 의 who 문구를 바꾸면 여기도 같이 손본다.
+ */
+const tlKind = (e) => (e.kind === 'score' && e.title?.includes('실점') ? 'concede' : e.kind);
 const SERIES_SHORT = {
   tiebreaker: '순위결정전',
   wildcard: '와일드카드',
@@ -476,9 +483,9 @@ function renderGame(g, defaultOpen) {
         g.events.map((e) =>
           el('li', { class: 'tl-item' },
             el('span', { class: 'tl-time', text: clockOf(e.createdAt) }),
-            icon(e.kind),
+            icon(tlKind(e)),
             el('span', { class: 'tl-body' },
-              el('b', { class: 'tl-kind', text: KIND_LABEL[e.kind] ?? e.kind }),
+              el('b', { class: 'tl-kind', text: KIND_LABEL[tlKind(e)] ?? e.kind }),
               e.body,
             ),
           ),
@@ -495,9 +502,8 @@ function renderGame(g, defaultOpen) {
    */
   const open = gameOpenState.get(g.gameId) ?? defaultOpen;
 
-  // 진행 중인 경기는 다크 표면에 올린다. 크림 카드 사이에서 확실히 구분되고,
-  // 크림↔다크 교차가 이 디자인 시스템의 페이싱 방식이다.
-  const card = el('details', { class: `card game${isLive ? ' card-dark' : ''}`, open: open || null },
+  // 카드 색은 모든 경기가 같다. 진행 중 표시는 Live 태그가 맡는다.
+  const card = el('details', { class: 'card game', open: open || null },
     el('summary', { class: 'game-summary' },
       el('div', { class: 'game-meta' },
         seriesTag,

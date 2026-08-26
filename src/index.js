@@ -88,6 +88,11 @@ async function poll(env, opener) {
     // 일시적 조회 실패가 "홈런 기록이 사라졌다"로 잘못 읽히지 않게 한다.
     game.hr = board?.hr ?? prev?.hr ?? [];
 
+    // 득점 이닝을 되짚는 데 쓴다(detect.js scoringInning). 못 가져왔으면 null —
+    // 그 경우 이닝 없이 알린다. 여기서는 hr 처럼 직전 값을 잇지 않는다:
+    // 옛 전광판으로 이닝을 고르면 틀린 이닝을 단언하게 된다.
+    game.board = board ?? null;
+
     for (const ev of detectEvents(prev, game, env.TEAM_CODE)) {
       pending.push({ game, ev });
     }
