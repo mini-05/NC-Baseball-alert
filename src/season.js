@@ -26,10 +26,11 @@ const HOUR = 60 * MIN;
 /**
  * 날짜별 캐시(plan:·today:)를 며칠치까지 남길지.
  *
- * 지난 날짜 값은 읽히지 않으므로 0일이어도 되지만, 자정 전후 시차나 관리자
- * 재조회 같은 경계에서 방금 만든 값을 지우는 일이 없도록 여유를 둔다.
+ * 지난 날짜 값은 다시 읽히지 않으므로 기능상 며칠이든 상관없다. 1년으로 둔
+ * 것은 지난 시즌 기록을 들여다볼 일이 생겼을 때 남아 있게 하려는 것이고,
+ * 하루 두 행씩이라 1년치를 다 남겨도 700행 남짓이라 부담이 없다.
  */
-const CACHE_KEEP_DAYS = 7;
+const CACHE_KEEP_DAYS = 365;
 
 /**
  * 정규시즌 개막일을 알아낸다.
@@ -232,7 +233,13 @@ export async function loadStandings(env, year) {
   if (cached) return cached;
 
   try {
-    const standings = await fetchStandings(year);
+    /*
+     * 조회 시각을 값에 함께 넣어 둔다(loadDailyPlan 의 fetchedAt 과 같은 방식).
+     * 화면의 "○○ 기준" 표시가 이 값을 쓴다 — 폴백으로 옛 순위를 보여줄 때
+     * 그 값이 언제 것인지 알려야 하기 때문이다. 캐시된 값을 그대로 돌려주는
+     * 경로에서도 이 시각이 함께 따라오므로 별도 처리가 필요 없다.
+     */
+    const standings = { ...(await fetchStandings(year)), fetchedAt: new Date().toISOString() };
     await putCache(env.DB, key, standings, 10 * MIN);
     return standings;
   } catch (err) {

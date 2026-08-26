@@ -450,6 +450,26 @@ async function testScheduleResilience() {
       JSON.stringify(fallback),
     );
 
+    // 정상 조회에는 조회 시각이 붙는다 — 화면의 "○○ 기준" 표시가 이 값을 쓴다.
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        success: true,
+        result: {
+          seasonTeamStats: [{
+            teamId: 'NC', teamName: 'NC', ranking: 8, gameCount: 107, winGameCount: 48,
+            drawnGameCount: 2, loseGameCount: 57, wra: 0.457, gameBehind: 12.5,
+          }],
+        },
+      }),
+    });
+    const before = Date.now();
+    const fresh = await loadStandings({ DB: fakeCacheDb() }, 2026);
+    const at = Date.parse(fresh?.fetchedAt ?? '');
+    check('정상 조회한 순위에 fetchedAt 부착', at >= before && at <= Date.now(), fresh?.fetchedAt);
+
+    globalThis.fetch = async () => { throw new Error('naver down'); };
+
     // 순위도 같은 방식으로 되돌아간다.
     const lastStandings = { year: 2026, teams: [{ code: 'NC', rank: 8 }] };
     const standDb = fakeCacheDb({
