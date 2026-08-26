@@ -236,8 +236,7 @@ main {
   border: 1px solid var(--hairline);
 }
 
-/* product-mockup-card-dark — 진행 중인 경기를 다크 표면에 올린다.
-   크림과 다크를 번갈아 놓는 것이 이 시스템의 페이싱 방식이다. */
+/* product-mockup-card-dark — 다크 표면 카드(iOS 알림 안내). */
 .card-dark {
   background: var(--surface-dark);
   color: var(--on-dark);
@@ -315,7 +314,6 @@ main {
   color: var(--muted);
   margin-bottom: var(--s-md);
 }
-.card-dark .game-meta { color: var(--on-dark-soft); }
 
 .tag {
   display: inline-flex;
@@ -331,7 +329,6 @@ main {
   color: var(--ink);
 }
 .tag .tf { width: 14px; height: 14px; margin: 0; }
-.card-dark .tag { background: var(--surface-dark-elevated); color: var(--on-dark); }
 
 /* badge-coral — LIVE 표시. 코랄을 쓰는 몇 안 되는 자리. */
 .tag.live { background: var(--primary); color: var(--on-primary); }
@@ -364,7 +361,6 @@ main {
   transition: transform 0.15s ease;
 }
 .game[open] > summary::after { transform: rotate(-135deg); }
-.card-dark.game > summary::after { border-color: var(--on-dark-soft); }
 
 /* 화살표 자리를 비워 둔다 — 상태 텍스트("종료", "7회말")와 겹치지 않게. */
 .game > summary .game-meta { padding-right: 18px; }
@@ -382,8 +378,6 @@ main {
 .team { text-align: center; }
 .team-name { font-size: 14px; color: var(--muted); margin-bottom: var(--s-xxs); }
 .team.mine .team-name { color: var(--ink); font-weight: 500; }
-.card-dark .team-name { color: var(--on-dark-soft); }
-.card-dark .team.mine .team-name { color: var(--on-dark); }
 
 /* 점수도 세리프. 이 앱에서 가장 중요한 숫자다. */
 .team-score {
@@ -395,7 +389,6 @@ main {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
-.card-dark .team-score { color: var(--on-dark); }
 .team.lost .team-score, .team.lost .team-name { color: var(--muted-soft); }
 
 .colon { font-family: var(--font-display); font-size: 20px; color: var(--muted-soft); }
@@ -435,7 +428,6 @@ main {
   font-weight: 500;
   border-bottom: 1px solid var(--hairline-soft);
 }
-.card-dark .scorebox thead th { color: var(--on-dark-soft); border-bottom-color: var(--surface-dark-elevated); }
 
 .scorebox tbody th {
   text-align: left;
@@ -443,17 +435,14 @@ main {
   color: var(--body);
   padding-right: var(--s-sm);
 }
-.card-dark .scorebox tbody th { color: var(--on-dark); }
 
 .scorebox tbody tr.mine th, .scorebox tbody tr.mine td { color: var(--ink); }
-.card-dark .scorebox tbody tr.mine th, .card-dark .scorebox tbody tr.mine td { color: var(--on-dark); }
 
 /* R(득점) 칸은 왼쪽에 구분선을 둬 이닝 점수와 합계를 시각적으로 나눈다. */
 .scorebox td.sb-total {
   font-weight: 700;
   border-left: 1px solid var(--hairline-soft);
 }
-.card-dark .scorebox td.sb-total { border-left-color: var(--surface-dark-elevated); }
 
 /* 기록 카드의 시작·종료 시각 */
 .game-times {
@@ -463,7 +452,6 @@ main {
   color: var(--muted-soft);
   font-variant-numeric: tabular-nums;
 }
-.card-dark .game-times { color: var(--on-dark-soft); }
 
 .timeline {
   list-style: none;
@@ -473,7 +461,6 @@ main {
   display: grid;
   gap: var(--s-sm);
 }
-.card-dark .timeline { border-top-color: var(--surface-dark-elevated); }
 
 .tl-item {
   display: grid;
@@ -490,9 +477,7 @@ main {
   font-variant-numeric: tabular-nums;
 }
 .tl-body { font-size: 14px; color: var(--body); }
-.card-dark .tl-body { color: var(--on-dark-soft); }
 .tl-kind { font-weight: 500; color: var(--ink); margin-right: var(--s-xs); }
-.card-dark .tl-kind { color: var(--on-dark); }
 
 /* ─────────── 순위표 ─────────── */
 

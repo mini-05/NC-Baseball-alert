@@ -266,6 +266,8 @@ function testDetect() {
   check('득점 dedup 키에 점수 포함', scored[0]?.dedupKey.endsWith(':score:3-0'), scored[0]?.dedupKey);
   check('정규시즌 scope', scored[0]?.scope === 'regular');
 
+  // app.js 의 tlKind() 가 이 '실점' 문구로 타임라인 아이콘·라벨을 고른다.
+  // 문구를 바꾸면 여기와 app.js 를 같이 고쳐야 한다.
   check('실점 문구', detectEvents(live(1, 0), live(1, 2), T)[0]?.title === '삼성 2점 실점');
 
   const ended = detectEvents(live(5, 3), g({ statusCode: 'RESULT', homeTeamScore: 5, awayTeamScore: 3 }), T);
