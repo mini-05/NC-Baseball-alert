@@ -12,7 +12,7 @@ import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '.
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
-import { isPollWindow } from '../src/season.js';
+import { isPollWindow, loadSchedule } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor } from '../src/db.js';
 
@@ -392,6 +392,36 @@ function testWindow() {
   check('시각을 못 읽으면 안전하게 감시', isPollWindow({ games: [{ startAt: 'broken' }] }, start));
 }
 
+/** cache 테이블만 지원하는 최소 D1 흉내. loadSchedule 이 쓰는 getCache/putCache 만 있으면 된다. */
+function fakeCacheDb() {
+  return {
+    prepare() {
+      return {
+        bind() { return this; },
+        async first() { return null; }, // 캐시 미스 고정 — 매번 실제 조회 경로를 타게 한다.
+        async run() { return {}; }, // INSERT 는 흉내만 낸다. 검증 대상이 아니다.
+      };
+    },
+  };
+}
+
+async function testScheduleResilience() {
+  const originalFetch = globalThis.fetch;
+  try {
+    // 네이버 API가 완전히 죽어 fetch 자체가 예외를 던지는 상황을 흉내낸다.
+    globalThis.fetch = async () => { throw new Error('naver down'); };
+
+    const games = await loadSchedule({ DB: fakeCacheDb(), TEAM_CODE: 'NC' }, 2026);
+    check(
+      '일정 조회 실패 시 예외를 던지지 않고 빈 목록',
+      Array.isArray(games) && games.length === 0,
+      JSON.stringify(games),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 /* ══ 7. 보안 검증 ══ */
 
 function testSecurity() {
@@ -566,6 +596,7 @@ console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
+console.log('\n[10] 일정 조회 장애 대응');   await testScheduleResilience();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);

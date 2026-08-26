@@ -143,44 +143,55 @@ export async function loadSchedule(env, year) {
   const cached = await getCache(env.DB, key);
   if (cached) return cached;
 
-  const opener = await resolveSeasonOpener(env, year);
+  try {
+    const opener = await resolveSeasonOpener(env, year);
 
-  // 시즌 전체를 받는다. 지난 경기의 결과까지 함께 보여주기 위함이다.
-  const games = filterCurrentSeason(
-    filterTeam(await fetchGames(`${year}-01-01`, `${year}-12-31`), env.TEAM_CODE),
-    year,
-    opener,
-  );
+    // 시즌 전체를 받는다. 지난 경기의 결과까지 함께 보여주기 위함이다.
+    const games = filterCurrentSeason(
+      filterTeam(await fetchGames(`${year}-01-01`, `${year}-12-31`), env.TEAM_CODE),
+      year,
+      opener,
+    );
 
-  const schedule = games
-    .map((g) => {
-      const p = perspective(g, env.TEAM_CODE);
+    const schedule = games
+      .map((g) => {
+        const p = perspective(g, env.TEAM_CODE);
 
-      return {
-        gameId: g.gameId,
-        gameDate: g.gameDate,
-        startAt: g.startAt,
-        stadium: g.stadium,
-        series: g.series,
-        isHome: p.isHome,
-        oppName: p.oppName,
-        phase: g.phase,
-        cancelled: g.cancelled,
-        statusInfo: g.statusInfo,
-        // 지난 경기의 결과. 아직 안 끝난 경기는 화면에서 phase 로 걸러 쓴다.
-        teamScore: p.teamScore,
-        oppScore: p.oppScore,
-        result:
-          g.phase === 'result' && !g.cancelled
-            ? p.teamScore > p.oppScore ? 'win' : p.teamScore < p.oppScore ? 'lose' : 'draw'
-            : null,
-      };
-    })
-    .sort((a, b) => a.startAt.localeCompare(b.startAt));
+        return {
+          gameId: g.gameId,
+          gameDate: g.gameDate,
+          startAt: g.startAt,
+          stadium: g.stadium,
+          series: g.series,
+          isHome: p.isHome,
+          oppName: p.oppName,
+          phase: g.phase,
+          cancelled: g.cancelled,
+          statusInfo: g.statusInfo,
+          // 지난 경기의 결과. 아직 안 끝난 경기는 화면에서 phase 로 걸러 쓴다.
+          teamScore: p.teamScore,
+          oppScore: p.oppScore,
+          result:
+            g.phase === 'result' && !g.cancelled
+              ? p.teamScore > p.oppScore ? 'win' : p.teamScore < p.oppScore ? 'lose' : 'draw'
+              : null,
+        };
+      })
+      .sort((a, b) => a.startAt.localeCompare(b.startAt));
 
-  // 경기 결과가 반영돼야 하므로 짧게 잡고, 경기가 끝나면 invalidateSchedule 로 즉시 비운다.
-  await putCache(env.DB, key, schedule, 30 * MIN);
-  return schedule;
+    // 경기 결과가 반영돼야 하므로 짧게 잡고, 경기가 끝나면 invalidateSchedule 로 즉시 비운다.
+    await putCache(env.DB, key, schedule, 30 * MIN);
+    return schedule;
+  } catch (err) {
+    // loadStandings·loadTodayStatus 와 같은 이유로 감싼다: 네이버 API가 잠깐만
+    // 흔들려도(타임아웃·5xx·응답 형태 변경) 이 예외가 그대로 올라가면 index.js
+    // 최상위 캐치올이 "서버 오류가 발생했습니다"를 돌려준다 — 일정 하나가 잠깐
+    // 안 나오는 것과 전체 API가 500이 되는 것은 전혀 다른 심각도다.
+    // 캐시는 하지 않는다: 실패를 저장해 버리면 다음 요청도 30분간 빈 화면을
+    // 계속 보게 된다.
+    console.error('schedule fetch failed', err.message);
+    return [];
+  }
 }
 
 /** 경기가 끝났을 때 호출한다. 지난 일정의 결과를 바로 반영하기 위함이다. */
