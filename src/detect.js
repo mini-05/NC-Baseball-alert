@@ -48,6 +48,37 @@ function scoreLine(game, teamCode) {
 }
 
 /**
+ * 득점이 난 이닝을 전광판에서 되짚는다. 확실할 때만 문자열을, 아니면 null.
+ *
+ * 왜 statusInfo("5회초")를 안 쓰나 — 그건 폴링한 순간의 이닝이지 점수가 난
+ * 이닝이 아니다. 이닝이 넘어간 직후 틱에 걸리면 한 칸 밀린 이닝을 단언하게 된다.
+ *
+ * 왜 일치 검사가 필요한가 — 총점은 schedule API, 이닝별 점수는 record API 에서
+ * 온다(kbo.js). 두 응답의 시점이 어긋나면 이닝별 합과 총점이 다르다. 그 상태의
+ * 전광판으로 이닝을 고르면 확신에 찬 오답이 나오므로, 합이 총점과 같을 때만
+ * 이닝을 말하고 아니면 아무 말도 하지 않는다.
+ *
+ * @param {object|null|undefined} board fetchScoreboard() 결과
+ * @param {'home'|'away'} side 점수를 낸 쪽
+ * @param {number} score 그 쪽의 현재 총점 (schedule API 값)
+ */
+function scoringInning(board, side, score) {
+  const innings = board?.[side]?.innings;
+  if (!Array.isArray(innings) || innings.length === 0) return null;
+
+  const at = (i) => Number(innings[i]) || 0;
+  let sum = 0;
+  for (let i = 0; i < innings.length; i++) sum += at(i);
+  if (sum !== score) return null;
+
+  // 합이 맞으므로 마지막으로 점수가 난 이닝이 방금 그 이닝이다.
+  for (let i = innings.length - 1; i >= 0; i--) {
+    if (at(i) > 0) return `${i + 1}회${side === 'home' ? '말' : '초'}`;
+  }
+  return null;
+}
+
+/**
  * @param {object|null} prev DB에 저장돼 있던 직전 스냅샷 (없으면 null)
  * @param {object} cur  방금 조회한 현재 상태 (normalizeGame 결과)
  * @param {string} teamCode 알림 대상 팀 코드
@@ -108,12 +139,23 @@ export function detectEvents(prev, cur, teamCode) {
      */
     const newHomeruns = (cur.hr ?? []).filter((r) => !(prev.hr ?? []).includes(r));
 
+    // 양 팀이 같은 틱에 점수를 냈으면 이닝이 하나로 정해지지 않는다 — 생략한다.
+    const side =
+      teamGained > 0 && oppGained > 0
+        ? null
+        : (teamGained > 0) === p.isHome
+          ? 'home'
+          : 'away';
+    const inning = side
+      ? scoringInning(cur.board, side, side === 'home' ? cur.homeScore : cur.awayScore)
+      : null;
+
     push(
       'score',
       // 점수 조합을 키에 넣어, 같은 경기의 서로 다른 득점 상황이 각각 발송되게 한다.
       `${cur.gameId}:score:${cur.homeScore}-${cur.awayScore}`,
       `${t}${who}`,
-      `${scoreLine(cur, teamCode)}${cur.statusInfo ? ` · ${cur.statusInfo}` : ''}`
+      `${scoreLine(cur, teamCode)}${inning ? ` · ${inning}` : ''}`
         + (newHomeruns.length ? ` · ${newHomeruns.join(', ')}` : ''),
     );
   }
