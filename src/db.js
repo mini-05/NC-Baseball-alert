@@ -170,7 +170,7 @@ export function insertPollLogStmt(db, g) {
     .bind(g.gameId, g.statusCode, g.statusInfo, g.homeScore, g.awayScore, nowIso());
 }
 
-/** poll_log 는 디버깅용이라 오래 둘 필요 없다 — 며칠 지난 건 지운다. */
+/** poll_log 는 디버깅용이라 오래 둘 필요 없다 — 6개월 지난 건 지운다. */
 export async function prunePollLog(db, olderThanIso) {
   await db.prepare('DELETE FROM poll_log WHERE created_at < ?').bind(olderThanIso).run();
 }

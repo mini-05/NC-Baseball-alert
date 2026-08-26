@@ -33,7 +33,7 @@ const HOUR = 60 * MIN;
 const CACHE_KEEP_DAYS = 365;
 
 /** poll_log 는 디버깅용이라 이만큼만 남긴다. */
-const POLL_LOG_KEEP_DAYS = 3;
+const POLL_LOG_KEEP_DAYS = 183;
 
 /**
  * 정규시즌 개막일을 알아낸다.

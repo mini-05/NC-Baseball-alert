@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 -- 폴링마다 네이버가 준 원본 상태를 그대로 남긴다. 디버깅 전용 — 화면에 안 쓰고
 -- 알림도 안 보낸다. "언제 상태가 바뀌었는지"를 사후에 되짚을 자료가 없어서 만든
--- 것으로, prunePollLog() 로 며칠 지나면 지운다(db.js 참고).
+-- 것으로, prunePollLog() 로 6개월 지나면 지운다(db.js 참고).
 CREATE TABLE IF NOT EXISTS poll_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   game_id     TEXT NOT NULL,
