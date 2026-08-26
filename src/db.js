@@ -8,20 +8,54 @@ const nowIso = () => new Date().toISOString();
 /* ─────────────── 캐시 ─────────────── */
 
 /** 만료되지 않은 캐시 값을 돌려준다. 없거나 만료됐으면 null. */
-export async function getCache(db, key) {
+async function readCache(db, key, allowExpired) {
   const row = await db
     .prepare('SELECT value, expires_at FROM cache WHERE key = ?')
     .bind(key)
     .first();
 
   if (!row) return null;
-  if (Date.parse(row.expires_at) <= Date.now()) return null;
+  if (!allowExpired && Date.parse(row.expires_at) <= Date.now()) return null;
 
   try {
     return JSON.parse(row.value);
   } catch {
     return null; // 저장된 값이 깨졌으면 캐시 미스로 취급한다.
   }
+}
+
+export const getCache = (db, key) => readCache(db, key, false);
+
+/**
+ * 만료 여부를 무시하고 저장된 값을 읽는다.
+ *
+ * 외부 API 조회가 실패했을 때 "마지막으로 확인됐던 값"으로 되돌아가기 위한 것이다.
+ * putCache 는 행을 지우지 않고 덮어쓰기만 하므로, 만료된 값도 테이블에 그대로
+ * 남아 있다 — 이 함수는 그것을 꺼내 쓴다.
+ *
+ * 평상시 경로에서는 절대 쓰지 않는다. 실패한 catch 안에서만 부른다.
+ */
+export const getCacheStale = (db, key) => readCache(db, key, true);
+
+/**
+ * 날짜별 캐시(plan:·today:) 중 오래된 것을 지운다.
+ *
+ * 이 두 키만 하루 한 개씩 늘어난다. 지난 날짜의 값은 다시 읽히지 않으므로
+ * 남겨 둘 이유가 없다. 반면 연도별 키(opener:·schedule:·standings:)는
+ * 개수가 늘지 않고, 만료된 값이 곧 getCacheStale 의 폴백 재료이므로 건드리지 않는다.
+ *
+ * 키가 `접두사:YYYY-MM-DD` 라 사전순과 날짜순이 같다. 그래서 범위 비교만으로
+ * 고를 수 있고, key 가 기본 키라 인덱스를 그대로 탄다.
+ *
+ * @param {string} olderThan 이 날짜(YYYY-MM-DD) 이전 것을 지운다. 해당일은 남는다.
+ */
+export async function pruneDatedCache(db, olderThan) {
+  const range = (prefix) =>
+    db
+      .prepare('DELETE FROM cache WHERE key >= ? AND key < ?')
+      .bind(`${prefix}:`, `${prefix}:${olderThan}`);
+
+  await db.batch([range('plan'), range('today')]);
 }
 
 /** ttlMs 가 0 이하이면 즉시 만료된 값으로 넣어 사실상 무효화한다. */

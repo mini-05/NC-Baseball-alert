@@ -12,7 +12,7 @@ import {
   fetchGames, filterTeam, filterCurrentSeason, fetchStandings, perspective,
   kstDateOffset, kstIsoToEpoch, seasonYearOf, TEAM_CODES,
 } from './kbo.js';
-import { getCache, putCache } from './db.js';
+import { getCache, getCacheStale, putCache, pruneDatedCache } from './db.js';
 
 /** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
 const PRE_START_MIN = 90;
@@ -22,6 +22,14 @@ const POST_START_HOURS = 7;
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
+
+/**
+ * 날짜별 캐시(plan:·today:)를 며칠치까지 남길지.
+ *
+ * 지난 날짜 값은 읽히지 않으므로 0일이어도 되지만, 자정 전후 시차나 관리자
+ * 재조회 같은 경계에서 방금 만든 값을 지우는 일이 없도록 여유를 둔다.
+ */
+const CACHE_KEEP_DAYS = 7;
 
 /**
  * 정규시즌 개막일을 알아낸다.
@@ -105,6 +113,17 @@ export async function loadDailyPlan(env, today) {
 
   // 계획은 당일에만 유효하다. 자정이 지나면 새로 만든다.
   await putCache(env.DB, key, plan, 12 * HOUR);
+
+  /*
+   * 지난 날짜 캐시 청소를 여기에 붙인다. 이 지점은 계획을 새로 만드는 때,
+   * 즉 하루 한두 번만 지나가므로 1분마다 도는 크론에 부담을 주지 않는다.
+   *
+   * 청소가 실패해도 계획은 이미 저장됐으므로 그대로 진행한다 — 뒷정리 때문에
+   * 폴링이 한 틱 밀리는 편이 더 나쁘다.
+   */
+  await pruneDatedCache(env.DB, kstDateOffset(-CACHE_KEEP_DAYS))
+    .catch((err) => console.error('cache prune failed', err.message));
+
   return plan;
 }
 
@@ -187,10 +206,11 @@ export async function loadSchedule(env, year) {
     // 흔들려도(타임아웃·5xx·응답 형태 변경) 이 예외가 그대로 올라가면 index.js
     // 최상위 캐치올이 "서버 오류가 발생했습니다"를 돌려준다 — 일정 하나가 잠깐
     // 안 나오는 것과 전체 API가 500이 되는 것은 전혀 다른 심각도다.
-    // 캐시는 하지 않는다: 실패를 저장해 버리면 다음 요청도 30분간 빈 화면을
-    // 계속 보게 된다.
+    // 실패를 캐시하지는 않는다. 대신 마지막으로 확인됐던 일정으로 되돌아간다 —
+    // 시즌 일정은 몇 달 전에 확정돼 거의 바뀌지 않으므로, 조금 오래된 값이라도
+    // 빈 화면보다 훨씬 쓸모 있다.
     console.error('schedule fetch failed', err.message);
-    return [];
+    return (await getCacheStale(env.DB, key)) ?? [];
   }
 }
 
@@ -216,8 +236,9 @@ export async function loadStandings(env, year) {
     await putCache(env.DB, key, standings, 10 * MIN);
     return standings;
   } catch (err) {
+    // 마지막으로 확인됐던 순위로 되돌아간다. 며칠 지난 순위라도 빈 화면보다 낫다.
     console.error('standings fetch failed', err.message);
-    return null;
+    return (await getCacheStale(env.DB, key)) ?? null;
   }
 }
 

@@ -12,9 +12,9 @@ import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '.
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
-import { isPollWindow, loadSchedule } from '../src/season.js';
+import { isPollWindow, loadSchedule, loadStandings } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
-import { subscribersFor } from '../src/db.js';
+import { subscribersFor, getCache, pruneDatedCache } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -392,34 +392,108 @@ function testWindow() {
   check('시각을 못 읽으면 안전하게 감시', isPollWindow({ games: [{ startAt: 'broken' }] }, start));
 }
 
-/** cache 테이블만 지원하는 최소 D1 흉내. loadSchedule 이 쓰는 getCache/putCache 만 있으면 된다. */
-function fakeCacheDb() {
+/**
+ * cache 테이블만 지원하는 최소 D1 흉내.
+ *
+ * @param rows 미리 들어 있는 캐시 행. { 'schedule:2026': { value, expires_at } }
+ *   value 는 문자열(JSON), expires_at 은 ISO 문자열이다. 비우면 캐시 미스가 되어
+ *   실제 조회 경로를 타게 된다.
+ */
+function fakeCacheDb(rows = {}) {
+  const deletes = []; // pruneDatedCache 가 무엇을 지우려 했는지 확인용
   return {
-    prepare() {
+    deletes,
+    prepare(sql) {
       return {
-        bind() { return this; },
-        async first() { return null; }, // 캐시 미스 고정 — 매번 실제 조회 경로를 타게 한다.
-        async run() { return {}; }, // INSERT 는 흉내만 낸다. 검증 대상이 아니다.
+        _sql: sql,
+        _args: [],
+        bind(...args) { this._args = args; return this; },
+        async first() { return rows[this._args[0]] ?? null; },
+        async run() {
+          if (this._sql.startsWith('DELETE')) deletes.push(this._args);
+          return {};
+        },
       };
+    },
+    async batch(stmts) {
+      for (const s of stmts) await s.run();
+      return [];
     },
   };
 }
 
 async function testScheduleResilience() {
   const originalFetch = globalThis.fetch;
+  const expired = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
   try {
     // 네이버 API가 완전히 죽어 fetch 자체가 예외를 던지는 상황을 흉내낸다.
     globalThis.fetch = async () => { throw new Error('naver down'); };
 
+    // 남아 있는 캐시조차 없으면(첫 배포 직후 등) 빈 목록으로 물러난다.
     const games = await loadSchedule({ DB: fakeCacheDb(), TEAM_CODE: 'NC' }, 2026);
     check(
-      '일정 조회 실패 시 예외를 던지지 않고 빈 목록',
+      '일정 조회 실패 + 캐시 없음 → 빈 목록',
       Array.isArray(games) && games.length === 0,
       JSON.stringify(games),
     );
+
+    // 만료된 캐시가 남아 있으면 그것으로 되돌아간다 — 이번 변경의 핵심.
+    const lastGood = [{ gameId: '20260822SSNC02026', gameDate: '2026-08-22', oppName: '삼성' }];
+    const staleDb = fakeCacheDb({
+      'schedule:2026': { value: JSON.stringify(lastGood), expires_at: expired },
+    });
+    const fallback = await loadSchedule({ DB: staleDb, TEAM_CODE: 'NC' }, 2026);
+    check(
+      '일정 조회 실패 + 만료 캐시 있음 → 마지막 정상값',
+      JSON.stringify(fallback) === JSON.stringify(lastGood),
+      JSON.stringify(fallback),
+    );
+
+    // 순위도 같은 방식으로 되돌아간다.
+    const lastStandings = { year: 2026, teams: [{ code: 'NC', rank: 8 }] };
+    const standDb = fakeCacheDb({
+      'standings:2026': { value: JSON.stringify(lastStandings), expires_at: expired },
+    });
+    const standFallback = await loadStandings({ DB: standDb }, 2026);
+    check(
+      '순위 조회 실패 + 만료 캐시 있음 → 마지막 정상값',
+      standFallback?.teams?.[0]?.rank === 8,
+      JSON.stringify(standFallback),
+    );
+
+    // 만료된 값을 평상시 경로가 집어 오면 안 된다 — getCache 는 여전히 미스여야 한다.
+    const plain = await getCache(
+      fakeCacheDb({ 'schedule:2026': { value: '[1,2,3]', expires_at: expired } }),
+      'schedule:2026',
+    );
+    check('만료된 캐시는 평상시 getCache 로는 안 읽힘', plain === null, JSON.stringify(plain));
   } finally {
     globalThis.fetch = originalFetch;
   }
+}
+
+/** 날짜별 캐시 청소가 지울 대상과 남길 대상을 올바르게 고르는지. */
+async function testCachePrune() {
+  const db = fakeCacheDb();
+  await pruneDatedCache(db, '2026-08-19');
+
+  const ranges = db.deletes.map((args) => args.join(' ~ '));
+  check('plan: 범위로 지움', ranges.includes('plan: ~ plan:2026-08-19'), ranges.join(' / '));
+  check('today: 범위로 지움', ranges.includes('today: ~ today:2026-08-19'), ranges.join(' / '));
+  check('지우는 대상은 이 둘뿐', db.deletes.length === 2, String(db.deletes.length));
+
+  /*
+   * 범위 비교가 연도별 키를 건드리지 않는지 문자열로 직접 확인한다.
+   * 키가 기본 키라 SQLite 도 같은 사전순 비교를 쓴다.
+   */
+  const inRange = (key, prefix) => key >= `${prefix}:` && key < `${prefix}:2026-08-19`;
+  check('지난 plan 은 범위 안', inRange('plan:2026-08-01', 'plan'));
+  check('오늘 plan 은 범위 밖', !inRange('plan:2026-08-25', 'plan'));
+  check('schedule 은 범위 밖 (폴백 보존)', !inRange('schedule:2026', 'plan'));
+  check('standings 는 범위 밖 (폴백 보존)', !inRange('standings:2026', 'plan'));
+  check('opener 는 범위 밖 (폴백 보존)', !inRange('opener:2026', 'plan'));
+  check('today 키는 plan 범위에 안 걸림', !inRange('today:2026-08-01', 'plan'));
 }
 
 /* ══ 7. 보안 검증 ══ */
@@ -596,7 +670,8 @@ console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
-console.log('\n[10] 일정 조회 장애 대응');   await testScheduleResilience();
+console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
+console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);
