@@ -19,10 +19,10 @@ head_sampling_rate = 1
 persist = true
 invocation_logs = true
 
-# Traces 는 여기 안 넣는다 — 지금 쓰는 wrangler(3.x, package.json)가
-# observability.traces 필드를 모른다("Unexpected fields" 경고). 넣어 봐야
-# 배포 때마다 무시돼 대시보드 설정이 그대로 유지되는지 보장 못 한다.
-# wrangler 4 로 올리면(package.json wrangler 버전 별도 변경 필요) 지원된다.
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
 
 # 1분마다 깨어나지만, 핸들러가 "오늘 우리 팀 경기 계획"을 먼저 보고
 # 경기가 없는 날·시간이면 외부 API를 호출하지 않고 즉시 끝낸다. (src/season.js)
