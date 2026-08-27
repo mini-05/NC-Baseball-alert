@@ -3,6 +3,22 @@
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
+/*
+ * 진동 패턴(ms 단위, [울림, 멈춤, 울림...]). 화면을 안 봐도 종류가 느껴지도록
+ * 득점은 짧게 두 번, 종료는 길게 세 번으로 나눴다.
+ *
+ * Chrome/Android 계열에서만 동작한다 — iOS Safari 는 이 옵션 자체를 조용히
+ * 무시한다(에러 없음). 알림음은 브라우저/OS 기본음이 자동 재생되며, 커스텀
+ * 사운드는 Notifications API 표준에 없어(2018년 표준에서 제외) 지정할 방법이
+ * 없다. silent:true 로 끌 수만 있고 바꿀 수는 없다.
+ */
+const VIBRATE = {
+  start: [200],
+  cancel: [200, 100, 200],
+  score: [120, 80, 120],
+  end: [200, 100, 200, 100, 200],
+};
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -20,6 +36,7 @@ self.addEventListener('push', (event) => {
     tag: data.kind === 'score' ? `score-${data.ts}` : `nc-${data.kind ?? 'info'}`,
     renotify: true,
     timestamp: data.ts ?? Date.now(),
+    vibrate: VIBRATE[data.kind] ?? [200],
     data: { url: '/' },
   };
 
