@@ -305,6 +305,17 @@ function testDetect() {
   const lost = detectEvents(live(2, 3), g({ statusCode: 'RESULT', homeTeamScore: 2, awayTeamScore: 7 }), T);
   check('종료 전이에서는 득점 알림 없음', kinds(lost) === 'end', kinds(lost));
 
+  // ENDED — RESULT 확정 전 최대 10여 분 거치는 상태(실측, poll_log). 이걸
+  // 놓치면 그 10분 동안 종료 알림이 밀린다. RESULT 와 동일하게 취급해야 한다.
+  const endedStatus = detectEvents(live(5, 3), g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }), T);
+  check('ENDED 도 종료로 감지', kinds(endedStatus) === 'end', kinds(endedStatus));
+  check('ENDED → RESULT 전이는 중복 아님(같은 스냅샷이면 재알림 없음)',
+    detectEvents(
+      g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }),
+      g({ statusCode: 'RESULT', homeTeamScore: 5, awayTeamScore: 3 }),
+      T,
+    ).length === 0);
+
   // 원정 경기: 대상 팀이 away 여도 관점이 뒤집히지 않아야 한다.
   const away = (h, a) => g({
     homeTeamCode: 'SS', homeTeamName: '삼성', awayTeamCode: 'NC', awayTeamName: 'NC',
