@@ -19,6 +19,35 @@ const VIBRATE = {
   end: [200, 100, 200, 100, 200],
 };
 
+/**
+ * 진동 on/off 설정을 읽는다. app.js 가 같은 IndexedDB('nc-alert' → 'kv' 스토어의
+ * 'vibrate' 키)에 저장한 값을 그대로 읽는다 — 앱이 안 떠 있어도 푸시는 오므로,
+ * 페이지 쪽 상태(변수·localStorage)에 의존할 수 없다.
+ *
+ * 못 읽으면(첫 실행이라 스토어가 비어 있거나, IndexedDB 를 못 쓰는 환경이면)
+ * 기존 동작대로 전부 켠 것으로 본다.
+ */
+function getVibrateSettings() {
+  return new Promise((resolve) => {
+    let req;
+    try {
+      req = indexedDB.open('nc-alert', 1);
+    } catch {
+      resolve({});
+      return;
+    }
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('kv')) { resolve({}); return; }
+      const getReq = db.transaction('kv', 'readonly').objectStore('kv').get('vibrate');
+      getReq.onsuccess = () => resolve(getReq.result ?? {});
+      getReq.onerror = () => resolve({});
+    };
+    req.onerror = () => resolve({});
+  });
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -27,27 +56,32 @@ self.addEventListener('push', (event) => {
     data = { title: 'NC 다이노스', body: event.data?.text() ?? '' };
   }
 
-  const options = {
-    body: data.body ?? '',
-    icon: '/icon-192.png',
-    badge: '/badge-96.png',
-    // 같은 종류의 알림은 최신 것으로 덮어써 알림창이 쌓이지 않게 한다.
-    // 단 득점은 매 상황을 따로 보여주는 편이 유용하므로 태그를 나눈다.
-    tag: data.kind === 'score' ? `score-${data.ts}` : `nc-${data.kind ?? 'info'}`,
-    renotify: true,
-    timestamp: data.ts ?? Date.now(),
-    vibrate: VIBRATE[data.kind] ?? [200],
-    data: { url: '/' },
-  };
+  event.waitUntil((async () => {
+    const vibrateSettings = await getVibrateSettings();
+    const vibrateOn = vibrateSettings[data.kind] ?? true;
 
-  event.waitUntil(Promise.all([
-    self.registration.showNotification(data.title ?? 'NC 다이노스', options),
-    // 앱이 열려 있으면 화면도 그 자리에서 갱신하게 알린다 — 알림만 뜨고
-    // 내용은 새로고침해야 바뀌는 상황을 없앤다. (app.js 의 refresh)
-    self.clients.matchAll({ type: 'window' }).then((list) => {
-      for (const client of list) client.postMessage({ type: 'refresh' });
-    }),
-  ]));
+    const options = {
+      body: data.body ?? '',
+      icon: '/icon-192.png',
+      badge: '/badge-96.png',
+      // 같은 종류의 알림은 최신 것으로 덮어써 알림창이 쌓이지 않게 한다.
+      // 단 득점은 매 상황을 따로 보여주는 편이 유용하므로 태그를 나눈다.
+      tag: data.kind === 'score' ? `score-${data.ts}` : `nc-${data.kind ?? 'info'}`,
+      renotify: true,
+      timestamp: data.ts ?? Date.now(),
+      vibrate: vibrateOn ? (VIBRATE[data.kind] ?? [200]) : [],
+      data: { url: '/' },
+    };
+
+    await Promise.all([
+      self.registration.showNotification(data.title ?? 'NC 다이노스', options),
+      // 앱이 열려 있으면 화면도 그 자리에서 갱신하게 알린다 — 알림만 뜨고
+      // 내용은 새로고침해야 바뀌는 상황을 없앤다. (app.js 의 refresh)
+      self.clients.matchAll({ type: 'window' }).then((list) => {
+        for (const client of list) client.postMessage({ type: 'refresh' });
+      }),
+    ]);
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {
