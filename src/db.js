@@ -178,6 +178,36 @@ export async function prunePollLog(db, olderThanIso) {
 /* ─────────────── 이벤트 ─────────────── */
 
 /**
+ * 주어진 경기가 모두 마무리됐고, 그 마지막이 cutoff 보다 이전인지.
+ *
+ * 경기가 끝난 뒤 폴링을 멈추는 판단에 쓴다. 종료(end)와 취소(cancel) 중
+ * 어느 쪽이든 더 지켜볼 이유가 없으므로 함께 센다.
+ *
+ * 별도 컬럼 대신 events 를 보는 이유: 이벤트의 created_at 이 곧 "우리가 종료를
+ * 감지한 시각"이라 그대로 쓸 수 있다. game_state.updated_at 은 매 틱 덮어써져서
+ * 종료 시각을 담지 못한다.
+ *
+ * @param {string[]} gameIds 지금 감시 중인 경기들
+ * @param {string} cutoffIso 이 시각 이전에 마무리됐으면 멈춰도 되는 기준선
+ */
+export async function allSettledBefore(db, gameIds, cutoffIso) {
+  if (gameIds.length === 0) return true;
+
+  const marks = gameIds.map(() => '?').join(',');
+  const row = await db
+    .prepare(
+      `SELECT COUNT(DISTINCT game_id) AS done, MAX(created_at) AS last_at
+         FROM events
+        WHERE kind IN ('end','cancel') AND game_id IN (${marks})`,
+    )
+    .bind(...gameIds)
+    .first();
+
+  // created_at 은 UTC ISO 문자열이라 사전순 비교가 곧 시각 비교다.
+  return row?.done === gameIds.length && row.last_at != null && row.last_at < cutoffIso;
+}
+
+/**
  * 이벤트를 기록한다. dedup_key 가 UNIQUE 이므로 같은 전이는 두 번 들어가지 않는다.
  * @returns {Promise<boolean>} 실제로 새로 삽입됐으면 true (= 지금 발송해야 함)
  */

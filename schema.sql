@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(game_date DESC, id DESC);
 
+-- 감시를 접어도 되는지 판단할 때(allSettledBefore) 경기별 종료·취소 이벤트를
+-- 찾는다. 위 idx_events_date 는 game_date 로 시작해 이 조회에 쓰이지 못해,
+-- 인덱스가 없으면 매 크론 틱마다 events 전체를 스캔하게 된다.
+CREATE INDEX IF NOT EXISTS idx_events_game ON events(game_id, kind);
+
 -- 푸시 구독. 알림 종류별 on/off 와 시리즈 범위 설정을 구독 단위로 보관한다.
 CREATE TABLE IF NOT EXISTS subscriptions (
   endpoint      TEXT PRIMARY KEY,

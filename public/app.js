@@ -81,9 +81,59 @@ const SERIES_SHORT = {
 };
 
 const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
+const VIBRATE_KEYS = ['start', 'cancel', 'score', 'end'];
+const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
 
 let teamCode = 'NC';
 let subscription = null; // 현재 기기의 PushSubscription
+
+/*
+ * 진동 on/off. 서버가 아니라 이 기기의 IndexedDB 에 둔다 — "이 알림을 보낼지"는
+ * 서버가 판단해야 하지만(그래서 on_start 등은 DB 컬럼), "이미 받은 알림을 이
+ * 기기가 어떻게 표시할지"는 순수 로컬 문제라 서버를 거칠 이유가 없다. 서비스
+ * 워커(sw.js)는 앱이 안 떠 있어도 푸시를 받을 수 있으므로, localStorage 가
+ * 아니라 서비스워커에서도 읽히는 IndexedDB 를 쓴다.
+ */
+function openSettingsDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('nc-alert', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getVibrateSettings() {
+  let db;
+  try {
+    db = await openSettingsDb();
+    return await new Promise((resolve) => {
+      const req = db.transaction('kv', 'readonly').objectStore('kv').get('vibrate');
+      req.onsuccess = () => resolve({ ...DEFAULT_VIBRATE, ...req.result });
+      req.onerror = () => resolve(DEFAULT_VIBRATE);
+    });
+  } catch {
+    return DEFAULT_VIBRATE; // IndexedDB 를 못 쓰는 환경이면 기존 동작(항상 켬)으로
+  } finally {
+    // 열어 둔 연결은 반드시 닫는다. 남아 있으면 나중에 스키마 버전을 올릴 때
+    // upgrade 가 onblocked 로 막힌다.
+    db?.close();
+  }
+}
+
+async function setVibrateSettings(settings) {
+  const db = await openSettingsDb();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(settings, 'vibrate');
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
 
 /* ─────────── 공통 ─────────── */
 
@@ -938,8 +988,18 @@ function setPushUi(state, desc) {
 }
 
 function applySettings(settings) {
-  $$('.sw input').forEach((input) => {
+  // [data-key] 로 한정한다 — 진동 스위치는 같은 .sw 마크업을 쓰지만
+  // data-vibrate-key 를 쓰고 서버 settings 객체에는 없는 값이라, 한정하지
+  // 않으면 여기서 매번 꺼진 것으로 잘못 덮어써진다.
+  $$('.sw input[data-key]').forEach((input) => {
     input.checked = Boolean(settings?.[input.dataset.key]);
+  });
+}
+
+async function applyVibrateSettings() {
+  const settings = await getVibrateSettings();
+  $$('.vibrate-toggle').forEach((input) => {
+    input.checked = Boolean(settings[input.dataset.vibrateKey]);
   });
 }
 
@@ -1043,6 +1103,25 @@ $$('.sw input').forEach((input) => {
   });
 });
 
+$$('.vibrate-toggle').forEach((input) => {
+  input.addEventListener('change', async () => {
+    // 아는 키만 저장한다. sw.js 는 서버가 보낸 kind 로 이 값을 찾으므로,
+    // 마크업에 오타난 키가 섞이면 스위치는 정상처럼 보이면서 진동은 계속
+    // 기본값(켬)으로 동작한다 — 조용히 어긋나는 대신 여기서 걸러 낸다.
+    const settings = Object.fromEntries(
+      $$('.vibrate-toggle')
+        .filter((i) => VIBRATE_KEYS.includes(i.dataset.vibrateKey))
+        .map((i) => [i.dataset.vibrateKey, i.checked]),
+    );
+    try {
+      await setVibrateSettings(settings);
+    } catch (err) {
+      input.checked = !input.checked; // 저장 실패 시 UI 를 되돌린다.
+      toast(err.message);
+    }
+  });
+});
+
 /* ─────────── 시작 ─────────── */
 
 async function initPush() {
@@ -1100,6 +1179,9 @@ async function initPush() {
   }
 
   await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
+
+  // 진동 설정은 순수 로컬(IndexedDB)이라 구독 여부와 무관하게 항상 불러온다.
+  applyVibrateSettings().catch((err) => console.error('vibrate settings load failed', err));
 
   initPush().catch((err) => {
     setPushUi('error', `알림을 준비하지 못했어요: ${err.message}`);

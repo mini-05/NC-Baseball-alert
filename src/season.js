@@ -17,8 +17,22 @@ import { getCache, getCacheStale, putCache, pruneDatedCache, prunePollLog } from
 /** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
 const PRE_START_MIN = 90;
 
-/** 경기 시작 후 몇 시간까지 감시할지. 연장·중단을 포함해도 이 안에서 끝난다. */
+/**
+ * 경기 시작 후 몇 시간까지 감시할지. 연장·중단을 포함해도 이 안에서 끝난다.
+ *
+ * 실제로는 대개 이보다 훨씬 일찍 멈춘다 — 경기가 끝나면 FINISH_COOLDOWN_MIN
+ * 뒤에 감시를 접기 때문이다(index.js tick). 이 값은 종료를 끝내 감지하지 못했을
+ * 때를 대비한 상한선이다.
+ */
 const POST_START_HOURS = 7;
+
+/**
+ * 경기가 끝난 뒤에도 얼마나 더 지켜볼지.
+ *
+ * 종료를 감지한 직후 끊지 않는 이유: 더블헤더처럼 뒤에 붙는 경기가 있을 수 있고,
+ * 네이버가 최종 기록을 늦게 확정하는 일이 있어 그 뒤 변화를 놓치지 않기 위함이다.
+ */
+export const FINISH_COOLDOWN_MIN = 30;
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -134,22 +148,25 @@ export async function loadDailyPlan(env, today) {
 }
 
 /**
- * 지금이 감시가 필요한 시간대인지 판단한다.
+ * 지금 감시해야 할 경기만 골라 준다.
  *
  * 이미 끝난(result) 경기만 있는 계획이라면 더 볼 이유가 없다. 다만 계획은
  * 하루 한 번만 갱신되므로 phase 는 오래된 값일 수 있다. 따라서 phase 로
- * 건너뛰지 않고 시간 창만으로 판단한다.
+ * 건너뛰지 않고 시간 창만으로 판단한다. 실제로 끝났는지는 매 틱 갱신되는
+ * events 를 보고 호출부가 따로 확인한다(index.js tick).
  */
-export function isPollWindow(plan, now = Date.now()) {
-  for (const g of plan.games) {
+export function pollWindowGames(plan, now = Date.now()) {
+  return plan.games.filter((g) => {
     const start = kstIsoToEpoch(g.startAt);
     if (start == null) return true; // 시각을 못 읽으면 안전하게 감시한다.
 
-    if (now >= start - PRE_START_MIN * MIN && now <= start + POST_START_HOURS * HOUR) {
-      return true;
-    }
-  }
-  return false;
+    return now >= start - PRE_START_MIN * MIN && now <= start + POST_START_HOURS * HOUR;
+  });
+}
+
+/** 지금이 감시가 필요한 시간대인지. */
+export function isPollWindow(plan, now = Date.now()) {
+  return pollWindowGames(plan, now).length > 0;
 }
 
 /** 계획을 강제로 다시 만든다. (경기가 추가·변경됐을 때 쓰는 관리용) */

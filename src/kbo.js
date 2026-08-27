@@ -116,15 +116,26 @@ export const TEAM_CODES = new Set(['HT', 'SS', 'LG', 'OB', 'KT', 'SK', 'LT', 'NC
 /**
  * 네이버 원본 경기 객체를 내부 표현으로 변환한다.
  *
- * phase 판정: 관측으로 확인된 값은 BEFORE(경기 전)와 RESULT(종료)뿐이다.
- * 경기 중 상태값은 문서화돼 있지 않으므로 "둘 중 어느 쪽도 아니면 진행 중"으로 본다.
- * 원본 statusCode 를 그대로 저장해 두어 나중에 추적할 수 있게 한다.
+ * phase 판정: 관측으로 확인된 값은 BEFORE·READY(경기 전)·RESULT·ENDED(종료),
+ * 나머지는 진행 중으로 본다.
+ *
+ * ENDED 는 문서화돼 있지 않지만 실측(poll_log)으로 확인했다 — 스코어가 확정된
+ * 직후 RESULT 로 넘어가기 전 최대 10여 분간 이 값을 거친다. 그동안 점수는
+ * 더 바뀌지 않으므로 RESULT 와 동일하게 취급해도 안전하고, 그렇게 해야 종료
+ * 알림이 그 10분을 기다리지 않는다.
+ *
+ * READY 도 문서화돼 있지 않지만 실측으로 확인했다 — BEFORE 와 STARTED 사이에
+ * 최대 53분간 이 값을 거치며, statusInfo 가 그동안 계속 "경기전"이고 점수도
+ * 0:0 으로 고정돼 있다. live 로 처리하면 실제 플레이볼보다 최대 53분 이른
+ * "경기 시작" 알림이 나가므로 BEFORE 와 동일하게 취급한다.
+ *
+ * 원본 statusCode 를 그대로 저장해 두어 나중에 새 값이 나타나도 추적할 수 있게 한다.
  */
 export function normalizeGame(g) {
   const status = String(g.statusCode || '').toUpperCase();
   let phase;
-  if (status === 'RESULT') phase = 'result';
-  else if (status === 'BEFORE') phase = 'before';
+  if (status === 'RESULT' || status === 'ENDED') phase = 'result';
+  else if (status === 'BEFORE' || status === 'READY') phase = 'before';
   else phase = 'live';
 
   return {

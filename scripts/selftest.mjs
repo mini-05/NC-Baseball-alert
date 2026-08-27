@@ -8,13 +8,15 @@
  * 복호문이 원문과 일치하면 구현이 맞다는 뜻이다.
  */
 
+import fs from 'node:fs';
+import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
-import { isPollWindow, loadSchedule, loadStandings } from '../src/season.js';
+import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
-import { subscribersFor, getCache, pruneDatedCache } from '../src/db.js';
+import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -305,6 +307,30 @@ function testDetect() {
   const lost = detectEvents(live(2, 3), g({ statusCode: 'RESULT', homeTeamScore: 2, awayTeamScore: 7 }), T);
   check('종료 전이에서는 득점 알림 없음', kinds(lost) === 'end', kinds(lost));
 
+  // ENDED — RESULT 확정 전 최대 10여 분 거치는 상태(실측, poll_log). 이걸
+  // 놓치면 그 10분 동안 종료 알림이 밀린다. RESULT 와 동일하게 취급해야 한다.
+  const endedStatus = detectEvents(live(5, 3), g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }), T);
+  check('ENDED 도 종료로 감지', kinds(endedStatus) === 'end', kinds(endedStatus));
+  check('ENDED → RESULT 전이는 중복 아님(같은 스냅샷이면 재알림 없음)',
+    detectEvents(
+      g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }),
+      g({ statusCode: 'RESULT', homeTeamScore: 5, awayTeamScore: 3 }),
+      T,
+    ).length === 0);
+
+  // READY — BEFORE 와 STARTED 사이에 최대 53분 거치는 상태(실측, poll_log).
+  // statusInfo 가 "경기전"이고 점수도 0:0 으로 고정돼 있었다. live 로 처리하면
+  // 실제 플레이볼보다 최대 53분 이른 "경기 시작" 알림이 나간다.
+  const beforeToReady = detectEvents(g(), g({ statusCode: 'READY' }), T);
+  check('READY 는 아직 경기 전 — 시작 알림 없음', beforeToReady.length === 0, kinds(beforeToReady));
+
+  const readyToStarted = detectEvents(
+    g({ statusCode: 'READY' }),
+    g({ statusCode: 'STARTED', statusInfo: '1회초' }),
+    T,
+  );
+  check('READY → STARTED 전이에서 시작 알림', kinds(readyToStarted) === 'start', kinds(readyToStarted));
+
   // 원정 경기: 대상 팀이 away 여도 관점이 뒤집히지 않아야 한다.
   const away = (h, a) => g({
     homeTeamCode: 'SS', homeTeamName: '삼성', awayTeamCode: 'NC', awayTeamName: 'NC',
@@ -421,6 +447,52 @@ function testWindow() {
   check('종료 후 8시간 → 감시 안 함', !isPollWindow(plan, start + 8 * HOUR));
   check('경기 없는 날 → 감시 안 함', !isPollWindow({ games: [] }, start));
   check('시각을 못 읽으면 안전하게 감시', isPollWindow({ games: [{ startAt: 'broken' }] }, start));
+
+  // 시간 창 안에 든 경기만 골라야 한다 — 감시 종료 판단의 대상이 되는 목록이다.
+  const two = {
+    games: [
+      { gameId: 'TODAY', startAt: '2026-08-22T18:30:00' },
+      { gameId: 'YESTERDAY', startAt: '2026-08-21T18:30:00' },
+    ],
+  };
+  const ids = (now) => pollWindowGames(two, now).map((g) => g.gameId).join(',');
+  check('창 안의 경기만 고른다', ids(start + HOUR) === 'TODAY', ids(start + HOUR));
+  check('창 밖이면 빈 목록', pollWindowGames(two, start + 9 * HOUR).length === 0);
+}
+
+/* ══ 6-b. 경기가 끝난 뒤 감시를 접는 판단 ══ */
+
+/** events 테이블만 지원하는 최소 D1 흉내. end/cancel 행을 세어 돌려준다. */
+function fakeEventsDb(rows) {
+  return {
+    prepare: () => ({
+      bind(...ids) {
+        this.ids = ids;
+        return this;
+      },
+      first: async function () {
+        const hit = rows.filter((r) => this.ids.includes(r.game_id));
+        return {
+          done: new Set(hit.map((r) => r.game_id)).size,
+          last_at: hit.length ? hit.map((r) => r.created_at).sort().at(-1) : null,
+        };
+      },
+    }),
+  };
+}
+
+async function testSettled() {
+  const db = fakeEventsDb([
+    { game_id: 'A', created_at: '2026-08-22T13:00:00.000Z' },
+    { game_id: 'B', created_at: '2026-08-22T13:20:00.000Z' },
+  ]);
+  const late = '2026-08-22T14:00:00.000Z'; // 두 경기 모두 끝나고 40분 지난 시점
+  const soon = '2026-08-22T13:10:00.000Z'; // B 가 아직 안 끝난 시점
+
+  check('감시 대상이 없으면 멈춘다', await allSettledBefore(db, [], late));
+  check('모두 끝나고 유예가 지나면 멈춘다', await allSettledBefore(db, ['A', 'B'], late));
+  check('한 경기만 끝났으면 계속 본다', !(await allSettledBefore(db, ['A', 'B'], soon)));
+  check('기록에 없는 경기가 섞이면 계속 본다', !(await allSettledBefore(db, ['A', 'C'], late)));
 }
 
 /**
@@ -709,6 +781,113 @@ async function testScoreboard() {
   }
 }
 
+/* ══ 12. 서비스 워커 진동 설정 ══ */
+
+/**
+ * public/sw.js 를 고치지 않고 그대로 실행해 검증한다. 서비스워커 전용
+ * 전역(self·indexedDB)만 최소한으로 흉내 내므로, 여기서 통과하면 실제 배포되는
+ * 코드가 통과한 것이다 — 로직을 여기에 다시 옮겨 적으면 그때부터 둘이 갈라진다.
+ *
+ * @param {'ok'|'blocked'|'error'} idbMode IndexedDB open 이 어떻게 끝나는지
+ */
+function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}) {
+  const fakeIdb = {
+    open() {
+      const req = { result: { objectStoreNames: { contains: () => true } } };
+      req.result.close = onClose;
+      req.result.transaction = () => ({
+        objectStore: () => ({
+          get: () => {
+            const getReq = {};
+            queueMicrotask(() => { getReq.result = store.get('vibrate'); getReq.onsuccess?.(); });
+            return getReq;
+          },
+        }),
+      });
+      queueMicrotask(() => {
+        if (idbMode === 'blocked') req.onblocked?.();
+        else if (idbMode === 'error') req.onerror?.();
+        else req.onsuccess?.();
+      });
+      return req;
+    },
+  };
+
+  const listeners = {};
+  const notifications = [];
+  const sandbox = {
+    self: {
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      registration: {
+        showNotification: (title, opts) => { notifications.push({ title, opts }); return Promise.resolve(); },
+      },
+      clients: { matchAll: async () => [] },
+    },
+    indexedDB: fakeIdb,
+    console,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8'), sandbox);
+
+  const push = async (payload) => {
+    let waited;
+    listeners.push({ data: { json: () => payload }, waitUntil: (p) => { waited = p; } });
+    await waited;
+  };
+  return { push, notifications };
+}
+
+async function testServiceWorkerVibrate() {
+  const PATTERN = {
+    start: [200], cancel: [200, 100, 200], score: [120, 80, 120], end: [200, 100, 200, 100, 200],
+  };
+  const store = new Map();
+
+  for (const kind of ['start', 'cancel', 'score', 'end']) {
+    for (const on of [true, false]) {
+      store.set('vibrate', { start: true, cancel: true, score: true, end: true, [kind]: on });
+      const { push, notifications } = loadServiceWorker(store);
+      await push({ kind, title: 't', body: 'b', ts: Date.now() });
+
+      const want = on ? PATTERN[kind] : [];
+      check(`${kind} 진동 ${on ? 'ON' : 'OFF'}`,
+        JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(want),
+        JSON.stringify(notifications[0]?.opts.vibrate));
+    }
+  }
+
+  // 설정을 못 읽는 경우들 — 어느 쪽이든 알림 자체는 반드시 떠야 한다.
+  store.clear();
+  {
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
+    check('설정 없음(첫 실행) → 기본값은 켬',
+      JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(PATTERN.score));
+  }
+  {
+    // onblocked 갈래가 비어 있으면 Promise 가 영영 안 끝나 알림이 아예 안 뜬다.
+    const { push, notifications } = loadServiceWorker(store, 'blocked');
+    const raced = await Promise.race([
+      push({ kind: 'score', title: 't', body: 'b', ts: Date.now() }).then(() => 'DONE'),
+      new Promise((r) => setTimeout(() => r('TIMEOUT'), 500)),
+    ]);
+    check('IDB upgrade 대기(onblocked) 여도 알림은 뜬다',
+      raced === 'DONE' && notifications.length === 1, `${raced}, ${notifications.length}건`);
+  }
+  {
+    const { push, notifications } = loadServiceWorker(store, 'error');
+    await push({ kind: 'end', title: 't', body: 'b', ts: Date.now() });
+    check('IDB 열기 실패여도 알림은 뜬다', notifications.length === 1);
+  }
+
+  // 연결을 안 닫으면 나중에 스키마 버전을 올릴 때 upgrade 가 막힌다.
+  store.set('vibrate', { score: true });
+  let closes = 0;
+  const { push } = loadServiceWorker(store, 'ok', () => { closes++; });
+  await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
+  check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
+}
+
 /* ══ 실행 ══ */
 
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
@@ -718,11 +897,13 @@ console.log('\n[3b] 이번 시즌 필터');        testSeasonFilter();
 console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
+console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
 console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
+console.log('\n[12] 서비스 워커 진동 설정');  await testServiceWorkerVibrate();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);
