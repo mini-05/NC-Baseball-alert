@@ -104,8 +104,9 @@ function openSettingsDb() {
 }
 
 async function getVibrateSettings() {
+  let db;
   try {
-    const db = await openSettingsDb();
+    db = await openSettingsDb();
     return await new Promise((resolve) => {
       const req = db.transaction('kv', 'readonly').objectStore('kv').get('vibrate');
       req.onsuccess = () => resolve({ ...DEFAULT_VIBRATE, ...req.result });
@@ -113,17 +114,25 @@ async function getVibrateSettings() {
     });
   } catch {
     return DEFAULT_VIBRATE; // IndexedDB 를 못 쓰는 환경이면 기존 동작(항상 켬)으로
+  } finally {
+    // 열어 둔 연결은 반드시 닫는다. 남아 있으면 나중에 스키마 버전을 올릴 때
+    // upgrade 가 onblocked 로 막힌다.
+    db?.close();
   }
 }
 
 async function setVibrateSettings(settings) {
   const db = await openSettingsDb();
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readwrite');
-    tx.objectStore('kv').put(settings, 'vibrate');
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(settings, 'vibrate');
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 /* ─────────── 공통 ─────────── */
@@ -1096,8 +1105,13 @@ $$('.sw input').forEach((input) => {
 
 $$('.vibrate-toggle').forEach((input) => {
   input.addEventListener('change', async () => {
+    // 아는 키만 저장한다. sw.js 는 서버가 보낸 kind 로 이 값을 찾으므로,
+    // 마크업에 오타난 키가 섞이면 스위치는 정상처럼 보이면서 진동은 계속
+    // 기본값(켬)으로 동작한다 — 조용히 어긋나는 대신 여기서 걸러 낸다.
     const settings = Object.fromEntries(
-      $$('.vibrate-toggle').map((i) => [i.dataset.vibrateKey, i.checked]),
+      $$('.vibrate-toggle')
+        .filter((i) => VIBRATE_KEYS.includes(i.dataset.vibrateKey))
+        .map((i) => [i.dataset.vibrateKey, i.checked]),
     );
     try {
       await setVibrateSettings(settings);

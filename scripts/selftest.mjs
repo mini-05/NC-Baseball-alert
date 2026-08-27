@@ -8,6 +8,8 @@
  * 복호문이 원문과 일치하면 구현이 맞다는 뜻이다.
  */
 
+import fs from 'node:fs';
+import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
@@ -779,6 +781,113 @@ async function testScoreboard() {
   }
 }
 
+/* ══ 12. 서비스 워커 진동 설정 ══ */
+
+/**
+ * public/sw.js 를 고치지 않고 그대로 실행해 검증한다. 서비스워커 전용
+ * 전역(self·indexedDB)만 최소한으로 흉내 내므로, 여기서 통과하면 실제 배포되는
+ * 코드가 통과한 것이다 — 로직을 여기에 다시 옮겨 적으면 그때부터 둘이 갈라진다.
+ *
+ * @param {'ok'|'blocked'|'error'} idbMode IndexedDB open 이 어떻게 끝나는지
+ */
+function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}) {
+  const fakeIdb = {
+    open() {
+      const req = { result: { objectStoreNames: { contains: () => true } } };
+      req.result.close = onClose;
+      req.result.transaction = () => ({
+        objectStore: () => ({
+          get: () => {
+            const getReq = {};
+            queueMicrotask(() => { getReq.result = store.get('vibrate'); getReq.onsuccess?.(); });
+            return getReq;
+          },
+        }),
+      });
+      queueMicrotask(() => {
+        if (idbMode === 'blocked') req.onblocked?.();
+        else if (idbMode === 'error') req.onerror?.();
+        else req.onsuccess?.();
+      });
+      return req;
+    },
+  };
+
+  const listeners = {};
+  const notifications = [];
+  const sandbox = {
+    self: {
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      registration: {
+        showNotification: (title, opts) => { notifications.push({ title, opts }); return Promise.resolve(); },
+      },
+      clients: { matchAll: async () => [] },
+    },
+    indexedDB: fakeIdb,
+    console,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8'), sandbox);
+
+  const push = async (payload) => {
+    let waited;
+    listeners.push({ data: { json: () => payload }, waitUntil: (p) => { waited = p; } });
+    await waited;
+  };
+  return { push, notifications };
+}
+
+async function testServiceWorkerVibrate() {
+  const PATTERN = {
+    start: [200], cancel: [200, 100, 200], score: [120, 80, 120], end: [200, 100, 200, 100, 200],
+  };
+  const store = new Map();
+
+  for (const kind of ['start', 'cancel', 'score', 'end']) {
+    for (const on of [true, false]) {
+      store.set('vibrate', { start: true, cancel: true, score: true, end: true, [kind]: on });
+      const { push, notifications } = loadServiceWorker(store);
+      await push({ kind, title: 't', body: 'b', ts: Date.now() });
+
+      const want = on ? PATTERN[kind] : [];
+      check(`${kind} 진동 ${on ? 'ON' : 'OFF'}`,
+        JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(want),
+        JSON.stringify(notifications[0]?.opts.vibrate));
+    }
+  }
+
+  // 설정을 못 읽는 경우들 — 어느 쪽이든 알림 자체는 반드시 떠야 한다.
+  store.clear();
+  {
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
+    check('설정 없음(첫 실행) → 기본값은 켬',
+      JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(PATTERN.score));
+  }
+  {
+    // onblocked 갈래가 비어 있으면 Promise 가 영영 안 끝나 알림이 아예 안 뜬다.
+    const { push, notifications } = loadServiceWorker(store, 'blocked');
+    const raced = await Promise.race([
+      push({ kind: 'score', title: 't', body: 'b', ts: Date.now() }).then(() => 'DONE'),
+      new Promise((r) => setTimeout(() => r('TIMEOUT'), 500)),
+    ]);
+    check('IDB upgrade 대기(onblocked) 여도 알림은 뜬다',
+      raced === 'DONE' && notifications.length === 1, `${raced}, ${notifications.length}건`);
+  }
+  {
+    const { push, notifications } = loadServiceWorker(store, 'error');
+    await push({ kind: 'end', title: 't', body: 'b', ts: Date.now() });
+    check('IDB 열기 실패여도 알림은 뜬다', notifications.length === 1);
+  }
+
+  // 연결을 안 닫으면 나중에 스키마 버전을 올릴 때 upgrade 가 막힌다.
+  store.set('vibrate', { score: true });
+  let closes = 0;
+  const { push } = loadServiceWorker(store, 'ok', () => { closes++; });
+  await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
+  check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
+}
+
 /* ══ 실행 ══ */
 
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
@@ -794,6 +903,7 @@ console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
 console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
+console.log('\n[12] 서비스 워커 진동 설정');  await testServiceWorkerVibrate();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);

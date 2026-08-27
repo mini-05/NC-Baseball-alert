@@ -39,12 +39,20 @@ function getVibrateSettings() {
     req.onupgradeneeded = () => req.result.createObjectStore('kv');
     req.onsuccess = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains('kv')) { resolve({}); return; }
+      // 연결은 어느 경로로 빠져나가든 닫는다. 남겨 두면 나중에 스키마 버전을
+      // 올릴 때 upgrade 가 막히고, 그러면 아래 onblocked 로 떨어진다.
+      const done = (value) => { db.close(); resolve(value); };
+
+      if (!db.objectStoreNames.contains('kv')) { done({}); return; }
       const getReq = db.transaction('kv', 'readonly').objectStore('kv').get('vibrate');
-      getReq.onsuccess = () => resolve(getReq.result ?? {});
-      getReq.onerror = () => resolve({});
+      getReq.onsuccess = () => done(getReq.result ?? {});
+      getReq.onerror = () => done({});
     };
     req.onerror = () => resolve({});
+    // 다른 탭이 옛 버전 연결을 쥐고 있으면 open 이 여기서 멈춘다. 이 갈래를
+    // 비워 두면 Promise 가 영영 settle 되지 않아 event.waitUntil 도 끝나지 않고,
+    // 그러면 알림 자체가 안 뜬다 — 설정을 포기하고 기본값으로 진행한다.
+    req.onblocked = () => resolve({});
   });
 }
 
