@@ -316,6 +316,19 @@ function testDetect() {
       T,
     ).length === 0);
 
+  // READY — BEFORE 와 STARTED 사이에 최대 53분 거치는 상태(실측, poll_log).
+  // statusInfo 가 "경기전"이고 점수도 0:0 으로 고정돼 있었다. live 로 처리하면
+  // 실제 플레이볼보다 최대 53분 이른 "경기 시작" 알림이 나간다.
+  const beforeToReady = detectEvents(g(), g({ statusCode: 'READY' }), T);
+  check('READY 는 아직 경기 전 — 시작 알림 없음', beforeToReady.length === 0, kinds(beforeToReady));
+
+  const readyToStarted = detectEvents(
+    g({ statusCode: 'READY' }),
+    g({ statusCode: 'STARTED', statusInfo: '1회초' }),
+    T,
+  );
+  check('READY → STARTED 전이에서 시작 알림', kinds(readyToStarted) === 'start', kinds(readyToStarted));
+
   // 원정 경기: 대상 팀이 away 여도 관점이 뒤집히지 않아야 한다.
   const away = (h, a) => g({
     homeTeamCode: 'SS', homeTeamName: '삼성', awayTeamCode: 'NC', awayTeamName: 'NC',
