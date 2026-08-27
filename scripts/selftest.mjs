@@ -12,9 +12,9 @@ import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '.
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
-import { isPollWindow, loadSchedule, loadStandings } from '../src/season.js';
+import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
-import { subscribersFor, getCache, pruneDatedCache } from '../src/db.js';
+import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -421,6 +421,52 @@ function testWindow() {
   check('종료 후 8시간 → 감시 안 함', !isPollWindow(plan, start + 8 * HOUR));
   check('경기 없는 날 → 감시 안 함', !isPollWindow({ games: [] }, start));
   check('시각을 못 읽으면 안전하게 감시', isPollWindow({ games: [{ startAt: 'broken' }] }, start));
+
+  // 시간 창 안에 든 경기만 골라야 한다 — 감시 종료 판단의 대상이 되는 목록이다.
+  const two = {
+    games: [
+      { gameId: 'TODAY', startAt: '2026-08-22T18:30:00' },
+      { gameId: 'YESTERDAY', startAt: '2026-08-21T18:30:00' },
+    ],
+  };
+  const ids = (now) => pollWindowGames(two, now).map((g) => g.gameId).join(',');
+  check('창 안의 경기만 고른다', ids(start + HOUR) === 'TODAY', ids(start + HOUR));
+  check('창 밖이면 빈 목록', pollWindowGames(two, start + 9 * HOUR).length === 0);
+}
+
+/* ══ 6-b. 경기가 끝난 뒤 감시를 접는 판단 ══ */
+
+/** events 테이블만 지원하는 최소 D1 흉내. end/cancel 행을 세어 돌려준다. */
+function fakeEventsDb(rows) {
+  return {
+    prepare: () => ({
+      bind(...ids) {
+        this.ids = ids;
+        return this;
+      },
+      first: async function () {
+        const hit = rows.filter((r) => this.ids.includes(r.game_id));
+        return {
+          done: new Set(hit.map((r) => r.game_id)).size,
+          last_at: hit.length ? hit.map((r) => r.created_at).sort().at(-1) : null,
+        };
+      },
+    }),
+  };
+}
+
+async function testSettled() {
+  const db = fakeEventsDb([
+    { game_id: 'A', created_at: '2026-08-22T13:00:00.000Z' },
+    { game_id: 'B', created_at: '2026-08-22T13:20:00.000Z' },
+  ]);
+  const late = '2026-08-22T14:00:00.000Z'; // 두 경기 모두 끝나고 40분 지난 시점
+  const soon = '2026-08-22T13:10:00.000Z'; // B 가 아직 안 끝난 시점
+
+  check('감시 대상이 없으면 멈춘다', await allSettledBefore(db, [], late));
+  check('모두 끝나고 유예가 지나면 멈춘다', await allSettledBefore(db, ['A', 'B'], late));
+  check('한 경기만 끝났으면 계속 본다', !(await allSettledBefore(db, ['A', 'B'], soon)));
+  check('기록에 없는 경기가 섞이면 계속 본다', !(await allSettledBefore(db, ['A', 'C'], late)));
 }
 
 /**
@@ -718,6 +764,7 @@ console.log('\n[3b] 이번 시즌 필터');        testSeasonFilter();
 console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
+console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();

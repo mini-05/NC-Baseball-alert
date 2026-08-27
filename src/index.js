@@ -11,13 +11,15 @@ import {
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
-  loadDailyPlan, isPollWindow, loadStandings, loadSchedule, loadTodayStatus,
+  loadDailyPlan, pollWindowGames, loadStandings, loadSchedule, loadTodayStatus,
   invalidatePlan, resolveSeasonOpener, invalidateStandings, invalidateSchedule,
+  FINISH_COOLDOWN_MIN,
 } from './season.js';
 import {
   loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
+  allSettledBefore,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -28,6 +30,22 @@ import {
 const REGULAR_SEASON_GAMES = 144;
 
 /* ============================ 크론: 상태 감시 ============================ */
+
+/**
+ * 한 번 깨어날 때 몇 번 볼지, 그 사이 간격은 얼마인지.
+ *
+ * 크론의 최소 간격은 1분이라 득점 알림이 최대 60초까지 밀린다. 그보다 촘촘히
+ * 보려고 크론을 더 자주 부를 수는 없으니, 대신 한 번 깨어난 김에 나눠서 본다.
+ * 2회 × 30초면 지연이 절반으로 줄어든다.
+ *
+ * 무료 플랜의 크론 CPU 한도는 10ms 지만 대기는 CPU 를 쓰지 않아 걸리지 않고,
+ * 총 30초는 스케줄드 워커의 15분 실행 한도 안에 넉넉히 들어간다. 횟수를 더
+ * 늘리려면 CPU 한도부터 확인해야 한다 — 폴링 한 번마다 CPU 도 그만큼 더 쓴다.
+ */
+const POLLS_PER_TICK = 2;
+const POLL_GAP_MS = 30 * 1000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * 오늘 경기 계획을 보고 감시가 필요한 시간인지 판단한다.
@@ -42,9 +60,36 @@ async function tick(env) {
   const plan = await loadDailyPlan(env, kst.date);
 
   if (plan.games.length === 0) return { skipped: 'no-games-today' };
-  if (!isPollWindow(plan)) return { skipped: 'outside-window' };
 
-  return poll(env, opener);
+  const watching = pollWindowGames(plan);
+  if (watching.length === 0) return { skipped: 'outside-window' };
+
+  /*
+   * 시간 창 안이라도 감시 대상이 모두 끝났으면 더 볼 이유가 없다. 종료 직후
+   * 바로 끊지 않고 FINISH_COOLDOWN_MIN 만큼 더 지켜본다 — 이 확인은 경기
+   * 시간대에만 도므로(위 두 return 이 먼저 걸러 낸다) 평소에는 부담이 없다.
+   *
+   * 아래 대기·폴링보다 먼저 판단해야 한다. 경기 없는 날에도 30초씩 붙잡고
+   * 있으면 하루 1400여 번의 헛된 대기가 생긴다.
+   */
+  const cutoff = new Date(Date.now() - FINISH_COOLDOWN_MIN * 60 * 1000).toISOString();
+  if (await allSettledBefore(env.DB, watching.map((g) => g.gameId), cutoff)) {
+    return { skipped: 'all-finished' };
+  }
+
+  // 앞선 폴링이 실패해도 남은 폴링은 그대로 진행한다. 한 번의 조회 실패가
+  // 이번 분 전체를 날리면 1분에 한 번 보던 때보다 오히려 나빠진다.
+  const runs = [];
+  for (let i = 0; i < POLLS_PER_TICK; i++) {
+    if (i > 0) await sleep(POLL_GAP_MS);
+    runs.push(
+      await poll(env, opener).catch((err) => {
+        console.error('poll failed', err);
+        return { error: err.message };
+      }),
+    );
+  }
+  return { runs };
 }
 
 /** opener 를 생략하면(예: /api/admin/poll 에서 tick() 없이 직접 호출) 직접 구한다. */
