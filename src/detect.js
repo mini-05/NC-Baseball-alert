@@ -101,16 +101,22 @@ export function detectEvents(prev, cur, teamCode) {
   /*
    * isHome 은 "홈경기만 받기" 설정을 거르는 데 쓰인다.
    *
-   * pushTitle 은 푸시 알림에만 쓰는 제목이고, 생략하면 title 과 같다. 둘을
-   * 나눠 둔 이유는 쓰이는 곳이 다르기 때문이다 — title 은 events 테이블에
-   * 저장돼 기록 탭 타임라인에도 그대로 나오고, app.js 의 tlKind() 가 이
-   * 문자열의 "실점"을 보고 득점/실점 아이콘을 가른다. pushTitle 은 저장되지
-   * 않고 그때 한 번 발송되고 끝이라, 문구를 바꿔도 기존 기록이나 타임라인
-   * 판정에 영향이 없다. (index.js broadcast 참고)
+   * kind 와 recordKind 를 나눈 이유 — 둘은 쓰이는 곳이 다르다.
+   *
+   *   kind       알림을 누구에게 보낼지 정하는 값. KIND_COLUMN 을 거쳐
+   *              subscriptions 의 on/off 컬럼을 고르고, sw.js 의 진동 패턴도
+   *              이 값으로 고른다. 여기 없는 값을 쓰면 subscribersFor 가 조용히
+   *              빈 배열을 돌려줘 알림이 아예 안 나가므로 KINDS 안에서만 쓴다.
+   *   recordKind events 테이블에 저장돼 기록 탭 타임라인이 읽는 값. 화면 라벨과
+   *              아이콘이 이 값으로 정해진다(app.js KIND_LABEL). 발송 경로를
+   *              타지 않으므로 'concede' 처럼 KINDS 밖의 값을 써도 안전하다.
+   *
+   * 생략하면 recordKind 는 kind 와 같다. 실점만 둘을 다르게 준다 — 알림은
+   * 득점(score)으로 보내되 기록에는 실점(concede)으로 남긴다.
    */
-  const push = (kind, dedupKey, title, body, pushTitle = title) =>
+  const push = (kind, dedupKey, title, body, recordKind = kind) =>
     events.push({
-      kind, scope, series: cur.series, isHome: p.isHome, dedupKey, title, body, pushTitle,
+      kind, recordKind, scope, series: cur.series, isHome: p.isHome, dedupKey, title, body,
     });
 
   // 1) 경기 취소 — 취소된 경기는 시작/종료 알림을 낼 이유가 없으므로 여기서 끝낸다.
@@ -136,19 +142,20 @@ export function detectEvents(prev, cur, teamCode) {
     const ours = teamGained > 0 && oppGained === 0;
     const both = teamGained > 0 && oppGained > 0;
 
+    /*
+     * 상대가 낸 점수도 "실점"이 아니라 "득점"으로 쓴다 — 알림함에서 스치듯
+     * 볼 때는 우리 팀 시점보다 "누가 몇 점 냈다"가 바로 읽힌다. 느낌표는
+     * 우리 득점에만 붙인다.
+     *
+     * 기록 탭에서 "실점"으로 보이는 것은 이 문구가 아니라 아래 recordKind 가
+     * 정한다(app.js KIND_LABEL.concede). 그래서 문구를 바꿔도 기록 화면의
+     * 라벨·아이콘 판정은 흔들리지 않는다.
+     */
     const who = both
       ? '양 팀 득점'
       : ours
         ? `${p.teamName} ${teamGained}점 득점!`
-        : `${p.oppName} ${oppGained}점 실점`;
-
-    /*
-     * 푸시 알림에서는 상대 득점도 "실점" 대신 "득점"으로 쓴다. 알림함에서
-     * 스치듯 볼 때는 우리 팀 시점("실점")보다 "누가 몇 점 냈다"가 바로
-     * 읽히기 때문이다. 기록 탭에 남는 문구(who)는 그대로 둔다.
-     * 느낌표는 우리 득점에만 붙인다.
-     */
-    const pushWho = both || ours ? who : `${p.oppName} ${oppGained}점 득점`;
+        : `${p.oppName} ${oppGained}점 득점`;
 
     /*
      * 이번 틱 사이에 새로 생긴 홈런 기록만 골라 원문 그대로 붙인다.
@@ -173,7 +180,8 @@ export function detectEvents(prev, cur, teamCode) {
       `${t}${who}`,
       `${scoreLine(cur, teamCode)}${inning ? ` · ${inning}` : ''}`
         + (newHomeruns.length ? ` · ${newHomeruns.join(', ')}` : ''),
-      `${t}${pushWho}`,
+      // 상대만 점수를 냈으면 기록에는 실점으로 남긴다. 알림 발송은 그대로 score.
+      both || ours ? 'score' : 'concede',
     );
   }
 
