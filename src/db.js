@@ -209,6 +209,12 @@ export async function allSettledBefore(db, gameIds, cutoffIso) {
 
 /**
  * 이벤트를 기록한다. dedup_key 가 UNIQUE 이므로 같은 전이는 두 번 들어가지 않는다.
+ *
+ * kind 컬럼에는 발송용 ev.kind 가 아니라 기록용 ev.recordKind 를 넣는다 —
+ * 이 값은 기록 탭 타임라인이 읽어 라벨과 아이콘을 고른다. 실점이 유일하게
+ * 둘이 갈리는 경우로, 알림은 score 로 보내고 기록에는 concede 로 남는다.
+ * (detect.js push 참고)
+ *
  * @returns {Promise<boolean>} 실제로 새로 삽입됐으면 true (= 지금 발송해야 함)
  */
 export async function insertEvent(db, game, ev) {
@@ -219,7 +225,7 @@ export async function insertEvent(db, game, ev) {
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
-      game.gameId, game.gameDate, ev.kind, ev.series, ev.dedupKey,
+      game.gameId, game.gameDate, ev.recordKind ?? ev.kind, ev.series, ev.dedupKey,
       ev.title, ev.body, game.homeScore, game.awayScore, nowIso(),
     )
     .run();

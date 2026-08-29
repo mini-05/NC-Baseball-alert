@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   game_id    TEXT NOT NULL,
   game_date  TEXT NOT NULL,
-  kind       TEXT NOT NULL,             -- start | cancel | score | end
+  -- start | cancel | score | concede | end
+  -- concede(실점)는 발송 종류가 아니라 기록 전용 값이다. 알림은 score 로 나가고
+  -- (구독 on/off 는 on_score 하나로 묶인다) 기록 탭 라벨만 실점으로 갈린다.
+  kind       TEXT NOT NULL,
   series     TEXT NOT NULL DEFAULT 'regular',
   dedup_key  TEXT NOT NULL UNIQUE,      -- 같은 전이를 두 번 알리지 않기 위한 키
   title      TEXT NOT NULL,
@@ -87,3 +90,13 @@ CREATE TABLE IF NOT EXISTS cache (
   expires_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- ─────────── 데이터 이관 ───────────
+-- 실점을 events.kind 로 구분하기 전에 쌓인 기록을 옮긴다. 그때는 종류가 전부
+-- score 였고 실점 여부가 제목 문구에만 남아 있었다(app.js 가 그 문자열을 뒤져
+-- 라벨을 골랐다). 그대로 두면 지난 실점이 기록 탭에서 득점으로 보인다.
+--
+-- 제목 문구에 기대는 마지막 코드다. 한 번 돌고 나면 대상이 없어 다시 실행돼도
+-- 아무 일도 하지 않는다 — 새 이벤트는 애초에 concede 로 저장된다.
+UPDATE events SET kind = 'concede'
+ WHERE kind = 'score' AND title LIKE '%실점%';

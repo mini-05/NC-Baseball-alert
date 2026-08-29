@@ -268,9 +268,31 @@ function testDetect() {
   check('득점 dedup 키에 점수 포함', scored[0]?.dedupKey.endsWith(':score:3-0'), scored[0]?.dedupKey);
   check('정규시즌 scope', scored[0]?.scope === 'regular');
 
-  // app.js 의 tlKind() 가 이 '실점' 문구로 타임라인 아이콘·라벨을 고른다.
-  // 문구를 바꾸면 여기와 app.js 를 같이 고쳐야 한다.
-  check('실점 문구', detectEvents(live(1, 0), live(1, 2), T)[0]?.title === '삼성 2점 실점');
+  /*
+   * 상대 득점 — 문구는 "실점"이 아니라 "득점"으로 알리고, 기록에는 concede 로
+   * 남긴다. 화면의 "실점" 라벨은 이 recordKind 가 정하므로(app.js KIND_LABEL)
+   * 아래 문구를 바꿔도 기록 화면은 흔들리지 않아야 한다.
+   */
+  const conceded = detectEvents(live(1, 0), live(1, 2), T)[0];
+  check('상대 득점 문구', conceded?.title === '삼성 2점 득점', conceded?.title);
+  check('상대 득점은 기록에 concede 로', conceded?.recordKind === 'concede', conceded?.recordKind);
+
+  // 발송용 kind 는 score 그대로여야 한다. concede 로 보내면 KIND_COLUMN 에
+  // 없는 값이라 subscribersFor 가 빈 배열을 돌려줘 알림이 아예 안 나간다.
+  check('상대 득점도 발송은 score 로', conceded?.kind === 'score', conceded?.kind);
+
+  // 우리 팀 득점·양 팀 득점은 기록도 score 다.
+  const ourRun = detectEvents(live(1, 0), live(3, 0), T)[0];
+  check('우리 득점 문구', ourRun?.title === 'NC 2점 득점!', ourRun?.title);
+  check('우리 득점은 기록도 score', ourRun?.recordKind === 'score', ourRun?.recordKind);
+
+  const bothScored = detectEvents(live(1, 1), live(2, 2), T)[0];
+  check('양 팀 득점 문구', bothScored?.title === '양 팀 득점', bothScored?.title);
+  check('양 팀 득점은 기록도 score', bothScored?.recordKind === 'score', bothScored?.recordKind);
+
+  // 득점 외 이벤트는 recordKind 를 따로 주지 않으므로 kind 와 같아야 한다.
+  const startEv = detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T)[0];
+  check('시작 이벤트는 recordKind 가 kind 와 같다', startEv?.recordKind === startEv?.kind);
 
   // ── 득점 이닝 — 전광판이 총점과 맞아떨어질 때만 말한다 ──
   // (statusInfo 는 폴링 순간의 이닝이라 쓰지 않는다. detect.js scoringInning 참고)
