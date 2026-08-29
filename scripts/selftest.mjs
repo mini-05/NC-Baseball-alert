@@ -270,7 +270,27 @@ function testDetect() {
 
   // app.js 의 tlKind() 가 이 '실점' 문구로 타임라인 아이콘·라벨을 고른다.
   // 문구를 바꾸면 여기와 app.js 를 같이 고쳐야 한다.
-  check('실점 문구', detectEvents(live(1, 0), live(1, 2), T)[0]?.title === '삼성 2점 실점');
+  const conceded = detectEvents(live(1, 0), live(1, 2), T)[0];
+  check('실점 문구', conceded?.title === '삼성 2점 실점', conceded?.title);
+
+  // 푸시 알림 제목만 "득점"으로 나간다. title(기록 탭·DB)은 위처럼 그대로여야
+  // 하고, 둘이 실제로 달라야 이 분리가 의미가 있다.
+  check('상대 득점 알림 문구', conceded?.pushTitle === '삼성 2점 득점', conceded?.pushTitle);
+  check('알림 문구와 기록 문구가 갈린다', conceded?.pushTitle !== conceded?.title);
+
+  // 우리 팀 득점·양 팀 득점은 둘을 나눌 이유가 없으므로 같아야 한다.
+  const ourRun = detectEvents(live(1, 0), live(3, 0), T)[0];
+  check('우리 득점은 알림·기록 문구가 같다',
+    ourRun?.pushTitle === ourRun?.title && ourRun?.pushTitle === 'NC 2점 득점!', ourRun?.pushTitle);
+
+  const bothScored = detectEvents(live(1, 1), live(2, 2), T)[0];
+  check('양 팀 득점은 알림·기록 문구가 같다',
+    bothScored?.pushTitle === bothScored?.title && bothScored?.pushTitle === '양 팀 득점',
+    bothScored?.pushTitle);
+
+  // 득점 외 이벤트는 pushTitle 을 따로 주지 않으므로 title 과 같아야 한다.
+  const startEv = detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T)[0];
+  check('시작 알림은 pushTitle 이 title 과 같다', startEv?.pushTitle === startEv?.title);
 
   // ── 득점 이닝 — 전광판이 총점과 맞아떨어질 때만 말한다 ──
   // (statusInfo 는 폴링 순간의 이닝이라 쓰지 않는다. detect.js scoringInning 참고)

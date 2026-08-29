@@ -181,7 +181,9 @@ async function broadcast(env, ev) {
     scope: ev.scope,
     series: ev.series,
     isHome: ev.isHome,
-    title: ev.title,
+    // 알림 제목은 pushTitle 이 있으면 그쪽을 쓴다 — 기록 탭에 남는 title 과
+    // 문구가 다를 수 있다(상대 득점: 기록은 "실점", 알림은 "득점"). detect.js 참고.
+    title: ev.pushTitle ?? ev.title,
     body: ev.body,
     ts: Date.now(),
   };

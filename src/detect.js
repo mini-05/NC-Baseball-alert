@@ -98,9 +98,20 @@ export function detectEvents(prev, cur, teamCode) {
   const t = tag(cur.series);
   const scope = isPostseason(cur.series) ? 'postseason' : 'regular';
 
-  // isHome 은 "홈경기만 받기" 설정을 거르는 데 쓰인다.
-  const push = (kind, dedupKey, title, body) =>
-    events.push({ kind, scope, series: cur.series, isHome: p.isHome, dedupKey, title, body });
+  /*
+   * isHome 은 "홈경기만 받기" 설정을 거르는 데 쓰인다.
+   *
+   * pushTitle 은 푸시 알림에만 쓰는 제목이고, 생략하면 title 과 같다. 둘을
+   * 나눠 둔 이유는 쓰이는 곳이 다르기 때문이다 — title 은 events 테이블에
+   * 저장돼 기록 탭 타임라인에도 그대로 나오고, app.js 의 tlKind() 가 이
+   * 문자열의 "실점"을 보고 득점/실점 아이콘을 가른다. pushTitle 은 저장되지
+   * 않고 그때 한 번 발송되고 끝이라, 문구를 바꿔도 기존 기록이나 타임라인
+   * 판정에 영향이 없다. (index.js broadcast 참고)
+   */
+  const push = (kind, dedupKey, title, body, pushTitle = title) =>
+    events.push({
+      kind, scope, series: cur.series, isHome: p.isHome, dedupKey, title, body, pushTitle,
+    });
 
   // 1) 경기 취소 — 취소된 경기는 시작/종료 알림을 낼 이유가 없으므로 여기서 끝낸다.
   if (!prev.cancelled && cur.cancelled) {
@@ -122,12 +133,22 @@ export function detectEvents(prev, cur, teamCode) {
   const oppGained = p.oppScore - pPrev.oppScore;
 
   if (cur.phase === 'live' && (teamGained !== 0 || oppGained !== 0)) {
-    const who =
-      teamGained > 0 && oppGained > 0
-        ? '양 팀 득점'
-        : teamGained > 0
-          ? `${p.teamName} ${teamGained}점 득점!`
-          : `${p.oppName} ${oppGained}점 실점`;
+    const ours = teamGained > 0 && oppGained === 0;
+    const both = teamGained > 0 && oppGained > 0;
+
+    const who = both
+      ? '양 팀 득점'
+      : ours
+        ? `${p.teamName} ${teamGained}점 득점!`
+        : `${p.oppName} ${oppGained}점 실점`;
+
+    /*
+     * 푸시 알림에서는 상대 득점도 "실점" 대신 "득점"으로 쓴다. 알림함에서
+     * 스치듯 볼 때는 우리 팀 시점("실점")보다 "누가 몇 점 냈다"가 바로
+     * 읽히기 때문이다. 기록 탭에 남는 문구(who)는 그대로 둔다.
+     * 느낌표는 우리 득점에만 붙인다.
+     */
+    const pushWho = both || ours ? who : `${p.oppName} ${oppGained}점 득점`;
 
     /*
      * 이번 틱 사이에 새로 생긴 홈런 기록만 골라 원문 그대로 붙인다.
@@ -140,12 +161,7 @@ export function detectEvents(prev, cur, teamCode) {
     const newHomeruns = (cur.hr ?? []).filter((r) => !(prev.hr ?? []).includes(r));
 
     // 양 팀이 같은 틱에 점수를 냈으면 이닝이 하나로 정해지지 않는다 — 생략한다.
-    const side =
-      teamGained > 0 && oppGained > 0
-        ? null
-        : (teamGained > 0) === p.isHome
-          ? 'home'
-          : 'away';
+    const side = both ? null : (teamGained > 0) === p.isHome ? 'home' : 'away';
     const inning = side
       ? scoringInning(cur.board, side, side === 'home' ? cur.homeScore : cur.awayScore)
       : null;
@@ -157,6 +173,7 @@ export function detectEvents(prev, cur, teamCode) {
       `${t}${who}`,
       `${scoreLine(cur, teamCode)}${inning ? ` · ${inning}` : ''}`
         + (newHomeruns.length ? ` · ${newHomeruns.join(', ')}` : ''),
+      `${t}${pushWho}`,
     );
   }
 
