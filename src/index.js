@@ -228,7 +228,7 @@ async function poll(env, opener) {
     // dedup_key 충돌이면 이미 발송한 이벤트이므로 건너뛴다.
     if (!(await insertEvent(env.DB, game, ev))) continue;
 
-    await broadcast(env, ev);
+    await broadcast(env, ev, game.gameId);
     if (ev.kind === 'end') ended = true;
     fired++;
   }
@@ -246,7 +246,7 @@ async function poll(env, opener) {
  * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
  * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
  */
-async function broadcast(env, ev) {
+async function broadcast(env, ev, gameId) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) return;
 
@@ -257,6 +257,9 @@ async function broadcast(env, ev) {
     isHome: ev.isHome,
     title: ev.title,
     body: ev.body,
+    // sw.js 가 알림 tag 를 경기 단위로 나누는 데 쓴다. 없으면 어제 경기의
+    // 같은 종류 알림을 덮어써 새 알림이 안 뜬 것처럼 보인다.
+    gameId,
     ts: Date.now(),
   };
 

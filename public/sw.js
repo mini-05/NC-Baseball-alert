@@ -72,9 +72,20 @@ self.addEventListener('push', (event) => {
       body: data.body ?? '',
       icon: '/icon-192.png',
       badge: '/badge-96.png',
-      // 같은 종류의 알림은 최신 것으로 덮어써 알림창이 쌓이지 않게 한다.
-      // 단 득점은 매 상황을 따로 보여주는 편이 유용하므로 태그를 나눈다.
-      tag: data.kind === 'score' ? `score-${data.ts}` : `nc-${data.kind ?? 'info'}`,
+      /*
+       * 같은 tag 의 알림은 새로 뜨지 않고 기존 알림을 제자리에서 덮어쓴다.
+       * 그래서 tag 는 "덮어써도 되는 범위"와 정확히 같아야 한다.
+       *
+       * 종류만으로 묶으면 그 범위가 경기를 넘어간다 — 어제 경기의 종료 알림이
+       * 알림함에 남아 있으면 오늘 종료 알림이 새로 뜨는 대신 그 자리를 갱신해,
+       * 사용자에게는 알림이 아예 안 온 것으로 보인다. 그래서 경기까지 붙인다.
+       *
+       * 득점만 ts 를 쓴다 — 한 경기에 여러 번 나므로 경기 단위로 묶으면
+       * 마지막 득점만 남는다. gameId 가 없는 payload(테스트 알림)도 ts 로 흘린다.
+       */
+      tag: data.kind === 'score'
+        ? `score-${data.ts}`
+        : `nc-${data.kind ?? 'info'}-${data.gameId ?? data.ts}`,
       renotify: true,
       timestamp: data.ts ?? Date.now(),
       vibrate: vibrateOn ? (VIBRATE[data.kind] ?? [200]) : [],

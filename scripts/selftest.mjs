@@ -1006,6 +1006,41 @@ async function testServiceWorkerVibrate() {
   const { push } = loadServiceWorker(store, 'ok', () => { closes++; });
   await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
   check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
+
+  /*
+   * tag 가 같으면 새 알림이 뜨지 않고 기존 알림을 덮어쓴다. 2026-08-30 실측:
+   * 종료 알림이 서버에서 정상 발송됐는데(Observability fetch OK ×2, 오류 로그
+   * 없음) 단말에 안 뜬 건이 있었다. 종류만으로 tag 를 만들면 어제 경기의
+   * 종료 알림을 덮어쓰기 때문이다.
+   */
+  const tagOf = async (payload) => {
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ title: 't', body: 'b', ts: Date.now(), ...payload });
+    return notifications[0]?.opts.tag;
+  };
+
+  const endA = await tagOf({ kind: 'end', gameId: '20260829NCHH02026' });
+  const endB = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
+  check('경기가 다르면 종료 알림 tag 도 다르다', endA !== endB, `${endA} vs ${endB}`);
+
+  const endSame = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
+  check('같은 경기의 종료 알림은 같은 tag (중복 표시 방지)', endB === endSame);
+
+  const startB = await tagOf({ kind: 'start', gameId: '20260830NCHH02026' });
+  check('같은 경기라도 종류가 다르면 tag 도 다르다', endB !== startB, `${endB} vs ${startB}`);
+
+  // 득점은 한 경기에 여러 번 난다 — 경기 단위로 묶으면 마지막 것만 남는다.
+  const { push: pushScore, notifications: scored } = loadServiceWorker(store);
+  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 1 });
+  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 2 });
+  check('같은 경기의 득점은 매번 다른 tag',
+    scored[0]?.opts.tag !== scored[1]?.opts.tag,
+    `${scored[0]?.opts.tag} vs ${scored[1]?.opts.tag}`);
+
+  // gameId 가 없는 payload(테스트 알림)도 겹치면 안 된다.
+  const t1 = await tagOf({ kind: 'test', ts: 1 });
+  const t2 = await tagOf({ kind: 'test', ts: 2 });
+  check('gameId 없는 알림은 ts 로 갈린다', t1 !== t2, `${t1} vs ${t2}`);
 }
 
 /* ══ 실행 ══ */
