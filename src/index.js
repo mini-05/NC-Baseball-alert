@@ -6,7 +6,7 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
-  fetchScoreboard, fetchRelayFinish, inningOf,
+  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches,
 } from './kbo.js';
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
@@ -123,7 +123,19 @@ async function poll(env, opener) {
 
   for (const game of games) {
     const prev = prevStates.get(game.gameId) ?? null;
-    const board = scoreboards.get(game.gameId);
+    let board = scoreboards.get(game.gameId);
+
+    /*
+     * 점수가 바뀐 틱인데 방금 받은 전광판의 이닝 합이 아직 새 총점과 안 맞으면
+     * (record API 가 schedule API 보다 살짝 늦게 응답한 경우) 한 번만 다시
+     * 불러본다. 그냥 넘어가면 detect.js 가 득점 이닝을 못 밝히고, 그 알림은
+     * dedup_key 로 묶여 있어 다음 틱에도 다시 보낼 기회가 없다.
+     */
+    if (prev && game.phase === 'live' && board
+      && ((game.homeScore !== prev.homeScore && !inningSumMatches(board.home.innings, game.homeScore))
+        || (game.awayScore !== prev.awayScore && !inningSumMatches(board.away.innings, game.awayScore)))) {
+      board = (await fetchScoreboard(game.gameId)) ?? board;
+    }
 
     /*
      * 9회 이후 진행 중인 경기만 문자중계로 종료를 앞당겨 확인한다.

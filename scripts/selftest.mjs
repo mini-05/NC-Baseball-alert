@@ -13,7 +13,8 @@ import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
-         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf } from '../src/kbo.js';
+         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf,
+         inningSumMatches } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
@@ -801,6 +802,13 @@ async function testScoreboard() {
   } finally {
     globalThis.fetch = originalFetch;
   }
+
+  // 이닝 합 검증 — detect.js scoringInning 이 이닝을 말해도 되는지 이 함수로
+  // 판단한다(record API 가 schedule API 보다 늦게 응답해 합이 어긋나는 경우 대비).
+  check('이닝 합이 총점과 일치', inningSumMatches([1, 0, 2, 0], 3));
+  check('이닝 합이 총점과 불일치(record API 지연)', !inningSumMatches([1, 0, 1, 0], 3));
+  check('빈 배열은 불일치', !inningSumMatches([], 0));
+  check('배열이 아니면 불일치', !inningSumMatches(undefined, 0));
 }
 
 /* ══ 11-b. 문자중계 종료 감지 ══ */

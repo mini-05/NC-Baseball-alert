@@ -9,7 +9,7 @@
  */
 
 import { josa } from 'es-hangul';
-import { perspective, SERIES, isPostseason } from './kbo.js';
+import { perspective, SERIES, isPostseason, inningSumMatches } from './kbo.js';
 
 export const KINDS = ['start', 'cancel', 'score', 'end'];
 
@@ -64,16 +64,11 @@ function scoreLine(game, teamCode) {
  */
 function scoringInning(board, side, score) {
   const innings = board?.[side]?.innings;
-  if (!Array.isArray(innings) || innings.length === 0) return null;
-
-  const at = (i) => Number(innings[i]) || 0;
-  let sum = 0;
-  for (let i = 0; i < innings.length; i++) sum += at(i);
-  if (sum !== score) return null;
+  if (!inningSumMatches(innings, score)) return null;
 
   // 합이 맞으므로 마지막으로 점수가 난 이닝이 방금 그 이닝이다.
   for (let i = innings.length - 1; i >= 0; i--) {
-    if (at(i) > 0) return `${i + 1}회${side === 'home' ? '말' : '초'}`;
+    if ((Number(innings[i]) || 0) > 0) return `${i + 1}회${side === 'home' ? '말' : '초'}`;
   }
   return null;
 }

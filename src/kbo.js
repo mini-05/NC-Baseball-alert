@@ -431,6 +431,19 @@ export function inningOf(statusInfo) {
 }
 
 /**
+ * 전광판 이닝별 점수의 합이 총점(schedule API 값)과 같은지 본다.
+ *
+ * record API 는 schedule API 와 별도로 조회하는 응답이라, 같은 폴링 틱
+ * 안에서도 두 API 의 시점이 미묘하게 어긋날 수 있다(record 쪽이 방금 난
+ * 점수를 아직 안 실은 경우). 그 상태의 전광판으로 득점 이닝을 고르면 확신에
+ * 찬 오답이 나오므로, 합이 맞을 때만 쓸 수 있다고 판단한다.
+ */
+export function inningSumMatches(innings, score) {
+  if (!Array.isArray(innings) || innings.length === 0) return false;
+  return innings.reduce((sum, v) => sum + (Number(v) || 0), 0) === score;
+}
+
+/**
  * 문자중계에서 "경기가 끝났는가"만 확인한다. 끝났으면 그 시점의 최종 점수를,
  * 아니면 null 을 준다.
  *
