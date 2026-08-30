@@ -16,6 +16,7 @@ import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, 
          seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf,
          inningSumMatches } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
+import { boardCoversScore } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
 
@@ -809,6 +810,22 @@ async function testScoreboard() {
   check('이닝 합이 총점과 불일치(record API 지연)', !inningSumMatches([1, 0, 1, 0], 3));
   check('빈 배열은 불일치', !inningSumMatches([], 0));
   check('배열이 아니면 불일치', !inningSumMatches(undefined, 0));
+
+  // index.js 가 "전광판을 다시 부를지" 판단하는 기준. 한쪽만 어긋나도 못 쓴다 —
+  // 어긋났다는 건 두 API 시점이 갈렸다는 뜻이라 반대쪽도 믿을 근거가 없다.
+  const sb2 = (home, away) => ({ home: { innings: home }, away: { innings: away } });
+  const sc = (h, a) => ({ homeScore: h, awayScore: a });
+
+  check('양쪽 합이 다 맞으면 쓸 수 있다',
+    boardCoversScore(sb2([1, 0, 2], [0, 1, 0]), sc(3, 1)));
+  check('홈만 어긋나도 못 쓴다',
+    !boardCoversScore(sb2([1, 0, 0], [0, 1, 0]), sc(3, 1)));
+  check('원정만 어긋나도 못 쓴다',
+    !boardCoversScore(sb2([1, 0, 2], [0, 0, 0]), sc(3, 1)));
+  check('전광판을 아예 못 받았으면 못 쓴다 (null 에 접근해 터지지 않는다)',
+    !boardCoversScore(null, sc(3, 1)));
+  check('한쪽 배열이 통째로 없어도 터지지 않는다',
+    !boardCoversScore({ home: {}, away: {} }, sc(0, 0)));
 }
 
 /* ══ 11-b. 문자중계 종료 감지 ══ */

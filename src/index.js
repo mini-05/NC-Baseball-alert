@@ -45,6 +45,16 @@ const REGULAR_SEASON_GAMES = 144;
 const POLLS_PER_TICK = 2;
 const POLL_GAP_MS = 30 * 1000;
 
+/**
+ * 전광판(record API)이 총점(schedule API)을 아직 못 따라왔을 때 다시 부르기
+ * 전에 기다리는 시간. 곧바로 다시 부르면 같은 뒤처진 값이 돌아올 뿐이라
+ * 재조회의 의미가 없다 — 네이버 쪽이 반영할 틈을 준다.
+ *
+ * 득점이 난 틱에서만, 그것도 합이 어긋난 경우에만 타므로 총 대기에 거의
+ * 영향이 없다. 폴링 간격(30초)보다 훨씬 짧게 잡아 다음 폴링을 밀지 않는다.
+ */
+const BOARD_RETRY_MS = 2 * 1000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -92,6 +102,20 @@ async function tick(env) {
   return { runs };
 }
 
+/**
+ * 이 전광판으로 득점 이닝을 되짚을 수 있는가 — 양 팀 모두 이닝별 합이 총점과
+ * 맞아야 한다. 전광판을 못 받았으면(null) 당연히 못 쓴다.
+ *
+ * detect.js scoringInning 이 실제로 쓰는 것은 점수를 낸 쪽 하나뿐이지만,
+ * 여기서는 양쪽을 다 본다 — 어느 쪽이 냈는지 판단하는 로직을 이 자리에
+ * 한 번 더 두지 않으려는 것이고, 어긋난 김에 같이 받아 두면 손해가 없다.
+ */
+export function boardCoversScore(board, game) {
+  return !!board
+    && inningSumMatches(board.home?.innings, game.homeScore)
+    && inningSumMatches(board.away?.innings, game.awayScore);
+}
+
 /** opener 를 생략하면(예: /api/admin/poll 에서 tick() 없이 직접 호출) 직접 구한다. */
 async function poll(env, opener) {
   const kst = kstNow();
@@ -123,17 +147,26 @@ async function poll(env, opener) {
 
   for (const game of games) {
     const prev = prevStates.get(game.gameId) ?? null;
-    let board = scoreboards.get(game.gameId);
+    let board = scoreboards.get(game.gameId) ?? null;
+
+    const scored = prev
+      && (game.homeScore !== prev.homeScore || game.awayScore !== prev.awayScore);
 
     /*
-     * 점수가 바뀐 틱인데 방금 받은 전광판의 이닝 합이 아직 새 총점과 안 맞으면
-     * (record API 가 schedule API 보다 살짝 늦게 응답한 경우) 한 번만 다시
-     * 불러본다. 그냥 넘어가면 detect.js 가 득점 이닝을 못 밝히고, 그 알림은
-     * dedup_key 로 묶여 있어 다음 틱에도 다시 보낼 기회가 없다.
+     * 득점이 난 틱인데 전광판을 쓸 수 없으면(아예 못 받았거나, 이닝 합이 아직
+     * 새 총점을 못 따라왔거나) 잠깐 뒤 한 번만 다시 불러본다.
+     *
+     * 왜 이 틱에서 끝을 봐야 하나 — 그냥 넘어가면 detect.js 가 득점 이닝을
+     * 못 밝힌 채로 알림이 나가고, 그 이벤트는 dedup_key 로 묶여 있어 다음
+     * 틱에 다시 보낼 기회가 없다(detect.js `${gameId}:score:${점수}`).
+     * 즉 여기서 놓친 이닝은 영영 안 붙는다.
+     *
+     * 재조회해도 여전히 안 맞으면 방금 받은 값을 그대로 쓴다 — 이닝이 빠질
+     * 뿐이고, 합이 안 맞는 전광판으로 이닝을 고르는 일은 scoringInning 이
+     * 막는다. 틀린 이닝을 단언하느니 생략하는 편이 낫다.
      */
-    if (prev && game.phase === 'live' && board
-      && ((game.homeScore !== prev.homeScore && !inningSumMatches(board.home.innings, game.homeScore))
-        || (game.awayScore !== prev.awayScore && !inningSumMatches(board.away.innings, game.awayScore)))) {
+    if (scored && game.phase === 'live' && !boardCoversScore(board, game)) {
+      await sleep(BOARD_RETRY_MS);
       board = (await fetchScoreboard(game.gameId)) ?? board;
     }
 
@@ -150,8 +183,14 @@ async function poll(env, opener) {
      * 되돌릴 수 없다(detect.js `${gameId}:end`).
      *
      * 응답이 커서(이닝 하나 분량) 이 게이트 없이 매 폴링마다 부르면 안 된다.
+     *
+     * 이번 틱에 점수가 났으면(scored) 종료를 앞당기지 않고 다음 폴링에 맡긴다.
+     * 끝내기 득점이 그렇다 — 여기서 phase 를 result 로 바꿔 버리면 detect.js
+     * 의 득점 감지가 live 상태만 보므로(detect.js `cur.phase === 'live'`)
+     * "끝내기" 득점 알림이 통째로 사라지고 종료 알림만 남는다. 30초 뒤 다음
+     * 폴링에서 종료를 잡아도 schedule API 의 ENDED(2분 지연)보다 훨씬 빠르다.
      */
-    if (game.phase === 'live' && inningOf(game.statusInfo) >= 9) {
+    if (!scored && game.phase === 'live' && inningOf(game.statusInfo) >= 9) {
       const finish = await fetchRelayFinish(game.gameId);
       if (finish
         && finish.homeScore === game.homeScore
