@@ -13,7 +13,7 @@ import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
-         seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
+         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
@@ -803,6 +803,79 @@ async function testScoreboard() {
   }
 }
 
+/* ══ 11-b. 문자중계 종료 감지 ══ */
+
+/**
+ * 실제 relay 응답(2026-08-29 NC-한화)에서 판정에 쓰는 부분만 남긴 모양.
+ * 종료 블록은 type 99 + "=====" 구분선으로 붙고, 투구·타격 결과는 다른 type 이다.
+ */
+function fakeRelayResponse({ ended, homeScore = 4, awayScore = 11 }) {
+  const playing = [
+    { textOptions: [{ type: 8, text: '9번타자 박정현' }, { type: 1, text: '1구 스트라이크' }] },
+    { textOptions: [{ type: 13, text: '박정현 : 삼진 아웃' }] },
+  ];
+  const finish = {
+    textOptions: [
+      { type: 99, text: '=====================================' },
+      { type: 99, text: '승리투수: 라일리' },
+    ],
+  };
+  return {
+    ok: true,
+    json: async () => ({
+      result: {
+        textRelayData: {
+          currentGameState: { homeScore: String(homeScore), awayScore: String(awayScore), out: '3' },
+          textRelays: ended ? [finish, ...playing] : playing,
+        },
+      },
+    }),
+  };
+}
+
+async function testRelayFinish() {
+  check('회차 추출', inningOf('9회말') === 9 && inningOf('10회초') === 10);
+  check('회차를 못 읽으면 0 (문자중계를 안 보는 쪽이 안전)',
+    inningOf('경기전') === 0 && inningOf(null) === 0 && inningOf(undefined) === 0);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => fakeRelayResponse({ ended: true });
+    const done = await fetchRelayFinish('20260829NCHH02026');
+    check('종료 블록(type 99 + 구분선)을 잡아낸다',
+      done?.homeScore === 4 && done?.awayScore === 11, JSON.stringify(done));
+
+    globalThis.fetch = async () => fakeRelayResponse({ ended: false });
+    check('진행 중이면 null', (await fetchRelayFinish('x')) === null);
+
+    // 종료 판정을 문자열이 아니라 type 으로 하는지 — 타격 결과에 "====" 가 섞여도
+    // 종료로 읽으면 안 된다.
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          textRelayData: {
+            currentGameState: { homeScore: '1', awayScore: '0' },
+            textRelays: [{ textOptions: [{ type: 13, text: '=====' }] }],
+          },
+        },
+      }),
+    });
+    check('type 이 99 가 아니면 종료 아님', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: false, status: 500 });
+    check('HTTP 오류 → null', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    check('네트워크 예외 → null (throw 안 함)', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: {} }) });
+    check('스키마가 달라져도 null', (await fetchRelayFinish('x')) === null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 /* ══ 12. 서비스 워커 진동 설정 ══ */
 
 /**
@@ -925,6 +998,7 @@ console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
 console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
+console.log('\n[11-b] 문자중계 종료 감지');   await testRelayFinish();
 console.log('\n[12] 서비스 워커 진동 설정');  await testServiceWorkerVibrate();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);

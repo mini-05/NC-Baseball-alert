@@ -370,6 +370,7 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
 /* ─────────────────────────── 전광판 ─────────────────────────── */
 
 const RECORD_URL = 'https://api-gw.sports.naver.com/schedule/games';
+const RELAY_URL = 'https://api-gw.sports.naver.com/schedule/games';
 
 /**
  * 경기 하나의 이닝별 점수(전광판)를 가져온다.
@@ -415,6 +416,58 @@ export async function fetchScoreboard(gameId) {
     return { home: side('home'), away: side('away'), hr };
   } catch (err) {
     console.error('scoreboard fetch failed', gameId, err.message);
+    return null;
+  }
+}
+
+/* ─────────── 문자중계(relay) — 종료를 앞당겨 잡는 용도 ─────────── */
+
+/**
+ * statusInfo("9회말")에서 회차만 뽑는다. 못 읽으면 0.
+ * 문자중계를 언제부터 볼지 정하는 데만 쓰므로, 실패하면 안 보는 쪽이 안전하다.
+ */
+export function inningOf(statusInfo) {
+  return Number(/^(\d+)회/.exec(String(statusInfo ?? ''))?.[1]) || 0;
+}
+
+/**
+ * 문자중계에서 "경기가 끝났는가"만 확인한다. 끝났으면 그 시점의 최종 점수를,
+ * 아니면 null 을 준다.
+ *
+ * 왜 필요한가 — schedule API 의 statusCode 는 마지막 아웃 뒤 2분쯤 지나서야
+ * ENDED 로 바뀐다(2026-08-29 실측: 마지막 투구 21:22:09 → ENDED 21:24:17).
+ * 문자중계에는 그 아웃이 기록되는 즉시 종료 블록이 붙으므로 2분을 앞당길 수 있다.
+ *
+ * 종료 판정은 세 겹으로 막는다 — 잘못 보낸 종료 알림은 dedup_key 때문에
+ * 되돌릴 수 없다(detect.js `${gameId}:end`).
+ *   1) 호출부가 9회 이후 진행 중인 경기에서만 부른다 (index.js poll)
+ *   2) type 99 + "=====" 구분선. 투구·교체·타격 결과는 전부 다른 type 이고,
+ *      99 는 종료 블록에만 붙는다(실측 응답에서 확인).
+ *   3) 점수는 호출부가 schedule API 값과 대조한다 — 어긋나면 쓰지 않는다.
+ *
+ * 응답이 커서(이닝 하나 분량) 매 폴링마다 부르면 안 된다. 위 1) 게이트가 그 역할.
+ */
+export async function fetchRelayFinish(gameId) {
+  try {
+    const res = await fetch(`${RELAY_URL}/${gameId}/relay`, { headers: HEADERS });
+    if (!res.ok) return null;
+
+    const relay = (await res.json())?.result?.textRelayData;
+    if (!relay) return null;
+
+    const ended = (relay.textRelays ?? []).some((tr) =>
+      (tr.textOptions ?? []).some((o) => o.type === 99 && /^=+$/.test(String(o.text ?? ''))),
+    );
+    if (!ended) return null;
+
+    const s = relay.currentGameState ?? {};
+    const homeScore = Number(s.homeScore);
+    const awayScore = Number(s.awayScore);
+    if (!Number.isFinite(homeScore) || !Number.isFinite(awayScore)) return null;
+
+    return { homeScore, awayScore };
+  } catch (err) {
+    console.error('relay fetch failed', gameId, err.message);
     return null;
   }
 }

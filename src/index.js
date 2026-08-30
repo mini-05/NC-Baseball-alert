@@ -6,7 +6,7 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
-  fetchScoreboard,
+  fetchScoreboard, fetchRelayFinish, inningOf,
 } from './kbo.js';
 import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
@@ -124,6 +124,29 @@ async function poll(env, opener) {
   for (const game of games) {
     const prev = prevStates.get(game.gameId) ?? null;
     const board = scoreboards.get(game.gameId);
+
+    /*
+     * 9회 이후 진행 중인 경기만 문자중계로 종료를 앞당겨 확인한다.
+     *
+     * schedule API 의 statusCode 는 마지막 아웃 뒤 2분쯤 지나서야 ENDED 로
+     * 바뀐다(2026-08-29 실측: 마지막 투구 21:22:09 → ENDED 21:24:17). 문자중계에는
+     * 그 아웃이 기록되는 즉시 종료 블록이 붙으므로 그 2분을 앞당길 수 있다.
+     *
+     * 점수가 어긋나면 쓰지 않는다 — 두 API 의 시점이 갈렸다는 뜻이라, 그 상태로
+     * 종료를 알리면 틀린 최종 점수를 단언하게 된다. 그 경우 다음 폴링(30초)이나
+     * ENDED 를 기다리는 편이 낫다. 잘못 보낸 종료 알림은 dedup_key 때문에
+     * 되돌릴 수 없다(detect.js `${gameId}:end`).
+     *
+     * 응답이 커서(이닝 하나 분량) 이 게이트 없이 매 폴링마다 부르면 안 된다.
+     */
+    if (game.phase === 'live' && inningOf(game.statusInfo) >= 9) {
+      const finish = await fetchRelayFinish(game.gameId);
+      if (finish
+        && finish.homeScore === game.homeScore
+        && finish.awayScore === game.awayScore) {
+        game.phase = 'result';
+      }
+    }
 
     // 스냅샷은 이벤트 발생 여부와 무관하게 항상 최신으로 맞춘다.
     writes.push(upsertStateStmt(env.DB, game, board ? JSON.stringify(board) : null));
