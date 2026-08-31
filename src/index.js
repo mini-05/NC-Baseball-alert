@@ -263,16 +263,29 @@ async function broadcast(env, ev, gameId) {
     ts: Date.now(),
   };
 
+  /*
+   * 2026-08-30 종료 알림 미표시 건 조사용 — 서버가 FCM 에 전달을 확인한 시각과
+   * 사용자가 실제로 알림을 본 시각을 대조하려면, 지금까지는 poll_log/events
+   * (DB 시각)와 Observability 의 `fetch OK` 줄(발송 시각)을 시:분 단위로 눈대중
+   * 대조해야 했다 — 한 틱에 fetch 가 여러 번 찍혀 어느 줄이 이 발송인지 특정이
+   * 안 됐다. kind·gameId·endpoint 로 걸러 찾을 수 있게 로그에 남긴다.
+   * endpoint 는 끝 12자만 남긴다 — 식별에 충분하고 전체를 로그에 남기지 않는다.
+   */
+  const sentAt = Date.now();
   const results = await Promise.allSettled(subs.map((s) => sendPush(s, payload, env)));
 
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
+    const ep = subs[i].endpoint.slice(-12);
     if (r.status === 'rejected') {
-      console.error('push failed', r.reason?.message);
+      console.error('push failed', ev.kind, gameId, ep, r.reason?.message);
     } else if (r.value.gone) {
+      console.log('push gone, deleting sub', ev.kind, gameId, ep, r.value.status);
       await deleteSubscription(env.DB, subs[i].endpoint);
     } else if (!r.value.ok) {
-      console.error('push rejected with status', r.value.status);
+      console.error('push rejected with status', ev.kind, gameId, ep, r.value.status);
+    } else {
+      console.log('push sent', ev.kind, gameId, ep, `${Date.now() - sentAt}ms`);
     }
   }
 }
