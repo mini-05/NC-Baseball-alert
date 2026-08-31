@@ -13,8 +13,10 @@ import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
-         seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
+         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf,
+         inningSumMatches } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
+import { boardCoversScore } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
 
@@ -801,6 +803,102 @@ async function testScoreboard() {
   } finally {
     globalThis.fetch = originalFetch;
   }
+
+  // 이닝 합 검증 — detect.js scoringInning 이 이닝을 말해도 되는지 이 함수로
+  // 판단한다(record API 가 schedule API 보다 늦게 응답해 합이 어긋나는 경우 대비).
+  check('이닝 합이 총점과 일치', inningSumMatches([1, 0, 2, 0], 3));
+  check('이닝 합이 총점과 불일치(record API 지연)', !inningSumMatches([1, 0, 1, 0], 3));
+  check('빈 배열은 불일치', !inningSumMatches([], 0));
+  check('배열이 아니면 불일치', !inningSumMatches(undefined, 0));
+
+  // index.js 가 "전광판을 다시 부를지" 판단하는 기준. 한쪽만 어긋나도 못 쓴다 —
+  // 어긋났다는 건 두 API 시점이 갈렸다는 뜻이라 반대쪽도 믿을 근거가 없다.
+  const sb2 = (home, away) => ({ home: { innings: home }, away: { innings: away } });
+  const sc = (h, a) => ({ homeScore: h, awayScore: a });
+
+  check('양쪽 합이 다 맞으면 쓸 수 있다',
+    boardCoversScore(sb2([1, 0, 2], [0, 1, 0]), sc(3, 1)));
+  check('홈만 어긋나도 못 쓴다',
+    !boardCoversScore(sb2([1, 0, 0], [0, 1, 0]), sc(3, 1)));
+  check('원정만 어긋나도 못 쓴다',
+    !boardCoversScore(sb2([1, 0, 2], [0, 0, 0]), sc(3, 1)));
+  check('전광판을 아예 못 받았으면 못 쓴다 (null 에 접근해 터지지 않는다)',
+    !boardCoversScore(null, sc(3, 1)));
+  check('한쪽 배열이 통째로 없어도 터지지 않는다',
+    !boardCoversScore({ home: {}, away: {} }, sc(0, 0)));
+}
+
+/* ══ 11-b. 문자중계 종료 감지 ══ */
+
+/**
+ * 실제 relay 응답(2026-08-29 NC-한화)에서 판정에 쓰는 부분만 남긴 모양.
+ * 종료 블록은 type 99 + "=====" 구분선으로 붙고, 투구·타격 결과는 다른 type 이다.
+ */
+function fakeRelayResponse({ ended, homeScore = 4, awayScore = 11 }) {
+  const playing = [
+    { textOptions: [{ type: 8, text: '9번타자 박정현' }, { type: 1, text: '1구 스트라이크' }] },
+    { textOptions: [{ type: 13, text: '박정현 : 삼진 아웃' }] },
+  ];
+  const finish = {
+    textOptions: [
+      { type: 99, text: '=====================================' },
+      { type: 99, text: '승리투수: 라일리' },
+    ],
+  };
+  return {
+    ok: true,
+    json: async () => ({
+      result: {
+        textRelayData: {
+          currentGameState: { homeScore: String(homeScore), awayScore: String(awayScore), out: '3' },
+          textRelays: ended ? [finish, ...playing] : playing,
+        },
+      },
+    }),
+  };
+}
+
+async function testRelayFinish() {
+  check('회차 추출', inningOf('9회말') === 9 && inningOf('10회초') === 10);
+  check('회차를 못 읽으면 0 (문자중계를 안 보는 쪽이 안전)',
+    inningOf('경기전') === 0 && inningOf(null) === 0 && inningOf(undefined) === 0);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => fakeRelayResponse({ ended: true });
+    const done = await fetchRelayFinish('20260829NCHH02026');
+    check('종료 블록(type 99 + 구분선)을 잡아낸다',
+      done?.homeScore === 4 && done?.awayScore === 11, JSON.stringify(done));
+
+    globalThis.fetch = async () => fakeRelayResponse({ ended: false });
+    check('진행 중이면 null', (await fetchRelayFinish('x')) === null);
+
+    // 종료 판정을 문자열이 아니라 type 으로 하는지 — 타격 결과에 "====" 가 섞여도
+    // 종료로 읽으면 안 된다.
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          textRelayData: {
+            currentGameState: { homeScore: '1', awayScore: '0' },
+            textRelays: [{ textOptions: [{ type: 13, text: '=====' }] }],
+          },
+        },
+      }),
+    });
+    check('type 이 99 가 아니면 종료 아님', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: false, status: 500 });
+    check('HTTP 오류 → null', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    check('네트워크 예외 → null (throw 안 함)', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: {} }) });
+    check('스키마가 달라져도 null', (await fetchRelayFinish('x')) === null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 /* ══ 12. 서비스 워커 진동 설정 ══ */
@@ -908,6 +1006,41 @@ async function testServiceWorkerVibrate() {
   const { push } = loadServiceWorker(store, 'ok', () => { closes++; });
   await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
   check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
+
+  /*
+   * tag 가 같으면 새 알림이 뜨지 않고 기존 알림을 덮어쓴다. 2026-08-30 실측:
+   * 종료 알림이 서버에서 정상 발송됐는데(Observability fetch OK ×2, 오류 로그
+   * 없음) 단말에 안 뜬 건이 있었다. 종류만으로 tag 를 만들면 어제 경기의
+   * 종료 알림을 덮어쓰기 때문이다.
+   */
+  const tagOf = async (payload) => {
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ title: 't', body: 'b', ts: Date.now(), ...payload });
+    return notifications[0]?.opts.tag;
+  };
+
+  const endA = await tagOf({ kind: 'end', gameId: '20260829NCHH02026' });
+  const endB = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
+  check('경기가 다르면 종료 알림 tag 도 다르다', endA !== endB, `${endA} vs ${endB}`);
+
+  const endSame = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
+  check('같은 경기의 종료 알림은 같은 tag (중복 표시 방지)', endB === endSame);
+
+  const startB = await tagOf({ kind: 'start', gameId: '20260830NCHH02026' });
+  check('같은 경기라도 종류가 다르면 tag 도 다르다', endB !== startB, `${endB} vs ${startB}`);
+
+  // 득점은 한 경기에 여러 번 난다 — 경기 단위로 묶으면 마지막 것만 남는다.
+  const { push: pushScore, notifications: scored } = loadServiceWorker(store);
+  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 1 });
+  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 2 });
+  check('같은 경기의 득점은 매번 다른 tag',
+    scored[0]?.opts.tag !== scored[1]?.opts.tag,
+    `${scored[0]?.opts.tag} vs ${scored[1]?.opts.tag}`);
+
+  // gameId 가 없는 payload(테스트 알림)도 겹치면 안 된다.
+  const t1 = await tagOf({ kind: 'test', ts: 1 });
+  const t2 = await tagOf({ kind: 'test', ts: 2 });
+  check('gameId 없는 알림은 ts 로 갈린다', t1 !== t2, `${t1} vs ${t2}`);
 }
 
 /* ══ 실행 ══ */
@@ -925,6 +1058,7 @@ console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
 console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
+console.log('\n[11-b] 문자중계 종료 감지');   await testRelayFinish();
 console.log('\n[12] 서비스 워커 진동 설정');  await testServiceWorkerVibrate();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
