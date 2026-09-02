@@ -525,7 +525,7 @@ function renderGame(g, defaultOpen) {
     ? el('div', { class: 'game-times', text: timeParts.join(' · ') })
     : null;
 
-  const scoreboard = renderScoreboard(g.scoreboard, mine.name, opp.name);
+  const scoreboard = renderScoreboard(g.scoreboard, mine.name, opp.name, isHome);
 
   const timeline = g.events.length
     ? el('ul', { class: 'timeline' },
@@ -593,11 +593,16 @@ function renderGame(g, defaultOpen) {
  * 가로 폭이 좁은 화면에서 연장전(10회 이상)까지 다 담기면 넘칠 수 있어
  * 바깥을 가로 스크롤 컨테이너로 감싼다.
  */
-function renderScoreboard(sb, teamLabel, oppLabel) {
+function renderScoreboard(sb, teamLabel, oppLabel, isHome) {
   if (!sb) return null;
 
   const innings = Math.max(sb.team.innings.length, sb.opp.innings.length, 9);
-  const at = (arr, i) => (arr[i] != null ? String(arr[i]) : '');
+  /*
+   * 치지 않은 이닝은 빈칸이 아니라 '-' 로 둔다. 빈칸이면 "0점을 냈다"와 "치지
+   * 않았다"가 구분되지 않는데, 홈팀이 앞선 채 9회말을 치지 않는 경우는 흔하다.
+   * 네이버 전광판도 같은 표기를 쓴다.
+   */
+  const at = (arr, i) => (arr[i] != null ? String(arr[i]) : '-');
 
   const row = (label, side, isMine) =>
     el('tr', { class: isMine ? 'mine' : null },
@@ -621,7 +626,21 @@ function renderScoreboard(sb, teamLabel, oppLabel) {
           el('th', { text: 'B' }),
         ),
       ),
-      el('tbody', {}, row(teamLabel, sb.team, true), row(oppLabel, sb.opp, false)),
+      /*
+       * 원정팀이 위, 홈팀이 아래 — 전광판에서 위아래는 곧 초·말이다.
+       *
+       * 우리 팀을 늘 위에 두면 홈경기에서 두 줄이 뒤바뀌어, 9회초와 9회말을
+       * 정반대로 읽게 된다. 2026-09-01 창원 NC:KIA 7:2 가 그랬다 — NC(홈)가
+       * 앞서 9회말을 치지 않아 그 칸이 비었는데, NC 가 윗줄이라 "원정팀이
+       * 9회초를 안 쳤고, 홈팀은 이기는데도 9회말을 쳤다"로 보였다. 둘 다
+       * 야구에서 나올 수 없는 장면이라 숫자가 틀린 것처럼 읽힌다.
+       *
+       * 우리 팀 강조는 위치가 아니라 tr.mine 클래스가 맡으므로(style.css)
+       * 순서를 바꿔도 어느 쪽이 우리 팀인지는 그대로 드러난다.
+       */
+      el('tbody', {}, ...(isHome
+        ? [row(oppLabel, sb.opp, false), row(teamLabel, sb.team, true)]
+        : [row(teamLabel, sb.team, true), row(oppLabel, sb.opp, false)])),
     ),
   );
 }
