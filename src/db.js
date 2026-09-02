@@ -230,6 +230,28 @@ export async function insertEvent(db, game, ev) {
     )
     .run();
 
+  // 새로 들어갔으면 그 행의 id, dedup_key 충돌로 무시됐으면 null.
+  // OR IGNORE 로 건너뛴 경우 last_row_id 에 직전 값이 남아 있을 수 있어
+  // changes 로 먼저 거른다. 호출부는 진리값으로 "발송할지"를, 값으로는
+  // 푸시 payload 에 실을 id 를 쓴다(sw.js 가 tag 와 배달 확인에 쓴다).
+  if ((res.meta?.changes ?? 0) === 0) return null;
+  return res.meta.last_row_id;
+}
+
+/**
+ * 단말이 알림을 실제로 띄웠다고 알려오면 그 시각을 남긴다.
+ *
+ * 첫 응답만 남긴다(delivered_at IS NULL 조건) — 구독이 여럿이어도 "누군가는
+ * 봤다"까지만 기록한다. 되돌릴 일이 없는 값이라 덮어쓰지 않는다.
+ *
+ * @returns {Promise<boolean>} 이번 호출로 채워졌으면 true. 이미 채워져 있었거나
+ *   그런 id 가 없으면 false — 어느 쪽이든 호출부가 구분할 필요는 없다.
+ */
+export async function markDelivered(db, eventId) {
+  const res = await db
+    .prepare(`UPDATE events SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL`)
+    .bind(nowIso(), eventId)
+    .run();
   return (res.meta?.changes ?? 0) > 0;
 }
 

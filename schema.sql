@@ -37,7 +37,14 @@ CREATE TABLE IF NOT EXISTS events (
   body       TEXT NOT NULL,
   home_score INTEGER NOT NULL DEFAULT 0,
   away_score INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- 단말이 실제로 알림을 띄우고 /api/delivered 로 알려온 시각. NULL 이면 아직
+  -- 어느 단말도 띄웠다고 알려오지 않은 것이다. 서버가 FCM 에 넘긴 뒤 단말에
+  -- 안 뜨는 유실(2026-08-30, 09-01 각 1건)을 재기 위해 둔다 — created_at 과의
+  -- 차이가 곧 배달 지연이고, 끝내 NULL 이면 유실이다.
+  -- 여러 구독 중 첫 응답만 남긴다(이벤트 단위). 구독별로 따로 재려면 별도
+  -- 테이블이 필요한데, 지금 구독은 몇 건뿐이라 그 비용을 들일 단계가 아니다.
+  delivered_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(game_date DESC, id DESC);
@@ -100,3 +107,9 @@ CREATE TABLE IF NOT EXISTS cache (
 -- 아무 일도 하지 않는다 — 새 이벤트는 애초에 concede 로 저장된다.
 UPDATE events SET kind = 'concede'
  WHERE kind = 'score' AND title LIKE '%실점%';
+
+-- events.delivered_at 은 위 CREATE TABLE 에 들어 있어 새 DB 에는 저절로 생기지만,
+-- 이미 있는 DB 에는 아래를 D1 콘솔에서 한 번 직접 실행해야 한다. SQLite 의
+-- ALTER TABLE 에는 IF NOT EXISTS 가 없어 여기 그대로 두면 두 번째 db:init 이
+-- "duplicate column" 으로 실패하므로 주석으로만 남긴다.
+--   ALTER TABLE events ADD COLUMN delivered_at TEXT;

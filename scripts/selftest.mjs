@@ -18,7 +18,7 @@ import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, 
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
 import { boardCoversScore } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
-import { subscribersFor, getCache, pruneDatedCache, allSettledBefore } from '../src/db.js';
+import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -910,7 +910,7 @@ async function testRelayFinish() {
  *
  * @param {'ok'|'blocked'|'error'} idbMode IndexedDB open 이 어떻게 끝나는지
  */
-function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}) {
+function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}, fetchMode = 'ok') {
   const fakeIdb = {
     open() {
       const req = { result: { objectStoreNames: { contains: () => true } } };
@@ -935,15 +935,22 @@ function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}) {
 
   const listeners = {};
   const notifications = [];
+  const acks = []; // sw.js 가 /api/delivered 로 보낸 body 들
   const sandbox = {
     self: {
       addEventListener: (type, fn) => { listeners[type] = fn; },
       registration: {
         showNotification: (title, opts) => { notifications.push({ title, opts }); return Promise.resolve(); },
+        pushManager: { getSubscription: async () => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/TEST' }) },
       },
       clients: { matchAll: async () => [] },
     },
     indexedDB: fakeIdb,
+    fetch: async (url, init) => {
+      if (fetchMode === 'fail') throw new Error('offline');
+      acks.push({ url, body: JSON.parse(init.body) });
+      return { ok: true };
+    },
     console,
   };
   vm.createContext(sandbox);
@@ -954,7 +961,7 @@ function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}) {
     listeners.push({ data: { json: () => payload }, waitUntil: (p) => { waited = p; } });
     await waited;
   };
-  return { push, notifications };
+  return { push, notifications, acks };
 }
 
 async function testServiceWorkerVibrate() {
@@ -1041,6 +1048,82 @@ async function testServiceWorkerVibrate() {
   const t1 = await tagOf({ kind: 'test', ts: 1 });
   const t2 = await tagOf({ kind: 'test', ts: 2 });
   check('gameId 없는 알림은 ts 로 갈린다', t1 !== t2, `${t1} vs ${t2}`);
+
+  /*
+   * 이벤트 id 가 있으면 tag 는 id 하나로 정해진다. 서버가 같은 이벤트를 다시
+   * 보낼 때(배달 확인이 없을 때의 재발송) ts 는 새로 찍히므로, ts 기반 tag 로는
+   * 같은 알림이 두 번 뜬다. id 기반이면 제자리 갱신으로 끝난다.
+   */
+  const first = await tagOf({ kind: 'score', id: 66, ts: 1 });
+  const resend = await tagOf({ kind: 'score', id: 66, ts: 2 });
+  check('같은 이벤트를 다시 보내도 tag 가 같다 (재발송 중복 방지)', first === resend, `${first} vs ${resend}`);
+  const other = await tagOf({ kind: 'score', id: 67, ts: 2 });
+  check('이벤트가 다르면 tag 도 다르다', first !== other, `${first} vs ${other}`);
+
+  // ── 배달 확인 — 알림을 띄운 뒤 서버에 id 를 알린다 ──
+  {
+    const { push, acks } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 66, title: 't', body: 'b', ts: 1 });
+    check('띄운 뒤 /api/delivered 에 id 와 endpoint 를 보낸다',
+      acks.length === 1 && acks[0].url === '/api/delivered'
+        && acks[0].body.id === 66 && acks[0].body.endpoint.endsWith('/TEST'),
+      JSON.stringify(acks));
+  }
+  {
+    const { push, acks, notifications } = loadServiceWorker(store);
+    await push({ kind: 'test', title: 't', body: 'b', ts: 1 });
+    check('id 없는 payload(테스트 알림)는 배달 확인을 안 보낸다',
+      acks.length === 0 && notifications.length === 1);
+  }
+  {
+    // 확인 요청이 실패해도 알림은 이미 떠 있다. 여기서 waitUntil 이 거부되면
+    // 브라우저가 대체 알림을 띄우거나 SW 를 문제로 볼 수 있다 — 삼켜야 한다.
+    const { push, notifications } = loadServiceWorker(store, 'ok', () => {}, 'fail');
+    const outcome = await push({ kind: 'end', id: 69, title: 't', body: 'b', ts: 1 })
+      .then(() => 'RESOLVED', () => 'REJECTED');
+    check('배달 확인 실패가 알림을 막지 않는다', outcome === 'RESOLVED' && notifications.length === 1,
+      `${outcome}, ${notifications.length}건`);
+  }
+}
+
+/* ══ 6-c. 배달 확인 — events.delivered_at ══ */
+
+/**
+ * INSERT/UPDATE 의 결과(meta.changes, last_row_id)만 흉내 내는 최소 D1.
+ * 실행된 SQL 과 인자를 남겨 조건절이 의도대로인지도 본다.
+ */
+function fakeWriteDb(meta) {
+  const calls = [];
+  return {
+    calls,
+    prepare: (sql) => ({
+      bind(...args) { calls.push({ sql, args }); return this; },
+      async run() { return { meta }; },
+    }),
+  };
+}
+
+async function testDelivered() {
+  const game = { gameId: 'G', gameDate: '2026-09-01', homeScore: 3, awayScore: 1 };
+  const ev = { kind: 'score', series: 'regular', dedupKey: 'G:score:3-1', title: 't', body: 'b' };
+
+  // 새로 들어간 행의 id 를 돌려줘야 payload 에 실을 수 있다.
+  const inserted = fakeWriteDb({ changes: 1, last_row_id: 66 });
+  check('insertEvent 는 새 행의 id 를 돌려준다', (await insertEvent(inserted, game, ev)) === 66);
+
+  // OR IGNORE 로 건너뛰면 last_row_id 에 직전 값이 남아 있어도 null 이어야 한다 —
+  // 호출부가 이 값으로 "발송할지"를 정하므로 stale id 가 새면 중복 발송된다.
+  const ignored = fakeWriteDb({ changes: 0, last_row_id: 66 });
+  check('dedup 충돌이면 stale last_row_id 를 무시하고 null', (await insertEvent(ignored, game, ev)) === null);
+
+  const marked = fakeWriteDb({ changes: 1 });
+  check('markDelivered 는 채웠으면 true', await markDelivered(marked, 66));
+  check('delivered_at 이 비어 있을 때만 채운다 (첫 응답만 남김)',
+    /WHERE id = \? AND delivered_at IS NULL/.test(marked.calls[0].sql) && marked.calls[0].args[1] === 66,
+    marked.calls[0].sql);
+
+  const already = fakeWriteDb({ changes: 0 });
+  check('이미 채워져 있거나 없는 id 면 false', !(await markDelivered(already, 66)));
 }
 
 /* ══ 실행 ══ */
@@ -1053,6 +1136,7 @@ console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
+console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();

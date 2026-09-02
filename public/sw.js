@@ -76,16 +76,20 @@ self.addEventListener('push', (event) => {
        * 같은 tag 의 알림은 새로 뜨지 않고 기존 알림을 제자리에서 덮어쓴다.
        * 그래서 tag 는 "덮어써도 되는 범위"와 정확히 같아야 한다.
        *
-       * 종류만으로 묶으면 그 범위가 경기를 넘어간다 — 어제 경기의 종료 알림이
-       * 알림함에 남아 있으면 오늘 종료 알림이 새로 뜨는 대신 그 자리를 갱신해,
-       * 사용자에게는 알림이 아예 안 온 것으로 보인다. 그래서 경기까지 붙인다.
+       * 이벤트 id 가 있으면 그것만 쓴다. 이벤트 하나 = 알림 하나이고, 서버가
+       * 같은 이벤트를 다시 보내도(배달 확인이 없을 때의 재발송) tag 가 같아
+       * 제자리 갱신될 뿐 두 번 뜨지 않는다. ts 를 쓰면 재발송마다 tag 가 달라져
+       * 그 보장이 깨진다.
        *
-       * 득점만 ts 를 쓴다 — 한 경기에 여러 번 나므로 경기 단위로 묶으면
-       * 마지막 득점만 남는다. gameId 가 없는 payload(테스트 알림)도 ts 로 흘린다.
+       * id 가 없는 payload(테스트 알림, 옛 서버)는 종전 규칙으로 흘린다 —
+       * 종류만으로 묶으면 어제 경기의 알림을 덮어써 새 알림이 안 온 것처럼
+       * 보이므로 경기까지 붙이고, 득점은 한 경기에 여러 번 나므로 ts 로 가른다.
        */
-      tag: data.kind === 'score'
-        ? `score-${data.ts}`
-        : `nc-${data.kind ?? 'info'}-${data.gameId ?? data.ts}`,
+      tag: data.id != null
+        ? `nc-${data.id}`
+        : data.kind === 'score'
+          ? `score-${data.ts}`
+          : `nc-${data.kind ?? 'info'}-${data.gameId ?? data.ts}`,
       renotify: true,
       timestamp: data.ts ?? Date.now(),
       vibrate: vibrateOn ? (VIBRATE[data.kind] ?? [200]) : [],
@@ -100,8 +104,31 @@ self.addEventListener('push', (event) => {
         for (const client of list) client.postMessage({ type: 'refresh' });
       }),
     ]);
+
+    // 알림이 실제로 떴다고 서버에 알린다. 서버는 FCM 에 넘긴 것까지만 알 수
+    // 있어 이 신호가 없으면 단말에서 사라진 알림을 재지 못한다.
+    // showNotification 이 끝난 뒤에만 부른다 — "띄웠다"는 뜻이니까.
+    // 실패해도 알림은 이미 떠 있으므로 삼킨다. id 가 없는 payload(테스트 알림)는
+    // 서버에 대응하는 행이 없어 보내지 않는다.
+    if (data.id != null) await reportDelivered(data.id);
   })());
 });
+
+async function reportDelivered(id) {
+  try {
+    const sub = await self.registration.pushManager.getSubscription();
+    if (!sub) return;
+    await fetch('/api/delivered', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: sub.endpoint, id }),
+    });
+  } catch {
+    // 서버가 잠깐 안 받아도 알림은 이미 떴다. 여기서 실패를 올리면
+    // waitUntil 이 거부돼 브라우저가 "백그라운드에서 갱신됨" 같은 대체
+    // 알림을 띄울 수 있다 — 조용히 넘긴다.
+  }
+}
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
