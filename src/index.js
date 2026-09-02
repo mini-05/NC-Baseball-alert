@@ -19,7 +19,7 @@ import {
   loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
-  allSettledBefore,
+  allSettledBefore, markDelivered,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -225,10 +225,11 @@ async function poll(env, opener) {
   let ended = false;
 
   for (const { game, ev } of pending) {
-    // dedup_key 충돌이면 이미 발송한 이벤트이므로 건너뛴다.
-    if (!(await insertEvent(env.DB, game, ev))) continue;
+    // dedup_key 충돌이면(null) 이미 발송한 이벤트이므로 건너뛴다.
+    const eventId = await insertEvent(env.DB, game, ev);
+    if (!eventId) continue;
 
-    await broadcast(env, ev, game.gameId);
+    await broadcast(env, ev, game.gameId, eventId);
     if (ev.kind === 'end') ended = true;
     fired++;
   }
@@ -246,7 +247,7 @@ async function poll(env, opener) {
  * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
  * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
  */
-async function broadcast(env, ev, gameId) {
+async function broadcast(env, ev, gameId, eventId) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) return;
 
@@ -257,7 +258,11 @@ async function broadcast(env, ev, gameId) {
     isHome: ev.isHome,
     title: ev.title,
     body: ev.body,
-    // sw.js 가 알림 tag 를 경기 단위로 나누는 데 쓴다. 없으면 어제 경기의
+    // sw.js 가 두 곳에 쓴다. 알림 tag(같은 이벤트를 다시 보내도 같은 tag 라
+    // 제자리 갱신될 뿐 두 번 뜨지 않는다)와 /api/delivered 배달 확인.
+    // 재발송을 붙일 때 이 id 가 중복 표시를 막는 유일한 장치다.
+    id: eventId,
+    // 위 id 가 없는 payload(테스트 알림)를 위한 tag 재료. 없으면 어제 경기의
     // 같은 종류 알림을 덮어써 새 알림이 안 뜬 것처럼 보인다.
     gameId,
     ts: Date.now(),
@@ -451,6 +456,26 @@ async function handleApi(request, env, url) {
 
     await updateSettings(env.DB, req.endpoint, patch);
     return json({ ok: true, settings: await getSettings(env.DB, req.endpoint) });
+  }
+
+  /*
+   * ── 배달 확인 ──
+   * sw.js 가 알림을 실제로 띄운 뒤 부른다. 서버는 FCM 에 넘긴 것까지만 알 수
+   * 있어(broadcast 의 fetch OK), 그 뒤 단말에 뜨지 않는 유실을 이 신호 없이는
+   * 재지 못한다. 등록된 구독만 받는다(requireSubscription) — 아무나 남의
+   * 이벤트를 "봤다"로 만들지 못하게.
+   */
+  if (path === '/api/delivered' && method === 'POST') {
+    const req = await requireSubscription(request, env);
+    if (req.error) return req.error;
+
+    const id = req.body.id;
+    if (!Number.isInteger(id) || id <= 0) {
+      return json({ error: '이벤트 id 가 필요합니다.' }, 400);
+    }
+
+    await markDelivered(env.DB, id);
+    return json({ ok: true });
   }
 
   /* ── 테스트 알림 ── */
