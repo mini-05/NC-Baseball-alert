@@ -21,6 +21,17 @@ export const KIND_COLUMN = {
   end: 'on_end',
 };
 
+/**
+ * events.kind 에 저장된 기록용 값을 발송 종류로 되돌린다.
+ *
+ * 저장할 때 recordKind 로 갈라지므로(아래 push 참고) 실점은 concede 로 남는다.
+ * 그 값을 그대로 subscribersFor 에 넘기면 KIND_COLUMN 에 없어 조용히 빈 배열이
+ * 돌아온다 — 저장된 이벤트를 다시 보낼 때 실점만 발송이 안 되는 식으로 어긋난다.
+ */
+export function dispatchKindOf(recordKind) {
+  return recordKind === 'concede' ? 'score' : recordKind;
+}
+
 /** 시리즈 범위 → subscriptions 테이블의 on/off 컬럼명 */
 export const SCOPES = ['regular', 'postseason'];
 export const SCOPE_COLUMN = {
