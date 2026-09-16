@@ -247,6 +247,54 @@ export async function insertEvent(db, game, ev) {
  * @returns {Promise<boolean>} 이번 호출로 채워졌으면 true. 이미 채워져 있었거나
  *   그런 id 가 없으면 false — 어느 쪽이든 호출부가 구분할 필요는 없다.
  */
+/**
+ * 배달 확인이 안 온 이벤트를 재발송 대상으로 골라 온다.
+ *
+ * 창을 두 겹으로 좁힌다.
+ *   olderThan  발송 직후는 뺀다. 확인이 늦게 오는 경우가 있어(2026-09-02 실측
+ *              2분 53초) 너무 이르면 멀쩡히 받은 알림을 다시 보내게 된다.
+ *   newerThan  한참 지난 것은 포기한다. 경기가 끝나고 한참 뒤에 뜨는 알림은
+ *              놓친 것을 알리는 값보다 혼란이 크다.
+ *
+ * resent_at 이 비어 있는 것만 고른다 — 재발송은 이벤트당 한 번이다.
+ *
+ * isHome 은 subscribersFor 가 "홈경기만 받기" 설정을 거르는 데 필요하다.
+ * events 에는 없고 game_state 에만 있어 join 해서 구한다.
+ */
+export async function listUndelivered(db, teamCode, { olderThan, newerThan }) {
+  const { results } = await db
+    .prepare(
+      `SELECT e.id, e.kind, e.series, e.title, e.body, e.game_id, g.home_code
+         FROM events e
+         JOIN game_state g ON g.game_id = e.game_id
+        WHERE e.delivered_at IS NULL
+          AND e.resent_at IS NULL
+          AND e.created_at <= ?
+          AND e.created_at >= ?
+        ORDER BY e.id`,
+    )
+    .bind(olderThan, newerThan)
+    .all();
+
+  return (results ?? []).map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    series: r.series,
+    title: r.title,
+    body: r.body,
+    gameId: r.game_id,
+    isHome: r.home_code === teamCode,
+  }));
+}
+
+/** 재발송했음을 남긴다. 이 값이 있으면 다시 고르지 않는다(이벤트당 1회). */
+export async function markResent(db, eventId) {
+  await db
+    .prepare(`UPDATE events SET resent_at = ? WHERE id = ?`)
+    .bind(nowIso(), eventId)
+    .run();
+}
+
 export async function markDelivered(db, eventId) {
   const res = await db
     .prepare(`UPDATE events SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL`)

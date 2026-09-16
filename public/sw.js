@@ -96,6 +96,26 @@ self.addEventListener('push', (event) => {
       data: { url: '/' },
     };
 
+    /*
+     * 재발송이면 이미 떠 있는 알림인지 단말이 먼저 확인한다.
+     *
+     * 서버는 "배달 확인이 안 왔다"까지만 알 수 있고, 그 확인 자체가 실패할
+     * 때가 있다(2026-09-02: 화면에는 떴는데 확인만 안 올라간 건). 서버 판단만
+     * 믿고 다시 띄우면 멀쩡히 본 알림이 또 울린다. 알림함에 같은 tag 가 남아
+     * 있으면 이미 받은 것으로 보고 조용히 넘기고, 확인만 다시 올려 보낸다.
+     *
+     * 사용자가 읽고 지운 뒤에 재발송이 오면 알림함에 없으므로 다시 뜬다.
+     * 놓친 알림을 살리는 것이 목적이라 그 편을 택했다 — 반대로 하면 정작
+     * 못 받은 알림도 안 뜬다.
+     */
+    if (data.resend) {
+      const already = await self.registration.getNotifications({ tag: options.tag });
+      if (already.length > 0) {
+        await reportDelivered(data.id);
+        return;
+      }
+    }
+
     await Promise.all([
       self.registration.showNotification(data.title ?? 'NC 다이노스', options),
       // 앱이 열려 있으면 화면도 그 자리에서 갱신하게 알린다 — 알림만 뜨고

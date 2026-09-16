@@ -44,7 +44,11 @@ CREATE TABLE IF NOT EXISTS events (
   -- 차이가 곧 배달 지연이고, 끝내 NULL 이면 유실이다.
   -- 여러 구독 중 첫 응답만 남긴다(이벤트 단위). 구독별로 따로 재려면 별도
   -- 테이블이 필요한데, 지금 구독은 몇 건뿐이라 그 비용을 들일 단계가 아니다.
-  delivered_at TEXT
+  delivered_at TEXT,
+  -- 배달 확인이 안 와 다시 보낸 시각. 재발송은 이벤트당 한 번뿐이라, 이 값이
+  -- 채워졌으면 다시 고르지 않는다. 없애고 delivered_at 만 보면 확인이 끝내
+  -- 안 오는 구독(꺼진 기기 등) 때문에 매 틱마다 같은 발송이 되풀이된다.
+  resent_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(game_date DESC, id DESC);
@@ -53,6 +57,12 @@ CREATE INDEX IF NOT EXISTS idx_events_date ON events(game_date DESC, id DESC);
 -- 찾는다. 위 idx_events_date 는 game_date 로 시작해 이 조회에 쓰이지 못해,
 -- 인덱스가 없으면 매 크론 틱마다 events 전체를 스캔하게 된다.
 CREATE INDEX IF NOT EXISTS idx_events_game ON events(game_id, kind);
+
+-- 재발송 대상(배달 확인도 재발송 기록도 없는 이벤트)을 매 틱 찾는다. 부분
+-- 인덱스라 대상이 되는 잠깐 동안만 행이 들어가고, 확인이 오면 빠진다 —
+-- 평소에는 비어 있어 조회가 즉시 끝나고 인덱스 자체도 거의 자리를 안 쓴다.
+CREATE INDEX IF NOT EXISTS idx_events_undelivered ON events(created_at)
+  WHERE delivered_at IS NULL AND resent_at IS NULL;
 
 -- 푸시 구독. 알림 종류별 on/off 와 시리즈 범위 설정을 구독 단위로 보관한다.
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -113,3 +123,4 @@ UPDATE events SET kind = 'concede'
 -- ALTER TABLE 에는 IF NOT EXISTS 가 없어 여기 그대로 두면 두 번째 db:init 이
 -- "duplicate column" 으로 실패하므로 주석으로만 남긴다.
 --   ALTER TABLE events ADD COLUMN delivered_at TEXT;
+--   ALTER TABLE events ADD COLUMN resent_at TEXT;

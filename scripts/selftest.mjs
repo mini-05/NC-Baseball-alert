@@ -18,7 +18,9 @@ import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, 
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
 import { boardCoversScore } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
-import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered } from '../src/db.js';
+import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
+         listUndelivered, markResent } from '../src/db.js';
+import { dispatchKindOf } from '../src/detect.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -941,6 +943,9 @@ function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}, fetchMode 
       addEventListener: (type, fn) => { listeners[type] = fn; },
       registration: {
         showNotification: (title, opts) => { notifications.push({ title, opts }); return Promise.resolve(); },
+        // 알림함 흉내 — 이미 띄운 것 중 같은 tag 를 돌려준다. 재발송이 왔을 때
+        // sw.js 가 "이미 받은 알림인지" 판단하는 데 쓴다.
+        getNotifications: async ({ tag }) => notifications.filter((n) => n.opts.tag === tag),
         pushManager: { getSubscription: async () => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/TEST' }) },
       },
       clients: { matchAll: async () => [] },
@@ -1084,6 +1089,40 @@ async function testServiceWorkerVibrate() {
     check('배달 확인 실패가 알림을 막지 않는다', outcome === 'RESOLVED' && notifications.length === 1,
       `${outcome}, ${notifications.length}건`);
   }
+
+  /*
+   * ── 재발송 ──
+   * 서버의 "확인이 안 왔다"는 판단은 틀릴 수 있다(2026-09-02: 화면에는 떴는데
+   * 확인만 실패). 그래서 다시 띄울지는 단말이 알림함을 보고 정한다.
+   */
+  {
+    const { push, notifications, acks } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 75, title: 't', body: 'b', ts: 1 });
+    check('재발송 전: 알림 1건', notifications.length === 1);
+
+    await push({ kind: 'score', id: 75, title: 't', body: 'b', ts: 2, resend: true });
+    check('이미 떠 있으면 재발송으로 다시 울리지 않는다', notifications.length === 1,
+      `${notifications.length}건`);
+    check('대신 배달 확인을 다시 올린다 (서버가 그만 보내도록)',
+      acks.filter((a) => a.body.id === 75).length === 2,
+      JSON.stringify(acks.map((a) => a.body.id)));
+  }
+  {
+    // 알림함에 없으면(못 받았거나 사용자가 지웠거나) 재발송은 정상적으로 뜬다.
+    // 이게 이 기능의 목적이다 — 놓친 알림을 살리는 것.
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'end', id: 76, title: 't', body: 'b', ts: 1, resend: true });
+    check('알림함에 없으면 재발송은 정상적으로 뜬다', notifications.length === 1,
+      `${notifications.length}건`);
+  }
+  {
+    // 다른 이벤트가 떠 있다고 해서 이 이벤트를 받은 것은 아니다 — tag 로 갈린다.
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 80, title: 't', body: 'b', ts: 1 });
+    await push({ kind: 'score', id: 81, title: 't', body: 'b', ts: 2, resend: true });
+    check('다른 이벤트가 떠 있어도 이 이벤트는 뜬다', notifications.length === 2,
+      `${notifications.length}건`);
+  }
 }
 
 /* ══ 6-c. 배달 확인 — events.delivered_at ══ */
@@ -1124,6 +1163,57 @@ async function testDelivered() {
 
   const already = fakeWriteDb({ changes: 0 });
   check('이미 채워져 있거나 없는 id 면 false', !(await markDelivered(already, 66)));
+
+  // ── 재발송 대상 고르기 ──
+  const picked = {
+    prepare: (sql) => ({
+      _sql: sql,
+      bind(...args) { this._args = args; return this; },
+      async all() {
+        return { results: [
+          { id: 75, kind: 'concede', series: 'regular', title: 't', body: 'b',
+            game_id: '20260902HTNC02026', home_code: 'NC' },
+        ] };
+      },
+    }),
+  };
+  const rows = await listUndelivered(picked, 'NC', { olderThan: 'B', newerThan: 'A' });
+  check('재발송 대상은 홈/원정까지 풀어서 준다',
+    rows[0].id === 75 && rows[0].isHome === true && rows[0].gameId === '20260902HTNC02026',
+    JSON.stringify(rows[0]));
+
+  const away = await listUndelivered(picked, 'LG', { olderThan: 'B', newerThan: 'A' });
+  check('우리 팀이 홈이 아니면 isHome=false', away[0].isHome === false);
+
+  /*
+   * 조건절을 눈으로 확인한다. 하나라도 빠지면 조용히 어긋난다 —
+   * resent_at 을 빼면 매 틱 같은 알림이 다시 나가고, 창을 빼면 방금 보낸
+   * 알림까지 대상이 된다.
+   */
+  let q = '';
+  await listUndelivered(
+    { prepare: (sql) => { q = sql; return { bind() { return this; }, async all() { return { results: [] }; } }; } },
+    'NC',
+    { olderThan: 'B', newerThan: 'A' },
+  );
+  check('배달 확인이 없는 것만', /delivered_at IS NULL/.test(q));
+  check('아직 재발송 안 한 것만', /resent_at IS NULL/.test(q));
+  check('창 밖은 제외', /created_at <= \?/.test(q) && /created_at >= \?/.test(q), q.replace(/\s+/g, ' '));
+
+  const resentDb = fakeWriteDb({ changes: 1 });
+  await markResent(resentDb, 75);
+  check('markResent 는 그 행만 표시한다',
+    /UPDATE events SET resent_at = \? WHERE id = \?/.test(resentDb.calls[0].sql)
+      && resentDb.calls[0].args[1] === 75,
+    resentDb.calls[0].sql);
+
+  /*
+   * events.kind 는 기록용 값이라 실점이 concede 로 남는다. 되돌리지 않고
+   * 발송하면 KIND_COLUMN 에 없어 subscribersFor 가 빈 배열을 주고, 실점
+   * 알림만 조용히 재발송되지 않는다.
+   */
+  check('재발송 때 concede 는 score 로 되돌린다', dispatchKindOf('concede') === 'score');
+  check('나머지 종류는 그대로', dispatchKindOf('end') === 'end' && dispatchKindOf('start') === 'start');
 }
 
 /* ══ 실행 ══ */

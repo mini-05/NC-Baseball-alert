@@ -6,9 +6,9 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
-  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches,
+  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, isPostseason,
 } from './kbo.js';
-import { detectEvents, KINDS, SCOPES } from './detect.js';
+import { detectEvents, dispatchKindOf, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
   loadDailyPlan, pollWindowGames, loadStandings, loadSchedule, loadTodayStatus,
@@ -19,7 +19,7 @@ import {
   loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
-  allSettledBefore, markDelivered,
+  allSettledBefore, markDelivered, listUndelivered, markResent,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -55,6 +55,20 @@ const POLL_GAP_MS = 30 * 1000;
  */
 const BOARD_RETRY_MS = 2 * 1000;
 
+/**
+ * 배달 확인이 이만큼 지나도 안 오면 다시 보낸다.
+ *
+ * 확인이 늦게 오는 일이 있다 — 2026-09-02 에 2분 53초 걸린 사례가 있었다.
+ * 그보다 넉넉히 잡아야 멀쩡히 받은 알림을 다시 보내는 일이 줄어든다.
+ */
+const RESEND_AFTER_MS = 5 * 60 * 1000;
+
+/**
+ * 이보다 오래된 이벤트는 포기한다. 경기가 한참 지난 뒤 뒤늦게 뜨는 알림은
+ * 놓친 것을 알리는 값보다 혼란이 크다.
+ */
+const RESEND_GIVE_UP_MS = 30 * 60 * 1000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -75,6 +89,14 @@ async function tick(env) {
   if (watching.length === 0) return { skipped: 'outside-window' };
 
   /*
+   * 배달 확인이 안 온 알림을 먼저 챙긴다. 아래 all-finished 판단보다 앞서야
+   * 한다 — 놓치는 알림 중에는 종료 알림이 있고, 그 뒤 구간이 바로 감시를
+   * 접는 구간이다. 뒤에 두면 정작 필요한 때 못 돈다.
+   */
+  const resent = await resendUndelivered(env)
+    .catch((err) => { console.error('resend failed', err); return 0; });
+
+  /*
    * 시간 창 안이라도 감시 대상이 모두 끝났으면 더 볼 이유가 없다. 종료 직후
    * 바로 끊지 않고 FINISH_COOLDOWN_MIN 만큼 더 지켜본다 — 이 확인은 경기
    * 시간대에만 도므로(위 두 return 이 먼저 걸러 낸다) 평소에는 부담이 없다.
@@ -84,7 +106,7 @@ async function tick(env) {
    */
   const cutoff = new Date(Date.now() - FINISH_COOLDOWN_MIN * 60 * 1000).toISOString();
   if (await allSettledBefore(env.DB, watching.map((g) => g.gameId), cutoff)) {
-    return { skipped: 'all-finished' };
+    return { skipped: 'all-finished', resent };
   }
 
   // 앞선 폴링이 실패해도 남은 폴링은 그대로 진행한다. 한 번의 조회 실패가
@@ -99,7 +121,7 @@ async function tick(env) {
       }),
     );
   }
-  return { runs };
+  return { runs, resent };
 }
 
 /**
@@ -247,7 +269,55 @@ async function poll(env, opener) {
  * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
  * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
  */
-async function broadcast(env, ev, gameId, eventId) {
+/**
+ * 배달 확인이 안 온 알림을 한 번 더 보낸다.
+ *
+ * 서버는 FCM 이 받았다는 것까지만 알 수 있어, 그 뒤 단말에 안 뜨는 유실을
+ * 스스로 알아채지 못한다(2026-08-30·09-01·09-02·09-09 각 1건 확인). sw.js 가
+ * 보내오는 배달 확인이 창 안에 안 오면 못 받은 것으로 보고 다시 보낸다.
+ *
+ * 다만 그 확인 신호 자체가 완전하지 않다 — 화면에는 떴는데 확인만 실패한
+ * 경우가 있었다(2026-09-02 id 74). 그래서 여기서는 "안 받았을 수 있다"까지만
+ * 판단하고, 실제로 다시 띄울지는 단말이 정한다(sw.js 가 payload.resend 를 보고
+ * 알림함에 같은 tag 가 남아 있는지 확인한다). 서버가 단정하면 멀쩡히 본 알림이
+ * 두 번 울린다.
+ */
+async function resendUndelivered(env) {
+  const now = Date.now();
+  const pending = await listUndelivered(env.DB, env.TEAM_CODE, {
+    olderThan: new Date(now - RESEND_AFTER_MS).toISOString(),
+    newerThan: new Date(now - RESEND_GIVE_UP_MS).toISOString(),
+  });
+
+  for (const ev of pending) {
+    /*
+     * 보내기 전에 먼저 표시한다. 발송이 실패해도 다시 시도하지 않는다 —
+     * 재발송은 이벤트당 한 번이고, 실패를 되풀이하면 창이 닫힐 때까지 매 틱
+     * 같은 발송이 반복된다. 한 번 놓친 알림보다 그쪽이 나쁘다.
+     */
+    await markResent(env.DB, ev.id);
+    await broadcast(
+      env,
+      {
+        ...ev,
+        // events.kind 는 기록용이라 실점이 concede 로 남아 있다. 되돌리지 않으면
+        // subscribersFor 가 빈 배열을 줘 실점만 조용히 재발송되지 않는다.
+        kind: dispatchKindOf(ev.kind),
+        scope: isPostseason(ev.series) ? 'postseason' : 'regular',
+      },
+      ev.gameId,
+      ev.id,
+      true,
+    );
+  }
+
+  if (pending.length > 0) {
+    console.log('resent undelivered', pending.map((e) => `${e.id}:${e.kind}`).join(','));
+  }
+  return pending.length;
+}
+
+async function broadcast(env, ev, gameId, eventId, resend = false) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) return;
 
@@ -267,6 +337,10 @@ async function broadcast(env, ev, gameId, eventId) {
     gameId,
     ts: Date.now(),
   };
+
+  // 재발송임을 알려 sw.js 가 이미 떠 있는 알림인지 먼저 확인하게 한다.
+  // 처음 보내는 알림에는 넣지 않는다 — 그쪽은 확인할 것이 없다.
+  if (resend) payload.resend = true;
 
   /*
    * 2026-08-30 종료 알림 미표시 건 조사용 — 서버가 FCM 에 전달을 확인한 시각과
