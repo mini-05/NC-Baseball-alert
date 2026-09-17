@@ -50,6 +50,17 @@ const CACHE_KEEP_DAYS = 365;
 const POLL_LOG_KEEP_DAYS = 183;
 
 /**
+ * 개막일을 못 정했을 때(개막 전이라 순위표에 경기가 없거나, 조회 실패) 다시
+ * 물어보기까지의 간격.
+ *
+ * 이 경우도 캐시해야 한다 — tick() 이 매 틱 resolveSeasonOpener 를 먼저 부르므로,
+ * 못 정한 결과를 안 남기면 해가 바뀐 1월부터 개막일까지 석 달 동안 1분마다
+ * 네이버 순위 API 를 두드린다(하루 1,440회). 개막일은 하루 안에 바뀌지
+ * 않으니 이 정도면 충분히 자주 다시 본다.
+ */
+const OPENER_RETRY_MS = 6 * HOUR;
+
+/**
  * 정규시즌 개막일을 알아낸다.
  *
  * 시범경기는 정규시즌과 형식이 완전히 같아 gameId 만으로는 구분할 수 없다.
@@ -67,36 +78,42 @@ export async function resolveSeasonOpener(env, year) {
   const cached = await getCache(env.DB, key);
   if (cached !== null) return cached.date;
 
+  let date = null;
   try {
     const standings = await fetchStandings(year);
     const me = standings.teams.find((t) => t.code === env.TEAM_CODE);
-    if (!me || !me.games) return null; // 아직 정규시즌 경기가 없다
 
-    // 시즌 전체 일정이 필요하다. 한 달 단위로 쪼개 받으므로 요청이 여러 번 나간다.
-    // 30일 캐시라 시즌당 몇 번만 실행된다.
-    const all = await fetchGames(`${year}-01-01`, `${year}-12-31`);
+    // me.games 가 0 이면 아직 정규시즌 경기가 없다 — date 는 null 로 남는다.
+    if (me?.games) {
+      // 시즌 전체 일정이 필요하다. 한 달 단위로 쪼개 받으므로 요청이 여러 번 나간다.
+      // 30일 캐시라 시즌당 몇 번만 실행된다.
+      const all = await fetchGames(`${year}-01-01`, `${year}-12-31`);
 
-    const done = filterTeam(all, env.TEAM_CODE)
-      .filter(
-        (g) =>
-          seasonYearOf(g.gameId) === year &&
-          g.phase === 'result' &&
-          !g.cancelled &&
-          TEAM_CODES.has(g.homeCode) &&
-          TEAM_CODES.has(g.awayCode),
-      )
-      .sort((a, b) => (a.gameDate + a.gameId).localeCompare(b.gameDate + b.gameId));
+      const done = filterTeam(all, env.TEAM_CODE)
+        .filter(
+          (g) =>
+            seasonYearOf(g.gameId) === year &&
+            g.phase === 'result' &&
+            !g.cancelled &&
+            TEAM_CODES.has(g.homeCode) &&
+            TEAM_CODES.has(g.awayCode),
+        )
+        .sort((a, b) => (a.gameDate + a.gameId).localeCompare(b.gameDate + b.gameId));
 
-    const skip = done.length - me.games;
-    // skip 이 음수면 순위표가 일정보다 앞서 있다는 뜻이라 신뢰할 수 없다.
-    const date = skip >= 0 && skip < done.length ? done[skip].gameDate : null;
-
-    await putCache(env.DB, key, { date }, 30 * 24 * HOUR);
-    return date;
+      const skip = done.length - me.games;
+      // skip 이 음수면 순위표가 일정보다 앞서 있다는 뜻이라 신뢰할 수 없다.
+      if (skip >= 0 && skip < done.length) date = done[skip].gameDate;
+    }
   } catch (err) {
     console.error('season opener resolution failed', err.message);
-    return null;
   }
+
+  // 못 정한 결과(null)도 짧게 캐시한다. 안 그러면 위 OPENER_RETRY_MS 주석대로
+  // 개막 전 석 달 동안 매 틱 외부 호출이 나간다. 캐시 쓰기 실패는 삼킨다 —
+  // 이 함수는 원래 예외를 내지 않고, 호출부는 null 로도 정상 진행한다.
+  await putCache(env.DB, key, { date }, date ? 30 * 24 * HOUR : OPENER_RETRY_MS)
+    .catch((err) => console.error('season opener cache failed', err.message));
+  return date;
 }
 
 /**

@@ -266,10 +266,6 @@ async function poll(env, opener) {
 }
 
 /**
- * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
- * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
- */
-/**
  * 배달 확인이 안 온 알림을 한 번 더 보낸다.
  *
  * 서버는 FCM 이 받았다는 것까지만 알 수 있어, 그 뒤 단말에 안 뜨는 유실을
@@ -317,6 +313,10 @@ async function resendUndelivered(env) {
   return pending.length;
 }
 
+/**
+ * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
+ * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
+ */
 async function broadcast(env, ev, gameId, eventId, resend = false) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) return;
