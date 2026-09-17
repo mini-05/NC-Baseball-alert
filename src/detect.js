@@ -144,8 +144,19 @@ export function detectEvents(prev, cur, teamCode) {
   const teamGained = p.teamScore - pPrev.teamScore;
   const oppGained = p.oppScore - pPrev.oppScore;
 
-  if (cur.phase === 'live' && (teamGained !== 0 || oppGained !== 0)) {
-    const ours = teamGained > 0 && oppGained === 0;
+  /*
+   * 점수가 *올라갔을 때만* 알린다. 변화만 보면(!== 0) 네이버가 기록을 정정하거나
+   * 일시적으로 옛 값·0:0 을 돌려줄 때 말이 안 되는 알림이 나간다 — 실제로
+   * "삼성 0점 득점", "삼성 -2점 득점" 이 만들어지는 것을 확인했다. dedup_key 에
+   * 점수 조합이 들어가 있어 한 번 나가면 되돌릴 수도 없다.
+   *
+   * 내려간 점수 자체는 알릴 것이 없으므로 조용히 넘긴다. 전광판·스냅샷은 이
+   * 판단과 무관하게 호출부에서 최신 값으로 갱신된다(index.js poll).
+   */
+  if (cur.phase === 'live' && (teamGained > 0 || oppGained > 0)) {
+    // oppGained 가 음수인 경우(상대 점수 하향)까지 우리 득점으로 본다.
+    // === 0 으로 묶으면 우리가 득점한 틱인데 상대 득점 문구가 나간다.
+    const ours = teamGained > 0 && oppGained <= 0;
     const both = teamGained > 0 && oppGained > 0;
 
     /*
