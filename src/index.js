@@ -300,6 +300,8 @@ async function resendUndelivered(env) {
         // subscribersFor 가 빈 배열을 줘 실점만 조용히 재발송되지 않는다.
         kind: dispatchKindOf(ev.kind),
         scope: isPostseason(ev.series) ? 'postseason' : 'regular',
+        // 알림함에 재발송 시각이 아니라 원래 감지 시각이 찍히게 한다.
+        ts: Date.parse(ev.createdAt) || Date.now(),
       },
       ev.gameId,
       ev.id,
@@ -335,7 +337,15 @@ async function broadcast(env, ev, gameId, eventId, resend = false) {
     // 위 id 가 없는 payload(테스트 알림)를 위한 tag 재료. 없으면 어제 경기의
     // 같은 종류 알림을 덮어써 새 알림이 안 뜬 것처럼 보인다.
     gameId,
-    ts: Date.now(),
+    /*
+     * 알림함에 찍히는 시각(sw.js 의 notification timestamp).
+     *
+     * 재발송은 원래 감지 시각을 그대로 싣는다 — Date.now() 를 쓰면 5분 뒤
+     * 재발송 시각이 찍혀, 제때 감지한 알림이 그만큼 늦은 것처럼 보인다.
+     * 2026-09-17 실측: 감지 19:28:34 → 재발송 19:33:59 → 알림함 "오후 7:33".
+     * 경쟁 앱과 1분 차이였는데 6분 뒤처진 것으로 읽혔다.
+     */
+    ts: ev.ts ?? Date.now(),
   };
 
   // 재발송임을 알려 sw.js 가 이미 떠 있는 알림인지 먼저 확인하게 한다.
