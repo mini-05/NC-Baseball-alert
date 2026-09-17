@@ -17,7 +17,7 @@ import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, 
          inningSumMatches } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener } from '../src/season.js';
 import { boardCoversScore } from '../src/index.js';
-import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
+import { validateEndpoint, validateKeys, checkOrigin, readJson } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
          listUndelivered, markResent } from '../src/db.js';
 import { dispatchKindOf } from '../src/detect.js';
@@ -734,6 +734,34 @@ function testSecurity() {
   check('Origin 없으면 통과', checkOrigin(req(null), url));
 }
 
+/**
+ * 본문 크기 상한 검사가 문자 수가 아니라 실제 바이트 수로 걸리는지.
+ *
+ * Content-Length 헤더 없이 오는 요청은 declared 검사를 피해 text.length 검사만
+ * 남는다. UTF-8 에서 한글은 3바이트라, text.length 로 재면 같은 4096자라도
+ * ASCII 는 4KB, 한글은 최대 12KB 까지 통과해 상한이 사실상 무력화된다.
+ */
+async function testReadJsonByteLimit() {
+  const req = (text) => ({
+    headers: { get: () => null }, // Content-Length 없음 — text.text() 검사만 남는 경로
+    text: async () => text,
+  });
+
+  // 한글 1400자 ≈ 4200바이트: 문자 수로는 상한(4096) 안이지만 바이트로는 넘는다.
+  const asciiJson = `{"a":"${'a'.repeat(4000)}"}`; // 문자 수·바이트 수 모두 상한 안
+  const koreanOverflow = `{"a":"${'가'.repeat(1400)}"}`; // 문자 수는 상한 안, 바이트는 초과
+
+  check(
+    '문자 수 기준으로는 상한 안인 한글 본문도 바이트 기준으로 거부',
+    !(await readJson(req(koreanOverflow))).ok,
+    `문자 수 ${koreanOverflow.length}, 바이트 ${new TextEncoder().encode(koreanOverflow).byteLength}`,
+  );
+  check(
+    'ASCII 상한 근처 정상 본문은 그대로 통과',
+    (await readJson(req(asciiJson))).ok,
+  );
+}
+
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
 
 /**
@@ -1278,6 +1306,7 @@ console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
 console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
+console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLimit();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
