@@ -239,15 +239,6 @@ export async function insertEvent(db, game, ev) {
 }
 
 /**
- * 단말이 알림을 실제로 띄웠다고 알려오면 그 시각을 남긴다.
- *
- * 첫 응답만 남긴다(delivered_at IS NULL 조건) — 구독이 여럿이어도 "누군가는
- * 봤다"까지만 기록한다. 되돌릴 일이 없는 값이라 덮어쓰지 않는다.
- *
- * @returns {Promise<boolean>} 이번 호출로 채워졌으면 true. 이미 채워져 있었거나
- *   그런 id 가 없으면 false — 어느 쪽이든 호출부가 구분할 필요는 없다.
- */
-/**
  * 배달 확인이 안 온 이벤트를 재발송 대상으로 골라 온다.
  *
  * 창을 두 겹으로 좁힌다.
@@ -295,6 +286,15 @@ export async function markResent(db, eventId) {
     .run();
 }
 
+/**
+ * 단말이 알림을 실제로 띄웠다고 알려오면 그 시각을 남긴다.
+ *
+ * 첫 응답만 남긴다(delivered_at IS NULL 조건) — 구독이 여럿이어도 "누군가는
+ * 봤다"까지만 기록한다. 되돌릴 일이 없는 값이라 덮어쓰지 않는다.
+ *
+ * @returns {Promise<boolean>} 이번 호출로 채워졌으면 true. 이미 채워져 있었거나
+ *   그런 id 가 없으면 false — 어느 쪽이든 호출부가 구분할 필요는 없다.
+ */
 export async function markDelivered(db, eventId) {
   const res = await db
     .prepare(`UPDATE events SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL`)

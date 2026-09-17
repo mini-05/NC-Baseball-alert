@@ -15,9 +15,9 @@ import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf,
          inningSumMatches } from '../src/kbo.js';
-import { isPollWindow, pollWindowGames, loadSchedule, loadStandings } from '../src/season.js';
+import { isPollWindow, pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener } from '../src/season.js';
 import { boardCoversScore } from '../src/index.js';
-import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
+import { validateEndpoint, validateKeys, checkOrigin, readJson } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
          listUndelivered, markResent } from '../src/db.js';
 import { dispatchKindOf } from '../src/detect.js';
@@ -540,6 +540,11 @@ function fakeCacheDb(rows = {}) {
         async first() { return rows[this._args[0]] ?? null; },
         async run() {
           if (this._sql.startsWith('DELETE')) deletes.push(this._args);
+          // putCache 의 upsert. 저장된 값을 다음 first() 가 읽을 수 있게 남긴다.
+          if (this._sql.includes('INSERT INTO cache')) {
+            const [key, value, expires_at] = this._args;
+            rows[key] = { value, expires_at };
+          }
           return {};
         },
       };
@@ -622,6 +627,51 @@ async function testScheduleResilience() {
   }
 }
 
+/**
+ * 개막일을 못 정한 결과도 캐시되는지.
+ *
+ * tick() 이 매 틱 resolveSeasonOpener 를 먼저 부르므로, 개막 전(순위표 경기 수 0)이나
+ * 조회 실패를 캐시하지 않으면 1분마다 외부 호출이 나간다 — 이 검사가 그 회귀를 막는다.
+ */
+async function testOpenerCaching() {
+  const originalFetch = globalThis.fetch;
+  try {
+    let fetches = 0;
+    const standingsWith = (gameCount) => async () => {
+      fetches++;
+      return {
+        ok: true,
+        json: async () => ({
+          success: true,
+          result: { seasonTeamStats: [{ teamId: 'NC', teamName: 'NC', ranking: 1, gameCount }] },
+        }),
+      };
+    };
+
+    // 개막 전: 순위표는 오지만 경기 수가 0
+    globalThis.fetch = standingsWith(0);
+    const env = { DB: fakeCacheDb(), TEAM_CODE: 'NC' };
+    for (let i = 0; i < 5; i++) await resolveSeasonOpener(env, 2027);
+    check('개막 전 5틱 → 외부 호출 1회 (결과 null 도 캐시)', fetches === 1, `${fetches}회`);
+
+    // 조회 실패도 마찬가지
+    fetches = 0;
+    globalThis.fetch = async () => { fetches++; throw new Error('naver down'); };
+    const env2 = { DB: fakeCacheDb(), TEAM_CODE: 'NC' };
+    for (let i = 0; i < 5; i++) await resolveSeasonOpener(env2, 2027);
+    check('조회 실패 5틱 → 외부 호출 1회', fetches === 1, `${fetches}회`);
+
+    // 못 정한 결과는 짧게만 캐시된다 — 개막하면 곧 다시 물어봐야 한다.
+    const db3 = fakeCacheDb();
+    await resolveSeasonOpener({ DB: db3, TEAM_CODE: 'NC' }, 2027);
+    const row = await db3.prepare('SELECT value, expires_at FROM cache WHERE key = ?').bind('opener:2027').first();
+    const ttlH = (Date.parse(row?.expires_at ?? '') - Date.now()) / 3600000;
+    check('미확정 캐시는 하루 안에 만료', ttlH > 0 && ttlH < 24, `${ttlH.toFixed(1)}시간`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 /** 날짜별 캐시 청소가 지울 대상과 남길 대상을 올바르게 고르는지. */
 async function testCachePrune() {
   const db = fakeCacheDb();
@@ -682,6 +732,34 @@ function testSecurity() {
   check('같은 출처 통과', checkOrigin(req('https://app.example.com'), url));
   check('다른 출처 거부', !checkOrigin(req('https://evil.example.com'), url));
   check('Origin 없으면 통과', checkOrigin(req(null), url));
+}
+
+/**
+ * 본문 크기 상한 검사가 문자 수가 아니라 실제 바이트 수로 걸리는지.
+ *
+ * Content-Length 헤더 없이 오는 요청은 declared 검사를 피해 text.length 검사만
+ * 남는다. UTF-8 에서 한글은 3바이트라, text.length 로 재면 같은 4096자라도
+ * ASCII 는 4KB, 한글은 최대 12KB 까지 통과해 상한이 사실상 무력화된다.
+ */
+async function testReadJsonByteLimit() {
+  const req = (text) => ({
+    headers: { get: () => null }, // Content-Length 없음 — text.text() 검사만 남는 경로
+    text: async () => text,
+  });
+
+  // 한글 1400자 ≈ 4200바이트: 문자 수로는 상한(4096) 안이지만 바이트로는 넘는다.
+  const asciiJson = `{"a":"${'a'.repeat(4000)}"}`; // 문자 수·바이트 수 모두 상한 안
+  const koreanOverflow = `{"a":"${'가'.repeat(1400)}"}`; // 문자 수는 상한 안, 바이트는 초과
+
+  check(
+    '문자 수 기준으로는 상한 안인 한글 본문도 바이트 기준으로 거부',
+    !(await readJson(req(koreanOverflow))).ok,
+    `문자 수 ${koreanOverflow.length}, 바이트 ${new TextEncoder().encode(koreanOverflow).byteLength}`,
+  );
+  check(
+    'ASCII 상한 근처 정상 본문은 그대로 통과',
+    (await readJson(req(asciiJson))).ok,
+  );
 }
 
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
@@ -1228,9 +1306,11 @@ console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
 console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
+console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLimit();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
+console.log('\n[10-b] 개막일 미확정 캐시');    await testOpenerCaching();
 console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
 console.log('\n[11-b] 문자중계 종료 감지');   await testRelayFinish();
 console.log('\n[12] 서비스 워커 진동 설정');  await testServiceWorkerVibrate();

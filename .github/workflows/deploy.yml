@@ -3,6 +3,11 @@ name: Deploy
 on:
   push:
     branches: [main]
+  # PR 에서도 test job 을 돌린다. 이게 없으면 어떤 PR 도 머지 전에 테스트를
+  # 통과할 필요가 없어, main 에 들어간 뒤에야 실패를 알게 된다 — 배포는 막히지만
+  # 그때는 이미 main 이 깨진 상태다. deploy job 은 아래 if 로 push 에만 돈다.
+  pull_request:
+    branches: [main]
 
 # GITHUB_TOKEN 최소 권한.
 # 기본값은 저장소 쓰기까지 열려 있어, 워크플로 안에서 실행되는 코드가 탈취되면
@@ -11,8 +16,10 @@ permissions:
   contents: read
 
 # 배포가 겹치면 나중 것이 먼저 끝나 옛 코드가 최종본이 될 수 있다. 한 번에 하나만 돈다.
+# ref 로 묶으므로 main 푸시는 여전히 전부 한 그룹(= 순차 배포)이고, PR 검증만
+# PR 별로 갈려 배포를 기다리지 않는다.
 concurrency:
-  group: deploy
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -37,6 +44,9 @@ jobs:
 
   deploy:
     needs: test
+    # PR 에서는 검증까지만 하고 배포하지 않는다. 시크릿도 이 job 에만 있으므로,
+    # PR 실행 환경에는 애초에 자격 증명이 들어가지 않는다.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     # 이 environment 에 'Required reviewers' 를 걸면 배포 전에 승인이 필요해진다.
     # main 에 코드가 들어가는 것과 프로덕션에 나가는 것을 분리하는 마지막 관문이다.
