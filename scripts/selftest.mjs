@@ -1192,6 +1192,17 @@ async function testServiceWorkerVibrate() {
     await push({ kind: 'end', id: 76, title: 't', body: 'b', ts: 1, resend: true });
     check('알림함에 없으면 재발송은 정상적으로 뜬다', notifications.length === 1,
       `${notifications.length}건`);
+
+    /*
+     * 그때 찍히는 시각은 서버가 payload 에 넣어 준 ts 그대로여야 한다.
+     * 여기서 Date.now() 로 덮으면 5분 전에 감지한 알림이 방금 일어난 일처럼
+     * 보인다 — 2026-09-17 에 실제로 그렇게 읽혔다(감지 19:28, 알림함 7:33).
+     */
+    const detectedAt = Date.parse('2026-09-17T10:28:34.334Z');
+    await push({ kind: 'score', id: 77, title: 't', body: 'b', ts: detectedAt, resend: true });
+    check('재발송 알림은 서버가 준 감지 시각으로 찍힌다',
+      notifications.at(-1).opts.timestamp === detectedAt,
+      String(notifications.at(-1).opts.timestamp));
   }
   {
     // 다른 이벤트가 떠 있다고 해서 이 이벤트를 받은 것은 아니다 — tag 로 갈린다.
@@ -1250,7 +1261,8 @@ async function testDelivered() {
       async all() {
         return { results: [
           { id: 75, kind: 'concede', series: 'regular', title: 't', body: 'b',
-            game_id: '20260902HTNC02026', home_code: 'NC' },
+            game_id: '20260902HTNC02026', home_code: 'NC',
+            created_at: '2026-09-17T10:28:34.334Z' },
         ] };
       },
     }),
@@ -1262,6 +1274,16 @@ async function testDelivered() {
 
   const away = await listUndelivered(picked, 'LG', { olderThan: 'B', newerThan: 'A' });
   check('우리 팀이 홈이 아니면 isHome=false', away[0].isHome === false);
+
+  /*
+   * 재발송 알림의 시각은 재발송 시각이 아니라 원래 감지 시각이어야 한다.
+   *
+   * sw.js 가 이 값을 notification timestamp 로 써서 알림함에 찍는다. 재발송
+   * 시각을 쓰면 제때 감지한 알림이 5분 늦은 것처럼 보인다 — 2026-09-17 에
+   * 실제로 그렇게 읽혔다(감지 19:28:34, 알림함 "오후 7:33").
+   */
+  check('재발송 대상은 원래 감지 시각을 함께 준다',
+    rows[0].createdAt === '2026-09-17T10:28:34.334Z', rows[0].createdAt);
 
   /*
    * 조건절을 눈으로 확인한다. 하나라도 빠지면 조용히 어긋난다 —
@@ -1277,6 +1299,13 @@ async function testDelivered() {
   check('배달 확인이 없는 것만', /delivered_at IS NULL/.test(q));
   check('아직 재발송 안 한 것만', /resent_at IS NULL/.test(q));
   check('창 밖은 제외', /created_at <= \?/.test(q) && /created_at >= \?/.test(q), q.replace(/\s+/g, ' '));
+
+  // SELECT 목록에서 빠지면 위 createdAt 이 undefined 가 되고, 호출부의
+  // `Date.parse(ev.createdAt) || Date.now()` 가 조용히 재발송 시각으로 되돌아간다.
+  // WHERE 절에도 e.created_at 이 있으므로 SELECT~FROM 사이만 본다.
+  const selectList = /SELECT([^]*?)FROM/.exec(q)?.[1] ?? '';
+  check('원래 감지 시각을 SELECT 목록에 넣는다',
+    /e\.created_at/.test(selectList), selectList.replace(/\s+/g, ' ').trim());
 
   const resentDb = fakeWriteDb({ changes: 1 });
   await markResent(resentDb, 75);

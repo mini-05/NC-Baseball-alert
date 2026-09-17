@@ -251,11 +251,14 @@ export async function insertEvent(db, game, ev) {
  *
  * isHome 은 subscribersFor 가 "홈경기만 받기" 설정을 거르는 데 필요하다.
  * events 에는 없고 game_state 에만 있어 join 해서 구한다.
+ *
+ * created_at 은 재발송 알림에 원래 감지 시각을 싣기 위해 함께 가져온다
+ * (index.js broadcast 의 ts 참고).
  */
 export async function listUndelivered(db, teamCode, { olderThan, newerThan }) {
   const { results } = await db
     .prepare(
-      `SELECT e.id, e.kind, e.series, e.title, e.body, e.game_id, g.home_code
+      `SELECT e.id, e.kind, e.series, e.title, e.body, e.game_id, e.created_at, g.home_code
          FROM events e
          JOIN game_state g ON g.game_id = e.game_id
         WHERE e.delivered_at IS NULL
@@ -274,6 +277,7 @@ export async function listUndelivered(db, teamCode, { olderThan, newerThan }) {
     title: r.title,
     body: r.body,
     gameId: r.game_id,
+    createdAt: r.created_at,
     isHome: r.home_code === teamCode,
   }));
 }
