@@ -79,6 +79,18 @@ const SERIES_SHORT = {
   korean_series: '한국시리즈',
 };
 
+/**
+ * 연속 기록. 서버가 네이버의 continuousGameResult 를 그대로 넘겨준다(kbo.js).
+ * "3승" 처럼 오므로 "3연승" 으로 읽기 좋게 바꾼다.
+ *
+ * 비공식 API라 형식이 예고 없이 바뀔 수 있어, 아는 모양이 아니면 원문을 그대로
+ * 보여준다 — 빈칸으로 삼키면 값이 왔는데도 안 보이고, 무승부("1무")처럼 '연'을
+ * 붙이면 어색한 경우도 그대로 지나간다.
+ */
+function streakLabel(streak) {
+  return String(streak ?? '').replace(/^(\d+)([승패])$/, '$1연$2');
+}
+
 const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
 const VIBRATE_KEYS = ['start', 'cancel', 'score', 'end'];
 const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
@@ -311,6 +323,7 @@ function renderTable(standings) {
     if (tier) rows.push(el('p', { class: 'tier-label', text: tier.title }));
 
     const isMine = t.code === teamCode;
+    const streak = streakLabel(t.streak);
 
     // 팀명 바로 뒤에 붙인다. 따로 칸을 만들면 좁은 화면에서 이름이 밀린다.
     const mark = showMarks && t.todayGame
@@ -328,6 +341,11 @@ function renderTable(standings) {
         el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
         el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
         el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
+        // 연승은 초록, 연패는 빨강 — 경기 카드의 승/패 색(.verdict)과 같은 변수를 쓴다.
+        el('span', {
+          class: `tstreak${/승$/.test(streak) ? ' win' : /패$/.test(streak) ? ' lose' : ''}`,
+          text: streak,
+        }),
         el('span', { class: 'tleft', text: String(t.remaining ?? '') }),
       ),
     );
@@ -346,6 +364,7 @@ function renderTable(standings) {
         el('span', { class: 'trec', text: '승-무-패' }),
         el('span', { class: 'tpct', text: '승률' }),
         el('span', { class: 'tgb', text: '승차' }),
+        el('span', { class: 'tstreak', text: '연속' }),
         el('span', { class: 'tleft', text: '잔여' }),
       ),
       ...rows,
