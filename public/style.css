@@ -205,6 +205,32 @@ main {
 .panel { display: none; }
 .panel.is-active { display: block; }
 
+/*
+ * 탭 전환. 들어오는 쪽만 움직인다 — 나가는 패널까지 붙들고 있으려면 두 개를
+ * 동시에 띄워 겹쳐야 하고, 그러면 스크롤 위치와 sticky 계산이 한 번 더 꼬인다.
+ *
+ * 패널이 아니라 *직계 자식*에 건다. transform 은 자손의 position:sticky 기준을
+ * 자기 자신으로 바꿔 버려서, .panel 에 걸면 일정 탭의 .sched-fixed 가 스크롤된
+ * 상태로 돌아올 때 24px 튀는 것을 실측했다. 자식에 걸면 sticky 요소는 자기가
+ * 직접 움직일 뿐 기준이 바뀌지 않아 그 튐이 사라진다.
+ *
+ * 움직임은 transform·opacity 로만 준다 — 레이아웃을 건드리지 않아 싸다.
+ */
+@keyframes panel-enter-next {
+  from { opacity: 0; transform: translate3d(14px, 0, 0); }
+}
+@keyframes panel-enter-prev {
+  from { opacity: 0; transform: translate3d(-14px, 0, 0); }
+}
+
+.panel.is-active[data-enter='next'] > * { animation: panel-enter-next 220ms ease-out; }
+.panel.is-active[data-enter='prev'] > * { animation: panel-enter-prev 220ms ease-out; }
+
+/* 어지럼증 등으로 움직임을 줄여 달라고 한 기기에서는 전환을 끈다. */
+@media (prefers-reduced-motion: reduce) {
+  .panel.is-active[data-enter] > * { animation: none; }
+}
+
 /* caption-uppercase — 섹션 라벨 */
 .eyebrow {
   font-size: 12px;

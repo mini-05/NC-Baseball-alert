@@ -216,8 +216,27 @@ function activateTab(name) {
   const tab = tabs.find((t) => t.dataset.tab === name);
   if (!tab) return false;
 
+  /*
+   * 넘어가는 방향을 패널에 남겨 둔다(data-enter). 스와이프한 손가락 방향에서
+   * 내용이 따라 들어와야 두 화면이 옆으로 이어져 있다는 느낌이 난다.
+   *
+   * 방향을 여기서 정하므로 탭을 눌렀을 때도 같은 움직임이 난다 — 스와이프는
+   * 결국 .tab.click() 을 부르기 때문이다(아래 touchend 핸들러).
+   *
+   * 첫 렌더(from === -1)나 같은 탭을 다시 누른 경우(from === to)에는 붙이지
+   * 않는다. 움직일 이유가 없는데 움직이면 그게 더 어색하다.
+   */
+  const from = tabs.findIndex((t) => t.classList.contains('is-active'));
+  const to = tabs.indexOf(tab);
+  const enter = from === -1 || from === to ? null : to > from ? 'next' : 'prev';
+
   tabs.forEach((t) => t.classList.toggle('is-active', t === tab));
-  $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${name}`));
+  $$('.panel').forEach((p) => {
+    const on = p.id === `panel-${name}`;
+    if (on && enter) p.dataset.enter = enter;
+    else if (on) delete p.dataset.enter;
+    p.classList.toggle('is-active', on);
+  });
   return true;
 }
 

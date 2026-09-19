@@ -71,11 +71,17 @@
 
   <h1 class="display">경기 알림</h1>
 
-  <nav class="tabs" role="tablist">
-    <button class="tab is-active" data-tab="history" role="tab">기록</button>
-    <button class="tab" data-tab="schedule" role="tab">일정</button>
-    <button class="tab" data-tab="standings" role="tab">순위</button>
-    <button class="tab" data-tab="settings" role="tab">알림</button>
+  <!--
+    role="tab" 을 쓰지 않는다. 탭 역할을 선언하면 좌우 화살표 이동·roving
+    tabindex·aria-selected·tabpanel 연결까지 갖춰야 하는데, 이 앱은 탭 이동을
+    누르기와 스와이프로만 제공한다. 안 만들 조작을 광고하면 그걸 믿고 시도하는
+    사람만 헛걸음하므로, <button> 의 기본 역할을 그대로 쓴다.
+  -->
+  <nav class="tabs">
+    <button class="tab is-active" data-tab="history" type="button">기록</button>
+    <button class="tab" data-tab="schedule" type="button">일정</button>
+    <button class="tab" data-tab="standings" type="button">순위</button>
+    <button class="tab" data-tab="settings" type="button">알림</button>
   </nav>
 </header>
 
@@ -99,9 +105,9 @@
         </div>
         <div class="sched-actions">
           <button id="btn-today" class="btn-chip">오늘</button>
-          <div class="view-switch" role="tablist">
-            <button class="view-btn" data-view="list">리스트</button>
-            <button class="view-btn is-active" data-view="calendar">달력</button>
+          <div class="view-switch">
+            <button class="view-btn" data-view="list" type="button">리스트</button>
+            <button class="view-btn is-active" data-view="calendar" type="button">달력</button>
           </div>
         </div>
       </div>
@@ -199,7 +205,7 @@
     <div class="card card-rows">
       <div class="row theme-row">
         <span class="row-text"><b>테마</b><span>기기 설정을 따르거나 직접 골라요</span></span>
-        <div class="theme-switch" role="tablist">
+        <div class="theme-switch">
           <button class="theme-btn" data-theme="light" type="button">라이트</button>
           <button class="theme-btn" data-theme="dark" type="button">다크</button>
           <button class="theme-btn is-active" data-theme="auto" type="button">자동</button>
