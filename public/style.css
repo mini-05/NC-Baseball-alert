@@ -604,6 +604,22 @@ main {
 .tgb { color: var(--muted-soft); }
 .thead .tpct, .thead .tgb { font-size: 12px; color: var(--muted-soft); }
 
+/* 상대 전적. 순위표와 같은 카드 위에 얹되 칸은 둘뿐이라 따로 잡는다. */
+.h2h-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  padding: 9px 4px;
+}
+.h2h-row + .h2h-row { border-top: 1px solid var(--hairline-soft); }
+.h2h-opp { font-size: 15px; color: var(--body); }
+.h2h-rec {
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* 진출 구간 라벨 (한국시리즈 진출 / 와일드카드 결정전 진출 …) */
 .tier-label {
   margin: var(--s-sm) 0 2px;

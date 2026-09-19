@@ -13,7 +13,7 @@ import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
-         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf,
+         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf, headToHead,
          inningSumMatches } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener } from '../src/season.js';
 import { boardCoversScore } from '../src/index.js';
@@ -504,6 +504,49 @@ function testOutlook() {
   const oTied = postseasonOutlook(tied, 'NC', 144);
   check('공동 순위여도 다음 팀을 찾는다', oTied.chaser?.name === '롯데' && oTied.chaser?.gap === 0,
     JSON.stringify(oTied.chaser));
+}
+
+/* ══ 5-b. 상대 전적 ══ */
+
+function testHeadToHead() {
+  const g = (oppName, result, series = 'regular') => ({ oppName, result, series });
+
+  const rows = headToHead([
+    g('삼성', 'win'), g('삼성', 'win'), g('삼성', 'lose'), g('삼성', 'draw'),
+    g('LG', 'lose'), g('LG', 'lose'), g('LG', 'win'),
+    g('KIA', 'win'),
+    // 아직 안 끝난 경기는 result 가 null 이라 세지 않는다.
+    g('한화', null),
+  ]);
+
+  const find = (o) => rows.find((r) => r.opp === o);
+  check('상대별로 묶어 센다', find('삼성')?.wins === 2 && find('삼성')?.losses === 1, JSON.stringify(find('삼성')));
+  check('무승부도 따로 센다', find('삼성')?.draws === 1, String(find('삼성')?.draws));
+  check('안 끝난 경기는 빼고 센다', find('한화') === undefined, JSON.stringify(find('한화')));
+
+  // KBO 공식대로 무승부는 승률에서 뺀다: 2/(2+1)
+  check('승률은 무승부 제외', Math.abs(find('삼성').pct - 2 / 3) < 1e-9, String(find('삼성').pct));
+  // 강한 상대부터: 삼성 .667 > KIA 1.000? → KIA 가 먼저다
+  check('승률 높은 상대부터 정렬', rows[0].opp === 'KIA' && rows.at(-1).opp === 'LG',
+    rows.map((r) => r.opp).join(','));
+
+  /*
+   * 포스트시즌은 빼고 센다. 16경기 표본에 5경기짜리 시리즈가 섞이면 조용히
+   * 오염되고, 숫자만 봐서는 알아채기 어렵다.
+   */
+  const mixed = headToHead([g('두산', 'win'), g('두산', 'win', 'semi_playoff'), g('두산', 'lose', 'korean_series')]);
+  check('포스트시즌은 상대전적에서 제외', mixed[0].wins === 1 && mixed[0].losses === 0,
+    JSON.stringify(mixed[0]));
+
+  /*
+   * 승부가 하나도 안 난 상대. 승/(승+패) 가 0 으로 나누게 되므로 null 이어야
+   * 한다 — 그대로 계산하면 화면에 NaN 이 찍힌다.
+   */
+  const allDraw = headToHead([g('키움', 'draw'), g('키움', 'draw')]);
+  check('승도 패도 없으면 승률 null (0 나눗셈 방지)',
+    allDraw[0].pct === null && allDraw[0].draws === 2, JSON.stringify(allDraw[0]));
+
+  check('경기가 없으면 빈 목록', headToHead([]).length === 0);
 }
 
 /* ══ 6. 시즌·시간대 게이팅 ══ */
@@ -1402,6 +1445,7 @@ console.log('\n[3] 시리즈 판별');            testSeries();
 console.log('\n[3b] 이번 시즌 필터');        testSeasonFilter();
 console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
+console.log('\n[5-b] 상대 전적');            testHeadToHead();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
 console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
 console.log('\n[6-c] 배달 확인');            await testDelivered();

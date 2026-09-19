@@ -383,6 +383,40 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
   };
 }
 
+/**
+ * 상대 팀별 시즌 전적을 센다.
+ *
+ * 순위 API 에는 상대전적이 없다. 대신 loadSchedule 이 이미 시즌 전 경기를
+ * 상대팀(oppName)과 결과(result)까지 붙여 내려주므로, 그것만 묶어 세면 된다 —
+ * 새로 조회할 것이 없다.
+ *
+ * 정규시즌만 센다. 지금은 포스트시즌이 없어 무의미하지만, 10월에 시리즈가
+ * 열리면 16경기 표본에 5경기가 섞여 조용히 오염된다.
+ *
+ * pct 는 KBO 공식대로 무승부를 뺀 승/(승+패)다. 화면에는 아직 쓰지 않고
+ * 정렬에만 쓰지만, 필요해지면 그대로 표시하면 된다. 승도 패도 없으면(시즌 초,
+ * 우천으로 일정이 통째로 밀린 상대) 0 으로 나누게 되므로 null 로 둔다.
+ *
+ * @param {Array} games loadSchedule() 결과
+ */
+export function headToHead(games) {
+  const by = new Map();
+
+  for (const g of games) {
+    if (g.series !== 'regular' || !g.result) continue;
+    const r = by.get(g.oppName) ?? { opp: g.oppName, wins: 0, draws: 0, losses: 0 };
+    if (g.result === 'win') r.wins++;
+    else if (g.result === 'lose') r.losses++;
+    else r.draws++;
+    by.set(g.oppName, r);
+  }
+
+  // 강한 상대부터. 승부가 안 난 상대(pct null)는 뒤로 보낸다.
+  return [...by.values()]
+    .map((r) => ({ ...r, pct: r.wins + r.losses ? r.wins / (r.wins + r.losses) : null }))
+    .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+}
+
 /* ─────────────────────────── 전광판 ─────────────────────────── */
 
 const RECORD_URL = 'https://api-gw.sports.naver.com/schedule/games';

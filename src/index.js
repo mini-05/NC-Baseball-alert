@@ -6,7 +6,7 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
-  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, isPostseason,
+  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, isPostseason, headToHead,
 } from './kbo.js';
 import { detectEvents, dispatchKindOf, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
@@ -450,7 +450,9 @@ async function handleApi(request, env, url) {
    */
   if (path === '/api/schedule' && method === 'GET') {
     const { year, date } = kstNow();
-    return json({ today: date, games: await loadSchedule(env, year) });
+    const games = await loadSchedule(env, year);
+    // 상대전적은 이 일정에서 세면 되므로 따로 조회하지 않는다(kbo.js headToHead).
+    return json({ today: date, games, headToHead: headToHead(games) });
   }
 
   /** 순위와 포스트시즌 진출 상황. 비시즌이면 standings 가 null 이다. */
