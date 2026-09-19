@@ -294,6 +294,27 @@ function testDetect() {
   check('양 팀 득점 문구', bothScored?.title === '양 팀 득점', bothScored?.title);
   check('양 팀 득점은 기록도 score', bothScored?.recordKind === 'score', bothScored?.recordKind);
 
+  /*
+   * 점수가 내려가는 경우 — 네이버가 기록을 정정하거나 일시적으로 옛 값·0:0 을
+   * 돌려줄 때다. 변화만 보면(!== 0) "삼성 0점 득점", "삼성 -2점 득점" 같은
+   * 알림이 만들어지고, dedup_key 때문에 되돌릴 수도 없다.
+   */
+  check('홈 점수 하향은 알리지 않는다', detectEvents(live(3, 0), live(2, 0), T).length === 0,
+    JSON.stringify(detectEvents(live(3, 0), live(2, 0), T).map((e) => e.title)));
+  check('원정 점수 하향도 알리지 않는다', detectEvents(live(2, 5), live(2, 3), T).length === 0);
+  check('일시적으로 0:0 이 와도 알리지 않는다', detectEvents(live(3, 2), live(0, 0), T).length === 0);
+
+  // 우리가 득점하면서 상대 점수가 정정돼 내려간 경우. oppGained === 0 으로 묶으면
+  // 우리 득점인데 "삼성 -1점 득점" 이 나간다 — 역전 순간에 정반대로 알리는 셈이다.
+  const comeback = detectEvents(live(2, 3), live(3, 2), T)[0];
+  check('우리 득점 + 상대 하향이면 우리 득점으로 알린다',
+    comeback?.title === 'NC 1점 득점!' && comeback?.recordKind === 'score', comeback?.title);
+
+  // 반대 방향 — 상대가 득점하면서 우리 점수가 내려간 경우.
+  const oppUp = detectEvents(live(3, 1), live(2, 3), T)[0];
+  check('상대 득점 + 우리 하향이면 상대 득점으로 알린다',
+    oppUp?.title === '삼성 2점 득점' && oppUp?.recordKind === 'concede', oppUp?.title);
+
   // 득점 외 이벤트는 recordKind 를 따로 주지 않으므로 kind 와 같아야 한다.
   const startEv = detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T)[0];
   check('시작 이벤트는 recordKind 가 kind 와 같다', startEv?.recordKind === startEv?.kind);
@@ -1211,6 +1232,20 @@ async function testServiceWorkerVibrate() {
     await push({ kind: 'score', id: 81, title: 't', body: 'b', ts: 2, resend: true });
     check('다른 이벤트가 떠 있어도 이 이벤트는 뜬다', notifications.length === 2,
       `${notifications.length}건`);
+  }
+  {
+    /*
+     * FCM 이 첫 푸시를 물고 있다가 재발송보다 늦게 흘리는 경우.
+     * 알림함 검사를 재발송에만 걸면 이 원래 푸시가 같은 tag 로 다시 울린다
+     * (renotify: true). 방향과 무관하게 막혀야 한다.
+     */
+    const { push, notifications, acks } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 90, title: 't', body: 'b', ts: 1, resend: true });
+    await push({ kind: 'score', id: 90, title: 't', body: 'b', ts: 1 });
+    check('재발송이 먼저 뜬 뒤 원래 푸시가 와도 다시 울리지 않는다',
+      notifications.length === 1, `${notifications.length}건`);
+    check('그때도 배달 확인은 올린다', acks.filter((a) => a.body.id === 90).length === 2,
+      JSON.stringify(acks.map((a) => a.body.id)));
   }
 }
 
