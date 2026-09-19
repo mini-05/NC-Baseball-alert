@@ -205,6 +205,32 @@ main {
 .panel { display: none; }
 .panel.is-active { display: block; }
 
+/*
+ * 탭 전환. 들어오는 쪽만 움직인다 — 나가는 패널까지 붙들고 있으려면 두 개를
+ * 동시에 띄워 겹쳐야 하고, 그러면 스크롤 위치와 sticky 계산이 한 번 더 꼬인다.
+ *
+ * 패널이 아니라 *직계 자식*에 건다. transform 은 자손의 position:sticky 기준을
+ * 자기 자신으로 바꿔 버려서, .panel 에 걸면 일정 탭의 .sched-fixed 가 스크롤된
+ * 상태로 돌아올 때 24px 튀는 것을 실측했다. 자식에 걸면 sticky 요소는 자기가
+ * 직접 움직일 뿐 기준이 바뀌지 않아 그 튐이 사라진다.
+ *
+ * 움직임은 transform·opacity 로만 준다 — 레이아웃을 건드리지 않아 싸다.
+ */
+@keyframes panel-enter-next {
+  from { opacity: 0; transform: translate3d(14px, 0, 0); }
+}
+@keyframes panel-enter-prev {
+  from { opacity: 0; transform: translate3d(-14px, 0, 0); }
+}
+
+.panel.is-active[data-enter='next'] > * { animation: panel-enter-next 220ms ease-out; }
+.panel.is-active[data-enter='prev'] > * { animation: panel-enter-prev 220ms ease-out; }
+
+/* 어지럼증 등으로 움직임을 줄여 달라고 한 기기에서는 전환을 끈다. */
+@media (prefers-reduced-motion: reduce) {
+  .panel.is-active[data-enter] > * { animation: none; }
+}
+
 /* caption-uppercase — 섹션 라벨 */
 .eyebrow {
   font-size: 12px;
@@ -483,13 +509,13 @@ main {
 
 .table-card { padding: var(--s-md) var(--s-sm); }
 
-/* 순위 | 팀 | 승-무-패 | 승률 | 승차 | 잔여 */
+/* 순위 | 팀 | 승-무-패 | 승률 | 승차 | 연속 | 잔여 */
 .thead,
 .trow {
   display: grid;
-  grid-template-columns: 28px 1fr auto 44px 38px 34px;
+  grid-template-columns: 28px 1fr auto 42px 34px 30px 26px;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   padding: 10px 4px;
 }
 
@@ -544,7 +570,25 @@ main {
 }
 .thead .tleft { font-size: 12px; }
 
-.trec { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* 한 덩어리로 읽히는 값이라 줄바꿈을 막는다. 칸이 모자라면 조용히 두 줄로
+   접히는 대신 눈에 띄게 넘쳐야 폭 배분이 틀어진 것을 바로 알 수 있다. */
+.trec {
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 연속 기록(3승 / 2패). 승/패 색은 경기 카드의 .verdict 과 같은 변수를 쓴다. */
+.tstreak {
+  font-size: 13px;
+  color: var(--muted-soft);
+  text-align: right;
+  white-space: nowrap;
+}
+.tstreak.win { color: var(--success); }
+.tstreak.lose { color: var(--error); }
+.thead .tstreak { font-size: 12px; color: var(--muted-soft); }
 
 .tpct,
 .tgb {

@@ -614,6 +614,7 @@ async function testScheduleResilience() {
           seasonTeamStats: [{
             teamId: 'NC', teamName: 'NC', ranking: 8, gameCount: 107, winGameCount: 48,
             drawnGameCount: 2, loseGameCount: 57, wra: 0.457, gameBehind: 12.5,
+            continuousGameResult: '3승',
           }],
         },
       }),
@@ -622,6 +623,13 @@ async function testScheduleResilience() {
     const fresh = await loadStandings({ DB: fakeCacheDb() }, 2026);
     const at = Date.parse(fresh?.fetchedAt ?? '');
     check('정상 조회한 순위에 fetchedAt 부착', at >= before && at <= Date.now(), fresh?.fetchedAt);
+
+    /*
+     * 연속 기록(순위 탭의 '연속' 칸)은 네이버의 continuousGameResult 를 그대로
+     * 실어 보낸다. 이 매핑이 끊기면 화면에서는 칸만 비고 아무 오류도 안 난다 —
+     * 비공식 API라 필드명이 바뀔 수 있어 여기서 고정해 둔다.
+     */
+    check('연속 기록을 순위에 실어 보낸다', fresh?.teams?.[0]?.streak === '3승', fresh?.teams?.[0]?.streak);
 
     globalThis.fetch = async () => { throw new Error('naver down'); };
 

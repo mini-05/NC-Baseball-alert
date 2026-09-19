@@ -204,8 +204,40 @@ function activateTab(name) {
   const tab = tabs.find((t) => t.dataset.tab === name);
   if (!tab) return false;
 
+  /*
+   * 넘어가는 방향을 패널에 남겨 둔다(data-enter). 스와이프한 손가락 방향에서
+   * 내용이 따라 들어와야 두 화면이 옆으로 이어져 있다는 느낌이 난다.
+   *
+   * 방향을 여기서 정하므로 탭을 눌렀을 때도 같은 움직임이 난다 — 스와이프는
+   * 결국 .tab.click() 을 부르기 때문이다(아래 touchend 핸들러).
+   *
+   * 첫 렌더(from === -1)나 같은 탭을 다시 누른 경우(from === to)에는 붙이지
+   * 않는다. 움직일 이유가 없는데 움직이면 그게 더 어색하다.
+   */
+  const from = tabs.findIndex((t) => t.classList.contains('is-active'));
+  const to = tabs.indexOf(tab);
+  const enter = from === -1 || from === to ? null : to > from ? 'next' : 'prev';
+
   tabs.forEach((t) => t.classList.toggle('is-active', t === tab));
-  $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${name}`));
+  $$('.panel').forEach((p) => {
+    const on = p.id === `panel-${name}`;
+    if (on && enter) p.dataset.enter = enter;
+    else if (on) delete p.dataset.enter;
+    p.classList.toggle('is-active', on);
+  });
+
+  /*
+   * 탭을 옮기면 그 탭의 맨 위부터 보여 준다.
+   *
+   * 스크롤은 탭마다 따로가 아니라 문서 하나를 공유한다. 그대로 두면 옮겨 간
+   * 탭의 중간에 떨어지거나(기록 600px → 알림 600px), 목적지가 짧으면 0으로
+   * 잘렸다가 돌아올 때 덜컥거린다(일정 900px → 달력 뷰 0px). 어느 쪽이든
+   * 규칙이 없어 예측이 안 된다.
+   *
+   * 같은 탭을 다시 누른 경우(from === to)는 옮긴 것이 아니므로 건드리지 않는다.
+   * 일정 탭의 "오늘로 스크롤"은 이 뒤에 따로 돌아 제자리를 잡는다(클릭 핸들러).
+   */
+  if (from !== to) window.scrollTo(0, 0);
   return true;
 }
 
@@ -311,6 +343,8 @@ function renderTable(standings) {
     if (tier) rows.push(el('p', { class: 'tier-label', text: tier.title }));
 
     const isMine = t.code === teamCode;
+    // 연속 기록. 네이버의 continuousGameResult 를 그대로 쓴다 — "3승" · "2패".
+    const streak = String(t.streak ?? '');
 
     // 팀명 바로 뒤에 붙인다. 따로 칸을 만들면 좁은 화면에서 이름이 밀린다.
     const mark = showMarks && t.todayGame
@@ -328,6 +362,11 @@ function renderTable(standings) {
         el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
         el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
         el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
+        // 연승은 초록, 연패는 빨강 — 경기 카드의 승/패 색(.verdict)과 같은 변수를 쓴다.
+        el('span', {
+          class: `tstreak${/승$/.test(streak) ? ' win' : /패$/.test(streak) ? ' lose' : ''}`,
+          text: streak,
+        }),
         el('span', { class: 'tleft', text: String(t.remaining ?? '') }),
       ),
     );
@@ -346,6 +385,7 @@ function renderTable(standings) {
         el('span', { class: 'trec', text: '승-무-패' }),
         el('span', { class: 'tpct', text: '승률' }),
         el('span', { class: 'tgb', text: '승차' }),
+        el('span', { class: 'tstreak', text: '연속' }),
         el('span', { class: 'tleft', text: '잔여' }),
       ),
       ...rows,
