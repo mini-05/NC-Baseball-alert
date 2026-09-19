@@ -309,6 +309,10 @@ main {
 .pill.in { background: var(--primary); color: var(--on-primary); }
 .pill.out { background: var(--surface-cream-strong); color: var(--muted); }
 
+/* 바로 아래 순위와의 승차. 진출권 칩 옆에 보조로 붙으므로 한 단계 여리게. */
+.pill.chaser { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--hairline); }
+.pill + .pill { margin-left: var(--s-xs); }
+
 .rank-note { margin: var(--s-sm) 0 0; font-size: 14px; color: var(--body); }
 
 .gap-bar {
