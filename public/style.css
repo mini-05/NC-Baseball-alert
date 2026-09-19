@@ -513,7 +513,7 @@ main {
 .thead,
 .trow {
   display: grid;
-  grid-template-columns: 28px 1fr auto 38px 30px 42px 24px;
+  grid-template-columns: 28px 1fr auto 42px 34px 30px 26px;
   align-items: center;
   gap: 4px;
   padding: 10px 4px;
@@ -579,9 +579,9 @@ main {
   white-space: nowrap;
 }
 
-/* 연속 기록(3연승 / 2연패). 승/패 색은 경기 카드의 .verdict 과 같은 변수를 쓴다. */
+/* 연속 기록(3승 / 2패). 승/패 색은 경기 카드의 .verdict 과 같은 변수를 쓴다. */
 .tstreak {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted-soft);
   text-align: right;
   white-space: nowrap;

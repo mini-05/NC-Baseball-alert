@@ -79,18 +79,6 @@ const SERIES_SHORT = {
   korean_series: '한국시리즈',
 };
 
-/**
- * 연속 기록. 서버가 네이버의 continuousGameResult 를 그대로 넘겨준다(kbo.js).
- * "3승" 처럼 오므로 "3연승" 으로 읽기 좋게 바꾼다.
- *
- * 비공식 API라 형식이 예고 없이 바뀔 수 있어, 아는 모양이 아니면 원문을 그대로
- * 보여준다 — 빈칸으로 삼키면 값이 왔는데도 안 보이고, 무승부("1무")처럼 '연'을
- * 붙이면 어색한 경우도 그대로 지나간다.
- */
-function streakLabel(streak) {
-  return String(streak ?? '').replace(/^(\d+)([승패])$/, '$1연$2');
-}
-
 const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
 const VIBRATE_KEYS = ['start', 'cancel', 'score', 'end'];
 const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
@@ -237,6 +225,19 @@ function activateTab(name) {
     else if (on) delete p.dataset.enter;
     p.classList.toggle('is-active', on);
   });
+
+  /*
+   * 탭을 옮기면 그 탭의 맨 위부터 보여 준다.
+   *
+   * 스크롤은 탭마다 따로가 아니라 문서 하나를 공유한다. 그대로 두면 옮겨 간
+   * 탭의 중간에 떨어지거나(기록 600px → 알림 600px), 목적지가 짧으면 0으로
+   * 잘렸다가 돌아올 때 덜컥거린다(일정 900px → 달력 뷰 0px). 어느 쪽이든
+   * 규칙이 없어 예측이 안 된다.
+   *
+   * 같은 탭을 다시 누른 경우(from === to)는 옮긴 것이 아니므로 건드리지 않는다.
+   * 일정 탭의 "오늘로 스크롤"은 이 뒤에 따로 돌아 제자리를 잡는다(클릭 핸들러).
+   */
+  if (from !== to) window.scrollTo(0, 0);
   return true;
 }
 
@@ -342,7 +343,8 @@ function renderTable(standings) {
     if (tier) rows.push(el('p', { class: 'tier-label', text: tier.title }));
 
     const isMine = t.code === teamCode;
-    const streak = streakLabel(t.streak);
+    // 연속 기록. 네이버의 continuousGameResult 를 그대로 쓴다 — "3승" · "2패".
+    const streak = String(t.streak ?? '');
 
     // 팀명 바로 뒤에 붙인다. 따로 칸을 만들면 좁은 화면에서 이름이 밀린다.
     const mark = showMarks && t.todayGame
