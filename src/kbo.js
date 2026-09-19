@@ -343,6 +343,20 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
   const gamesBehindLine = inside ? 0 : Number((me.gb - (line?.gb ?? 0)).toFixed(1));
   const lineName = line?.name ?? `${standings.cutoff}위`;
 
+  /*
+   * 바로 아래 순위 팀과의 승차. "누가 나를 쫓고 있나"는 진출권 경쟁만큼 자주
+   * 보는 값인데, 표의 승차 칸은 1위 기준이라 이웃끼리의 거리가 드러나지 않는다.
+   *
+   * rank + 1 로 찾지 않고 정렬된 목록의 다음 팀을 쓴다 — 공동 순위가 생기면
+   * (7위가 둘이면 그다음은 9위) rank + 1 은 빈손으로 돌아온다. 공동 순위인
+   * 경우 승차 0 으로 나오는데, 그것도 "바로 뒤에 붙어 있다"는 사실 그대로다.
+   * teams 는 fetchStandings 에서 rank 순으로 정렬해 둔다.
+   */
+  const below = standings.teams[standings.teams.indexOf(me) + 1];
+  const chaser = below
+    ? { name: below.name, rank: below.rank, gap: Number((below.gb - me.gb).toFixed(1)) }
+    : null;
+
   // 문장을 서버에서 완성해 내려보낸다. 조사 처리를 한곳(es-hangul)에 모으기 위함이다.
   let note;
   if (status === 'in') {
@@ -361,6 +375,8 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
     remaining,
     // 진출권 팀과의 승차. 이미 진출권 안이면 0.
     gamesBehindLine,
+    // 바로 아래 순위 팀과 그 승차. 꼴찌면 null.
+    chaser,
     tierTitle: tier?.title ?? null,
     status, // in | chasing | eliminated
     note,

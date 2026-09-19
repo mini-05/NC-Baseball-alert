@@ -442,6 +442,15 @@ function renderStandings({ standings, outlook }) {
         ? el('span', { class: 'pill out', text: '포스트시즌 탈락 확정' })
         : el('span', { class: 'pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
 
+  // 바로 아래 순위와의 승차. 위 칩과 같은 줄에 나란히 붙는다(.pill 이 inline-block).
+  // 꼴찌면 서버가 chaser 를 null 로 주므로 칩 자체가 안 붙는다.
+  const chaserPill = outlook.chaser
+    ? el('span', {
+        class: 'pill chaser',
+        text: `${outlook.chaser.rank}위와 ${outlook.chaser.gap}경기차`,
+      })
+    : null;
+
   // 문장은 서버가 es-hangul 로 조사까지 맞춰 내려준다. 여기서는 그대로 쓴다.
   const note = outlook.note ?? '';
 
@@ -459,6 +468,7 @@ function renderStandings({ standings, outlook }) {
         }),
       ),
       pill,
+      chaserPill,
       el('p', { class: 'rank-note', text: note }),
       status !== 'eliminated' &&
         el('div', { class: 'gap-bar' }, el('i', { style: `width:${Math.round(progress * 100)}%` })),

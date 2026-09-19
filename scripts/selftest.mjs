@@ -476,6 +476,34 @@ function testOutlook() {
   // 진출 기준을 못 받아오면 추측하지 않고 판정을 포기한다.
   check('cutoff 없으면 null', postseasonOutlook({ ...standings, cutoff: null }, 'NC', 144) === null);
   check('없는 팀이면 null', postseasonOutlook(standings, 'XX', 144) === null);
+
+  /*
+   * 바로 아래 순위와의 승차(chaser). 표의 승차 칸은 1위 기준이라 이웃끼리의
+   * 거리가 안 드러나서 따로 계산한다.
+   */
+  check('목록 마지막이면 쫓아오는 팀 없음', o.chaser === null, JSON.stringify(o.chaser));
+
+  const withBelow = structuredClone(standings);
+  withBelow.teams.push(
+    { code: 'LT', name: '롯데', rank: 9, games: 106, wins: 45, draws: 1, losses: 60, pct: 0.429, gb: 17.5 },
+  );
+  const oBelow = postseasonOutlook(withBelow, 'NC', 144);
+  check('바로 아래 순위를 집어낸다', oBelow.chaser?.rank === 9 && oBelow.chaser?.name === '롯데',
+    JSON.stringify(oBelow.chaser));
+  // 둘 다 1위 기준 승차라 빼면 이웃 간 거리가 된다: 17.5 - 14.5
+  check('아래와의 승차 = 3', oBelow.chaser?.gap === 3, String(oBelow.chaser?.gap));
+
+  /*
+   * 공동 순위. rank + 1 로 찾으면(8위가 둘이면 다음은 10위) 빈손이 되므로
+   * 정렬된 목록의 다음 팀을 쓴다. 승차 0 은 "바로 뒤에 붙어 있다"는 뜻이다.
+   */
+  const tied = structuredClone(standings);
+  tied.teams.push(
+    { code: 'LT', name: '롯데', rank: 8, games: 105, wins: 48, draws: 2, losses: 55, pct: 0.466, gb: 14.5 },
+  );
+  const oTied = postseasonOutlook(tied, 'NC', 144);
+  check('공동 순위여도 다음 팀을 찾는다', oTied.chaser?.name === '롯데' && oTied.chaser?.gap === 0,
+    JSON.stringify(oTied.chaser));
 }
 
 /* ══ 6. 시즌·시간대 게이팅 ══ */
