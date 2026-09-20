@@ -751,6 +751,45 @@ async function loadStandings() {
   }
 }
 
+/**
+ * 상대 팀별 시즌 전적. 순위 탭의 순위표 아래에 붙는다.
+ *
+ * 값은 서버가 일정에서 세어 함께 내려준다(kbo.js headToHead) — 순위 API 에는
+ * 상대전적이 없어서 일정을 재료로 쓴다. 그래서 순위가 아니라 *일정*을 불러올 때
+ * 그려진다.
+ *
+ * 무승부는 0 이어도 적는다. 위 순위표가 "85승 2무 47패" 형식이라 여기만 빼면
+ * 다른 표처럼 보이고, 행마다 글자 수가 달라져 세로로 읽기 어려워진다.
+ *
+ * 칸 순서와 승률 표기(.625)는 위 순위표와 맞춘다. 승률은 KBO 공식대로 무승부를
+ * 뺀 값이라(kbo.js headToHead) 순위표의 승률과 같은 기준으로 읽힌다.
+ * 승부가 하나도 안 난 상대는 pct 가 null 로 오므로 '-' 로 둔다.
+ */
+function renderHeadToHead(rows) {
+  const box = $('#h2h');
+  clear(box);
+
+  if (!rows?.length) {
+    box.append(el('p', { class: 'empty', text: '아직 맞대결 기록이 없어요.' }));
+    return;
+  }
+
+  box.append(
+    el('div', { class: 'card table-card' },
+      ...rows.map((r) =>
+        el('div', { class: 'h2h-row' },
+          el('span', { class: 'h2h-opp', text: r.opp }),
+          el('span', { class: 'h2h-rec', text: `${r.wins}승 ${r.draws}무 ${r.losses}패` }),
+          el('span', {
+            class: 'h2h-pct',
+            text: r.pct === null ? '-' : r.pct.toFixed(3).replace(/^0/, ''),
+          }),
+        ),
+      ),
+    ),
+  );
+}
+
 /* ─────────── 일정 ─────────── */
 
 /**
@@ -1021,6 +1060,10 @@ async function loadSchedule() {
 
   try {
     scheduleData = await api('/api/schedule');
+
+    // 상대전적은 이 응답에 함께 실려 온다. 일정이 비어도(비시즌) 빈 상태를
+    // 그려 줘야 스켈레톤이 남지 않으므로 아래 early return 보다 먼저 부른다.
+    renderHeadToHead(scheduleData.headToHead);
 
     if (!scheduleData.games.length) {
       clear(box());
