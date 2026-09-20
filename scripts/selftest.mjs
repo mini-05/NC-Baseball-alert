@@ -16,8 +16,9 @@ import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, 
          seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf, headToHead,
          inningSumMatches } from '../src/kbo.js';
 import { isPollWindow, pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener } from '../src/season.js';
-import { boardCoversScore } from '../src/index.js';
-import { validateEndpoint, validateKeys, checkOrigin, readJson } from '../src/security.js';
+import { boardCoversScore, POLLS_PER_TICK } from '../src/index.js';
+import { validateEndpoint, validateKeys, checkOrigin, readJson, MAX_SUBSCRIPTIONS,
+         SUBREQUEST_BUDGET } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
          listUndelivered, markResent } from '../src/db.js';
 import { dispatchKindOf } from '../src/detect.js';
@@ -903,6 +904,30 @@ async function testReadJsonByteLimit() {
   );
 }
 
+
+/* ══ 7-c. 구독 상한이 subrequest 예산 안인지 ══ */
+
+/**
+ * broadcast 는 구독 수만큼 fetch 를 한꺼번에 날린다. 무료 플랜의 호출당 상한
+ * (50)을 넘으면 51번째부터 조용히 실패하므로, 상한을 늘리거나 POLLS_PER_TICK 을
+ * 올릴 때 이 부등식이 먼저 깨지게 둔다. 실제로 터진 뒤에 알면 늦다 —
+ * allSettled 가 실패를 삼켜 틱은 성공으로 끝난다.
+ */
+function testSubrequestBudget() {
+  const N = MAX_SUBSCRIPTIONS;
+  // 재발송 1건 + 폴링마다 (전광판 1 + 재조회/중계 1 + 이벤트 2건 발송 2N)
+  const worst = N + POLLS_PER_TICK * (2 + 2 * N);
+
+  check(`최악의 틱이 subrequest 예산 안에 든다 (${worst} ≤ ${SUBREQUEST_BUDGET})`,
+    worst <= SUBREQUEST_BUDGET, `구독 ${N}, 폴링 ${POLLS_PER_TICK}회`);
+
+  // 상한이 예산에 맞춰 정해졌다는 뜻 — 하나만 더 받아도 넘어야 한다.
+  const oneMore = (N + 1) + POLLS_PER_TICK * (2 + 2 * (N + 1));
+  check('상한이 예산에 비해 지나치게 낮지 않다',
+    oneMore > SUBREQUEST_BUDGET - POLLS_PER_TICK * 2,
+    `구독 ${N + 1} → ${oneMore}`);
+}
+
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
 
 /**
@@ -1493,6 +1518,7 @@ console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
 console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLimit();
+console.log('\n[7-c] 구독 상한 vs subrequest 예산'); testSubrequestBudget();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
