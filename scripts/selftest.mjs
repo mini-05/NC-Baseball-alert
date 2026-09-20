@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
+import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url, sendPush } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf, headToHead,
@@ -144,6 +144,47 @@ async function testVapid() {
   // 앞뒤 공백·따옴표가 붙어도 정상 동작해야 한다 (콘솔 붙여넣기 사고 방지)
   const padded = await makeVapidHeader(endpoint, ` "${publicKey}" `, `\n ${jwk.d} \n`, 'mailto:t@e.com');
   check('공백·따옴표가 붙어도 통과', padded.startsWith('vapid t='));
+}
+
+/* ══ 2-b. 재발송 묶음(Topic) ══ */
+
+/**
+ * 원본과 재발송이 같은 Topic 으로 나가야 FCM 이 대기 중인 원본을 교체한다.
+ * 값이 달라지면(예: Date.now() 를 섞으면) 교체가 안 돼 알림이 두 번 울린다.
+ */
+async function testTopic() {
+  const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const p256dh = bytesToB64url(new Uint8Array(await crypto.subtle.exportKey('raw', ua.publicKey)));
+  const auth = bytesToB64url(crypto.getRandomValues(new Uint8Array(16)));
+
+  const vapid = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const env = {
+    VAPID_PUBLIC_KEY: bytesToB64url(new Uint8Array(await crypto.subtle.exportKey('raw', vapid.publicKey))),
+    VAPID_PRIVATE_KEY: (await crypto.subtle.exportKey('jwk', vapid.privateKey)).d,
+    VAPID_SUBJECT: 'mailto:test@example.com',
+  };
+  const sub = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc123', p256dh, auth };
+
+  const sent = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => { sent.push(init.headers); return { ok: true, status: 201 }; };
+  try {
+    await sendPush(sub, { kind: 'score', id: 77, ts: 1000 }, env);
+    await sendPush(sub, { kind: 'score', id: 77, ts: 1000, resend: true }, env);
+    await sendPush(sub, { kind: 'score', id: 78, ts: 2000 }, env);
+    await sendPush(sub, { kind: 'test', title: '테스트 알림', ts: 3000 }, env);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  check('원본과 재발송의 Topic 이 같다', sent[0].Topic === sent[1].Topic && sent[0].Topic === 'e77',
+    `${sent[0].Topic} / ${sent[1].Topic}`);
+  check('다른 이벤트는 다른 Topic', sent[2].Topic === 'e78', sent[2].Topic);
+  check('테스트 알림에는 Topic 이 없다', sent[3].Topic === undefined, String(sent[3].Topic));
+
+  // RFC 8030 §5.4 — 32자 이내, URL-safe base64 알파벳만.
+  check('Topic 이 RFC 8030 제한을 지킨다',
+    sent.every((h) => h.Topic === undefined || (h.Topic.length <= 32 && /^[A-Za-z0-9_-]+$/.test(h.Topic))));
 }
 
 /* ══ 3. 시리즈 판별 ══ */
@@ -1441,6 +1482,7 @@ async function testDelivered() {
 
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
 console.log('\n[2] VAPID JWT');              await testVapid();
+console.log('\n[2-b] 재발송 묶음(Topic)');  await testTopic();
 console.log('\n[3] 시리즈 판별');            testSeries();
 console.log('\n[3b] 이번 시즌 필터');        testSeasonFilter();
 console.log('\n[4] 상태 전이 감지');         testDetect();

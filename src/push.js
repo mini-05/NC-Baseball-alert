@@ -237,6 +237,20 @@ export async function sendPush(subscription, payloadObject, env) {
       'Content-Type': 'application/octet-stream',
       TTL: '86400',
       Urgency: 'high',
+      /*
+       * RFC 8030 §5.4 — 푸시 서비스가 아직 못 전한 같은 topic 의 메시지를 이것으로
+       * 교체한다. 재발송이 원본과 같은 topic 이라, 단말이 자느라 원본이 FCM 에
+       * 쌓여 있었다면 깨어날 때 둘이 아니라 하나만 받는다.
+       *
+       * 중복 표시는 이미 sw.js 의 tag 가 막고 있다(같은 tag 는 제자리 갱신).
+       * 여기서 버는 것은 그 앞단이다 — 워커를 두 번 깨우지 않고, 헛돈 발송이
+       * FCM 에 쌓이지 않는다. 그래서 재발송 창(RESEND_AFTER_MS)을 짧게 잡아도
+       * 대가가 없어진다.
+       *
+       * 값 제한은 32자·URL-safe base64 알파벳이다. eventId 는 정수라 여유가 많다.
+       * 테스트 알림에는 id 가 없어 붙이지 않는다 — 묶을 짝이 없다.
+       */
+      ...(payloadObject.id != null && { Topic: `e${payloadObject.id}` }),
     },
     body,
   });
