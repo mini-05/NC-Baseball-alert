@@ -64,7 +64,13 @@ function icon(name) {
   return svg;
 }
 
-const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', end: '종료', test: '테스트' };
+const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', concede: '실점', end: '종료', test: '테스트' };
+
+/*
+ * 득점·실점은 서버가 events.kind 에 score / concede 로 구분해 저장한다
+ * (src/db.js insertEvent). 제목 문구를 뒤져 짐작하지 않으므로 알림 문구가
+ * 바뀌어도 여기가 흔들리지 않는다.
+ */
 const SERIES_SHORT = {
   tiebreaker: '순위결정전',
   wildcard: '와일드카드',
@@ -74,9 +80,59 @@ const SERIES_SHORT = {
 };
 
 const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
+const VIBRATE_KEYS = ['start', 'cancel', 'score', 'end'];
+const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
 
 let teamCode = 'NC';
 let subscription = null; // 현재 기기의 PushSubscription
+
+/*
+ * 진동 on/off. 서버가 아니라 이 기기의 IndexedDB 에 둔다 — "이 알림을 보낼지"는
+ * 서버가 판단해야 하지만(그래서 on_start 등은 DB 컬럼), "이미 받은 알림을 이
+ * 기기가 어떻게 표시할지"는 순수 로컬 문제라 서버를 거칠 이유가 없다. 서비스
+ * 워커(sw.js)는 앱이 안 떠 있어도 푸시를 받을 수 있으므로, localStorage 가
+ * 아니라 서비스워커에서도 읽히는 IndexedDB 를 쓴다.
+ */
+function openSettingsDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('nc-alert', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getVibrateSettings() {
+  let db;
+  try {
+    db = await openSettingsDb();
+    return await new Promise((resolve) => {
+      const req = db.transaction('kv', 'readonly').objectStore('kv').get('vibrate');
+      req.onsuccess = () => resolve({ ...DEFAULT_VIBRATE, ...req.result });
+      req.onerror = () => resolve(DEFAULT_VIBRATE);
+    });
+  } catch {
+    return DEFAULT_VIBRATE; // IndexedDB 를 못 쓰는 환경이면 기존 동작(항상 켬)으로
+  } finally {
+    // 열어 둔 연결은 반드시 닫는다. 남아 있으면 나중에 스키마 버전을 올릴 때
+    // upgrade 가 onblocked 로 막힌다.
+    db?.close();
+  }
+}
+
+async function setVibrateSettings(settings) {
+  const db = await openSettingsDb();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(settings, 'vibrate');
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
 
 /* ─────────── 공통 ─────────── */
 
@@ -135,20 +191,81 @@ function serialize(sub) {
   if ('ResizeObserver' in window) new ResizeObserver(syncTopbarHeight).observe(topbar);
 }
 
+const TAB_KEY = 'tab';
+
+/**
+ * 탭을 켠다. 없는 이름이면 아무것도 바꾸지 않고 false 를 준다.
+ *
+ * 탭 목록을 따로 두지 않고 그때그때 DOM 에서 찾는다 — 탭이 늘거나 줄어도
+ * index.html 만 고치면 되고 이 파일은 그대로다.
+ */
+function activateTab(name) {
+  const tabs = $$('.tab');
+  const tab = tabs.find((t) => t.dataset.tab === name);
+  if (!tab) return false;
+
+  /*
+   * 넘어가는 방향을 패널에 남겨 둔다(data-enter). 스와이프한 손가락 방향에서
+   * 내용이 따라 들어와야 두 화면이 옆으로 이어져 있다는 느낌이 난다.
+   *
+   * 방향을 여기서 정하므로 탭을 눌렀을 때도 같은 움직임이 난다 — 스와이프는
+   * 결국 .tab.click() 을 부르기 때문이다(아래 touchend 핸들러).
+   *
+   * 첫 렌더(from === -1)나 같은 탭을 다시 누른 경우(from === to)에는 붙이지
+   * 않는다. 움직일 이유가 없는데 움직이면 그게 더 어색하다.
+   */
+  const from = tabs.findIndex((t) => t.classList.contains('is-active'));
+  const to = tabs.indexOf(tab);
+  const enter = from === -1 || from === to ? null : to > from ? 'next' : 'prev';
+
+  tabs.forEach((t) => t.classList.toggle('is-active', t === tab));
+  $$('.panel').forEach((p) => {
+    const on = p.id === `panel-${name}`;
+    if (on && enter) p.dataset.enter = enter;
+    else if (on) delete p.dataset.enter;
+    p.classList.toggle('is-active', on);
+  });
+
+  /*
+   * 탭을 옮기면 그 탭의 맨 위부터 보여 준다.
+   *
+   * 스크롤은 탭마다 따로가 아니라 문서 하나를 공유한다. 그대로 두면 옮겨 간
+   * 탭의 중간에 떨어지거나(기록 600px → 알림 600px), 목적지가 짧으면 0으로
+   * 잘렸다가 돌아올 때 덜컥거린다(일정 900px → 달력 뷰 0px). 어느 쪽이든
+   * 규칙이 없어 예측이 안 된다.
+   *
+   * 같은 탭을 다시 누른 경우(from === to)는 옮긴 것이 아니므로 건드리지 않는다.
+   * 일정 탭의 "오늘로 스크롤"은 이 뒤에 따로 돌아 제자리를 잡는다(클릭 핸들러).
+   */
+  if (from !== to) window.scrollTo(0, 0);
+  return true;
+}
+
 $$('.tab').forEach((tab) => {
   tab.addEventListener('click', () => {
-    $$('.tab').forEach((t) => t.classList.toggle('is-active', t === tab));
-    $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === `panel-${tab.dataset.tab}`));
+    const name = tab.dataset.tab;
+    activateTab(name);
+
+    // 새로고침·앱 재실행 후에도 보던 탭으로 돌아오게 한다. 테마와 같은 방식이다.
+    localStorage.setItem(TAB_KEY, name);
 
     // 일정 탭을 열 때 리스트가 기본으로 보이는 뷰라면 오늘 경기 위치로 맞춘다.
     // 패널이 display:none 인 동안은 scrollIntoView 가 아무 효과가 없으므로,
     // 반드시 패널이 보이게 된 "이 시점"에 호출해야 한다.
-    if (tab.dataset.tab === 'schedule' &&
+    if (name === 'schedule' &&
         document.querySelector('.view-btn.is-active')?.dataset.view === 'list') {
       scrollListToToday();
     }
   });
 });
+
+/*
+ * 마지막으로 보던 탭 복원.
+ *
+ * 저장된 값이 없거나(첫 방문) 그 탭이 사라졌으면 activateTab 이 false 를 주고,
+ * 마크업에 이미 붙어 있는 is-active 가 그대로 기본값이 된다.
+ */
+activateTab(localStorage.getItem(TAB_KEY));
 
 /**
  * 좌우 스와이프로 탭을 넘긴다. 탭 버튼 클릭과 같은 경로(.tab.click())를 타서
@@ -158,7 +275,8 @@ $$('.tab').forEach((tab) => {
  * 스와이프 판정에서 제외한다 — 표를 넘겨 보려는 손짓이 탭 전환으로 새면 안 된다.
  */
 {
-  const TAB_ORDER = ['history', 'schedule', 'standings', 'settings'];
+  // 순서는 마크업의 탭 순서를 그대로 따른다. 탭이 늘어도 고칠 곳이 없다.
+  const TAB_ORDER = $$('.tab').map((t) => t.dataset.tab);
   const SWIPE_MIN_X = 60; // 오탭 방지용 최소 이동 거리
   let touchStartX = 0;
   let touchStartY = 0;
@@ -212,20 +330,44 @@ function renderTable(standings) {
   const tiers = standings.tiers ?? [];
   const rows = [];
 
+  /*
+   * 오늘 경기가 아직 안 끝난 팀이 하나라도 있을 때만 반영 표시를 붙인다.
+   * 다 끝났거나 경기가 없는 날은 표시할 것이 없으므로 아예 그리지 않는다 —
+   * 모든 줄에 체크가 붙어 있는 화면은 아무 정보도 주지 않는다.
+   */
+  const showMarks = standings.teams.some((t) => t.todayGame === 'pending');
+
   for (const t of standings.teams) {
     // 이 순위에서 시작하는 진출 구간이 있으면 라벨을 먼저 넣는다.
     const tier = tiers.find((x) => x.from === t.rank);
     if (tier) rows.push(el('p', { class: 'tier-label', text: tier.title }));
 
     const isMine = t.code === teamCode;
+    // 연속 기록. 네이버의 continuousGameResult 를 그대로 쓴다 — "3승" · "2패".
+    const streak = String(t.streak ?? '');
+
+    // 팀명 바로 뒤에 붙인다. 따로 칸을 만들면 좁은 화면에서 이름이 밀린다.
+    const mark = showMarks && t.todayGame
+      ? el('span', {
+          class: `tmark ${t.todayGame}`,
+          text: t.todayGame === 'done' ? '✓' : '•',
+          title: t.todayGame === 'done' ? '오늘 경기 반영됨' : '오늘 경기 미반영',
+        })
+      : null;
 
     rows.push(
       el('div', { class: `trow${isMine ? ' mine' : ''}` },
         el('span', { class: 'trank', text: String(t.rank) }),
-        el('span', { class: 'tname', text: t.name }),
+        el('span', { class: 'tname' }, t.name, mark),
         el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
         el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
         el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
+        // 연승은 초록, 연패는 빨강 — 경기 카드의 승/패 색(.verdict)과 같은 변수를 쓴다.
+        el('span', {
+          class: `tstreak${/승$/.test(streak) ? ' win' : /패$/.test(streak) ? ' lose' : ''}`,
+          text: streak,
+        }),
+        el('span', { class: 'tleft', text: String(t.remaining ?? '') }),
       ),
     );
 
@@ -243,21 +385,48 @@ function renderTable(standings) {
         el('span', { class: 'trec', text: '승-무-패' }),
         el('span', { class: 'tpct', text: '승률' }),
         el('span', { class: 'tgb', text: '승차' }),
+        el('span', { class: 'tstreak', text: '연속' }),
+        el('span', { class: 'tleft', text: '잔여' }),
       ),
       ...rows,
     ),
   );
 }
 
+/**
+ * 순위가 언제 것인지 알려 주는 한 줄.
+ *
+ * 서버가 조회 시각(fetchedAt)을 함께 내려준다. 화면을 그린 시각이 아니라 이
+ * 값을 써야 하는 이유: 네이버 조회가 실패하면 서버가 마지막으로 확인된 순위로
+ * 되돌아가는데(season.js 의 getCacheStale), 그때 렌더 시각을 보여 주면 방금
+ * 받아온 최신 순위처럼 보인다.
+ */
+const STANDINGS_STALE_MS = 30 * 60 * 1000; // 캐시 수명이 10분이라, 이보다 오래됐으면 갱신이 막힌 것이다
+
+function standingsStamp(standings) {
+  if (!standings) return '';
+
+  // 이 기능이 나오기 전에 캐시된 값에는 fetchedAt 이 없다. 캐시가 갱신되면 사라진다.
+  if (!standings.fetchedAt) return '경기 종료 시 갱신';
+
+  const at = new Date(standings.fetchedAt);
+  const time = at.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  // 오늘 것이면 시각만, 지난 날짜면 날짜까지 밝힌다.
+  const when =
+    at.toDateString() === new Date().toDateString()
+      ? time
+      : `${at.getMonth() + 1}월 ${at.getDate()}일 ${time}`;
+
+  return Date.now() - at.getTime() > STANDINGS_STALE_MS
+    ? `${when} 기준 · 최신 순위를 불러오지 못했어요`
+    : `${when} 기준 · 경기 종료 시 갱신`;
+}
+
 function renderStandings({ standings, outlook }) {
   renderTable(standings);
 
   const stamp = $('#standings-updated');
-  if (stamp) {
-    stamp.textContent = standings
-      ? `${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })} 기준 · 경기 종료 시 갱신`
-      : '';
-  }
+  if (stamp) stamp.textContent = standingsStamp(standings);
 
   const slot = $('#outlook');
   clear(slot);
@@ -272,6 +441,15 @@ function renderStandings({ standings, outlook }) {
       : status === 'eliminated'
         ? el('span', { class: 'pill out', text: '포스트시즌 탈락 확정' })
         : el('span', { class: 'pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
+
+  // 바로 아래 순위와의 승차. 위 칩과 같은 줄에 나란히 붙는다(.pill 이 inline-block).
+  // 꼴찌면 서버가 chaser 를 null 로 주므로 칩 자체가 안 붙는다.
+  const chaserPill = outlook.chaser
+    ? el('span', {
+        class: 'pill chaser',
+        text: `${outlook.chaser.rank}위와 ${outlook.chaser.gap}경기차`,
+      })
+    : null;
 
   // 문장은 서버가 es-hangul 로 조사까지 맞춰 내려준다. 여기서는 그대로 쓴다.
   const note = outlook.note ?? '';
@@ -290,6 +468,7 @@ function renderStandings({ standings, outlook }) {
         }),
       ),
       pill,
+      chaserPill,
       el('p', { class: 'rank-note', text: note }),
       status !== 'eliminated' &&
         el('div', { class: 'gap-bar' }, el('i', { style: `width:${Math.round(progress * 100)}%` })),
@@ -322,7 +501,16 @@ function formatStart(iso) {
   return `${h < 12 ? '오전' : '오후'} ${h % 12 || 12}:${m[2]}`;
 }
 
-function renderGame(g) {
+/**
+ * 사용자가 직접 여닫은 경기. gameId → 열림 여부.
+ *
+ * 자동 갱신(20·60초)이 카드를 통째로 다시 그리므로, 이 기억이 없으면 펼쳐 둔
+ * 경기가 갱신될 때마다 도로 접힌다. 명시적으로 누른 경기만 여기에 남고,
+ * 나머지는 그때그때의 기본값(가장 최근 경기만 펼침)을 따른다.
+ */
+const gameOpenState = new Map();
+
+function renderGame(g, defaultOpen) {
   // 홈/원정 관점은 서버가 이미 계산해 보낸다(perspective()) — /api/schedule 과 같은 방식.
   const isHome = g.isHome;
   const mine = { name: g.teamName, score: g.teamScore };
@@ -387,7 +575,7 @@ function renderGame(g) {
     ? el('div', { class: 'game-times', text: timeParts.join(' · ') })
     : null;
 
-  const scoreboard = renderScoreboard(g.scoreboard, mine.name, opp.name);
+  const scoreboard = renderScoreboard(g.scoreboard, mine.name, opp.name, isHome);
 
   const timeline = g.events.length
     ? el('ul', { class: 'timeline' },
@@ -404,25 +592,49 @@ function renderGame(g) {
       )
     : null;
 
-  // 진행 중인 경기는 다크 표면에 올린다. 크림 카드 사이에서 확실히 구분되고,
-  // 크림↔다크 교차가 이 디자인 시스템의 페이싱 방식이다.
-  return el('article', { class: `card${isLive ? ' card-dark' : ''}` },
-    el('div', { class: 'game-meta' },
-      seriesTag,
-      isLive ? el('span', { class: 'tag live', text: 'Live' }) : null,
-      el('span', { text: `${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}` }),
-      el('span', { class: 'game-status', text: status }),
+  /*
+   * 접기·펼치기는 <details> 에 맡긴다 — 클릭 토글·키보드·스크린리더가 전부
+   * 브라우저 기본 동작이라 직접 구현할 것이 없다.
+   *
+   * <summary>(항상 보임)에 경기 결과를, 그 아래(펼쳤을 때만 보임)에 전광판·
+   * 시각·타임라인을 둔다. 접힌 상태에서 "결과만 간단히"가 그대로 나온다.
+   */
+  const open = gameOpenState.get(g.gameId) ?? defaultOpen;
+
+  // 카드 색은 모든 경기가 같다. 진행 중 표시는 Live 태그가 맡는다.
+  const card = el('details', { class: 'card game', open: open || null },
+    el('summary', { class: 'game-summary' },
+      el('div', { class: 'game-meta' },
+        seriesTag,
+        isLive ? el('span', { class: 'tag live', text: 'Live' }) : null,
+        el('span', { text: `${g.stadium ?? ''} · ${isHome ? '홈' : '원정'}` }),
+        el('span', { class: 'game-status', text: status }),
+      ),
+      el('div', { class: 'matchup' },
+        team(mine, done && diff < 0),
+        el('span', { class: 'colon', text: ':' }),
+        team(opp, done && diff > 0),
+      ),
+      verdict,
     ),
-    el('div', { class: 'matchup' },
-      team(mine, done && diff < 0),
-      el('span', { class: 'colon', text: ':' }),
-      team(opp, done && diff > 0),
-    ),
-    verdict,
     scoreboard,
     times,
     timeline,
   );
+
+  /*
+   * 기본값과 다를 때만 기억한다.
+   *
+   * open 속성을 달고 만든 <details> 는 DOM 에 붙을 때 toggle 이 한 번 발생한다.
+   * 그것까지 "사용자가 폈다"로 저장하면, 기본으로 펼쳐졌던 어제 경기가 오늘
+   * 경기 시작 후에도 계속 펼쳐진 채로 남는다. 기본값과 같아지면 기억을 지워
+   * 그 뒤로는 다시 기본 규칙을 따르게 한다.
+   */
+  card.addEventListener('toggle', () => {
+    if (card.open === defaultOpen) gameOpenState.delete(g.gameId);
+    else gameOpenState.set(g.gameId, card.open);
+  });
+  return card;
 }
 
 /**
@@ -431,11 +643,16 @@ function renderGame(g) {
  * 가로 폭이 좁은 화면에서 연장전(10회 이상)까지 다 담기면 넘칠 수 있어
  * 바깥을 가로 스크롤 컨테이너로 감싼다.
  */
-function renderScoreboard(sb, teamLabel, oppLabel) {
+function renderScoreboard(sb, teamLabel, oppLabel, isHome) {
   if (!sb) return null;
 
   const innings = Math.max(sb.team.innings.length, sb.opp.innings.length, 9);
-  const at = (arr, i) => (arr[i] != null ? String(arr[i]) : '');
+  /*
+   * 치지 않은 이닝은 빈칸이 아니라 '-' 로 둔다. 빈칸이면 "0점을 냈다"와 "치지
+   * 않았다"가 구분되지 않는데, 홈팀이 앞선 채 9회말을 치지 않는 경우는 흔하다.
+   * 네이버 전광판도 같은 표기를 쓴다.
+   */
+  const at = (arr, i) => (arr[i] != null ? String(arr[i]) : '-');
 
   const row = (label, side, isMine) =>
     el('tr', { class: isMine ? 'mine' : null },
@@ -459,7 +676,21 @@ function renderScoreboard(sb, teamLabel, oppLabel) {
           el('th', { text: 'B' }),
         ),
       ),
-      el('tbody', {}, row(teamLabel, sb.team, true), row(oppLabel, sb.opp, false)),
+      /*
+       * 원정팀이 위, 홈팀이 아래 — 전광판에서 위아래는 곧 초·말이다.
+       *
+       * 우리 팀을 늘 위에 두면 홈경기에서 두 줄이 뒤바뀌어, 9회초와 9회말을
+       * 정반대로 읽게 된다. 2026-09-01 창원 NC:KIA 7:2 가 그랬다 — NC(홈)가
+       * 앞서 9회말을 치지 않아 그 칸이 비었는데, NC 가 윗줄이라 "원정팀이
+       * 9회초를 안 쳤고, 홈팀은 이기는데도 9회말을 쳤다"로 보였다. 둘 다
+       * 야구에서 나올 수 없는 장면이라 숫자가 틀린 것처럼 읽힌다.
+       *
+       * 우리 팀 강조는 위치가 아니라 tr.mine 클래스가 맡으므로(style.css)
+       * 순서를 바꿔도 어느 쪽이 우리 팀인지는 그대로 드러난다.
+       */
+      el('tbody', {}, ...(isHome
+        ? [row(oppLabel, sb.opp, false), row(teamLabel, sb.team, true)]
+        : [row(teamLabel, sb.team, true), row(oppLabel, sb.opp, false)])),
     ),
   );
 }
@@ -484,6 +715,16 @@ async function loadHistory() {
       return;
     }
 
+    /*
+     * 기본으로 펼칠 경기 하나를 고른다: "이미 시작한 것 중 가장 최근 경기".
+     * 서버가 최신순으로 주므로 앞에서부터 처음 걸리는 것이 그것이다.
+     *
+     * 오늘 경기가 시작되면 그 경기가 이 자리를 가져가고, 직전까지 펼쳐져 있던
+     * 어제 경기는 자동으로 접힌다 — 규칙 하나로 두 경우가 모두 처리된다.
+     * 아직 시작 전인 경기는 펼쳐 봐야 보여 줄 내용이 없어 건너뛴다.
+     */
+    const featured = games.find((g) => g.phase !== 'before')?.gameId ?? null;
+
     const byDay = new Map();
     for (const g of games) {
       if (!byDay.has(g.gameDate)) byDay.set(g.gameDate, []);
@@ -491,7 +732,10 @@ async function loadHistory() {
     }
 
     for (const [date, list] of byDay) {
-      box.append(el('h2', { class: 'day-title', text: formatDay(date) }), ...list.map(renderGame));
+      box.append(
+        el('h2', { class: 'day-title', text: formatDay(date) }),
+        ...list.map((g) => renderGame(g, g.gameId === featured)),
+      );
     }
   } catch (err) {
     clear(box);
@@ -505,6 +749,50 @@ async function loadStandings() {
   } catch {
     /* 순위는 부가 정보다. 실패해도 기록 화면은 그대로 쓴다. */
   }
+}
+
+/**
+ * 상대 팀별 시즌 전적. 순위 탭의 순위표 아래에 붙는다.
+ *
+ * 값은 서버가 일정에서 세어 함께 내려준다(kbo.js headToHead) — 순위 API 에는
+ * 상대전적이 없어서 일정을 재료로 쓴다. 그래서 순위가 아니라 *일정*을 불러올 때
+ * 그려진다.
+ *
+ * 무승부는 0 이어도 적는다. 위 순위표가 "85승 2무 47패" 형식이라 여기만 빼면
+ * 다른 표처럼 보이고, 행마다 글자 수가 달라져 세로로 읽기 어려워진다.
+ *
+ * 칸 순서와 승률 표기(.625)는 위 순위표와 맞춘다. 승률은 KBO 공식대로 무승부를
+ * 뺀 값이라(kbo.js headToHead) 순위표의 승률과 같은 기준으로 읽힌다.
+ * 승부가 하나도 안 난 상대는 pct 가 null 로 오므로 '-' 로 둔다.
+ */
+function renderHeadToHead(rows) {
+  const box = $('#h2h');
+  clear(box);
+
+  if (!rows?.length) {
+    box.append(el('p', { class: 'empty', text: '아직 맞대결 기록이 없어요.' }));
+    return;
+  }
+
+  const n = (v) => el('span', { class: 'n', text: String(v) });
+
+  box.append(
+    el('div', { class: 'card table-card' },
+      ...rows.map((r) =>
+        el('div', { class: 'h2h-row' },
+          el('span', { class: 'h2h-opp', text: r.opp }),
+          // 숫자를 고정 폭 칸(.n)에 담아 자릿수가 달라도 세로로 줄이 맞게 한다.
+          // 문자열로만 두면 "10승"과 "9승"의 시작점이 한 자리씩 밀린다.
+          el('span', { class: 'h2h-rec' },
+            n(r.wins), '승 ', n(r.draws), '무 ', n(r.losses), '패'),
+          el('span', {
+            class: 'h2h-pct',
+            text: r.pct === null ? '-' : r.pct.toFixed(3).replace(/^0/, ''),
+          }),
+        ),
+      ),
+    ),
+  );
 }
 
 /* ─────────── 일정 ─────────── */
@@ -768,13 +1056,23 @@ $('#btn-today').addEventListener('click', () => {
 });
 
 async function loadSchedule() {
-  const box = $('#schedule-list');
+  // 비어 있거나 실패했을 때의 안내는 지금 켜져 있는 뷰에 띄운다.
+  // 기본이 달력이라, 리스트에만 넣으면 아무것도 안 보이는 화면이 된다.
+  const box = () =>
+    document.querySelector('.view-btn.is-active')?.dataset.view === 'calendar'
+      ? $('#schedule-calendar')
+      : $('#schedule-list');
+
   try {
     scheduleData = await api('/api/schedule');
 
+    // 상대전적은 이 응답에 함께 실려 온다. 일정이 비어도(비시즌) 빈 상태를
+    // 그려 줘야 스켈레톤이 남지 않으므로 아래 early return 보다 먼저 부른다.
+    renderHeadToHead(scheduleData.headToHead);
+
     if (!scheduleData.games.length) {
-      clear(box);
-      box.append(
+      clear(box());
+      box().append(
         el('p', { class: 'empty' }, '일정이 없어요.', el('br'), '비시즌이거나 일정이 아직 나오지 않았습니다.'),
       );
       return;
@@ -784,8 +1082,8 @@ async function loadSchedule() {
     // 오늘 경기 위치로 맞추는 시점은 여기가 아니라 "일정 탭을 열 때"·"리스트로
     // 전환할 때"다(패널이 안 보이는 동안은 스크롤이 무효하다). .tab 클릭 핸들러 참고.
   } catch (err) {
-    clear(box);
-    box.append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
+    clear(box());
+    box().append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
   }
 }
 
@@ -806,8 +1104,18 @@ function setPushUi(state, desc) {
 }
 
 function applySettings(settings) {
-  $$('.sw input').forEach((input) => {
+  // [data-key] 로 한정한다 — 진동 스위치는 같은 .sw 마크업을 쓰지만
+  // data-vibrate-key 를 쓰고 서버 settings 객체에는 없는 값이라, 한정하지
+  // 않으면 여기서 매번 꺼진 것으로 잘못 덮어써진다.
+  $$('.sw input[data-key]').forEach((input) => {
     input.checked = Boolean(settings?.[input.dataset.key]);
+  });
+}
+
+async function applyVibrateSettings() {
+  const settings = await getVibrateSettings();
+  $$('.vibrate-toggle').forEach((input) => {
+    input.checked = Boolean(settings[input.dataset.vibrateKey]);
   });
 }
 
@@ -911,6 +1219,25 @@ $$('.sw input').forEach((input) => {
   });
 });
 
+$$('.vibrate-toggle').forEach((input) => {
+  input.addEventListener('change', async () => {
+    // 아는 키만 저장한다. sw.js 는 서버가 보낸 kind 로 이 값을 찾으므로,
+    // 마크업에 오타난 키가 섞이면 스위치는 정상처럼 보이면서 진동은 계속
+    // 기본값(켬)으로 동작한다 — 조용히 어긋나는 대신 여기서 걸러 낸다.
+    const settings = Object.fromEntries(
+      $$('.vibrate-toggle')
+        .filter((i) => VIBRATE_KEYS.includes(i.dataset.vibrateKey))
+        .map((i) => [i.dataset.vibrateKey, i.checked]),
+    );
+    try {
+      await setVibrateSettings(settings);
+    } catch (err) {
+      input.checked = !input.checked; // 저장 실패 시 UI 를 되돌린다.
+      toast(err.message);
+    }
+  });
+});
+
 /* ─────────── 시작 ─────────── */
 
 async function initPush() {
@@ -968,6 +1295,9 @@ async function initPush() {
   }
 
   await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
+
+  // 진동 설정은 순수 로컬(IndexedDB)이라 구독 여부와 무관하게 항상 불러온다.
+  applyVibrateSettings().catch((err) => console.error('vibrate settings load failed', err));
 
   initPush().catch((err) => {
     setPushUi('error', `알림을 준비하지 못했어요: ${err.message}`);

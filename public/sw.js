@@ -3,6 +3,59 @@
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
+/*
+ * 진동 패턴(ms 단위, [울림, 멈춤, 울림...]). 화면을 안 봐도 종류가 느껴지도록
+ * 득점은 짧게 두 번, 종료는 길게 세 번으로 나눴다.
+ *
+ * Chrome/Android 계열에서만 동작한다 — iOS Safari 는 이 옵션 자체를 조용히
+ * 무시한다(에러 없음). 알림음은 브라우저/OS 기본음이 자동 재생되며, 커스텀
+ * 사운드는 Notifications API 표준에 없어(2018년 표준에서 제외) 지정할 방법이
+ * 없다. silent:true 로 끌 수만 있고 바꿀 수는 없다.
+ */
+const VIBRATE = {
+  start: [200],
+  cancel: [200, 100, 200],
+  score: [120, 80, 120],
+  end: [200, 100, 200, 100, 200],
+};
+
+/**
+ * 진동 on/off 설정을 읽는다. app.js 가 같은 IndexedDB('nc-alert' → 'kv' 스토어의
+ * 'vibrate' 키)에 저장한 값을 그대로 읽는다 — 앱이 안 떠 있어도 푸시는 오므로,
+ * 페이지 쪽 상태(변수·localStorage)에 의존할 수 없다.
+ *
+ * 못 읽으면(첫 실행이라 스토어가 비어 있거나, IndexedDB 를 못 쓰는 환경이면)
+ * 기존 동작대로 전부 켠 것으로 본다.
+ */
+function getVibrateSettings() {
+  return new Promise((resolve) => {
+    let req;
+    try {
+      req = indexedDB.open('nc-alert', 1);
+    } catch {
+      resolve({});
+      return;
+    }
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => {
+      const db = req.result;
+      // 연결은 어느 경로로 빠져나가든 닫는다. 남겨 두면 나중에 스키마 버전을
+      // 올릴 때 upgrade 가 막히고, 그러면 아래 onblocked 로 떨어진다.
+      const done = (value) => { db.close(); resolve(value); };
+
+      if (!db.objectStoreNames.contains('kv')) { done({}); return; }
+      const getReq = db.transaction('kv', 'readonly').objectStore('kv').get('vibrate');
+      getReq.onsuccess = () => done(getReq.result ?? {});
+      getReq.onerror = () => done({});
+    };
+    req.onerror = () => resolve({});
+    // 다른 탭이 옛 버전 연결을 쥐고 있으면 open 이 여기서 멈춘다. 이 갈래를
+    // 비워 두면 Promise 가 영영 settle 되지 않아 event.waitUntil 도 끝나지 않고,
+    // 그러면 알림 자체가 안 뜬다 — 설정을 포기하고 기본값으로 진행한다.
+    req.onblocked = () => resolve({});
+  });
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -11,27 +64,95 @@ self.addEventListener('push', (event) => {
     data = { title: 'NC 다이노스', body: event.data?.text() ?? '' };
   }
 
-  const options = {
-    body: data.body ?? '',
-    icon: '/icon-192.png',
-    badge: '/badge-96.png',
-    // 같은 종류의 알림은 최신 것으로 덮어써 알림창이 쌓이지 않게 한다.
-    // 단 득점은 매 상황을 따로 보여주는 편이 유용하므로 태그를 나눈다.
-    tag: data.kind === 'score' ? `score-${data.ts}` : `nc-${data.kind ?? 'info'}`,
-    renotify: true,
-    timestamp: data.ts ?? Date.now(),
-    data: { url: '/' },
-  };
+  event.waitUntil((async () => {
+    const vibrateSettings = await getVibrateSettings();
+    const vibrateOn = vibrateSettings[data.kind] ?? true;
 
-  event.waitUntil(Promise.all([
-    self.registration.showNotification(data.title ?? 'NC 다이노스', options),
-    // 앱이 열려 있으면 화면도 그 자리에서 갱신하게 알린다 — 알림만 뜨고
-    // 내용은 새로고침해야 바뀌는 상황을 없앤다. (app.js 의 refresh)
-    self.clients.matchAll({ type: 'window' }).then((list) => {
-      for (const client of list) client.postMessage({ type: 'refresh' });
-    }),
-  ]));
+    const options = {
+      body: data.body ?? '',
+      icon: '/icon-192.png',
+      badge: '/badge-96.png',
+      /*
+       * 같은 tag 의 알림은 새로 뜨지 않고 기존 알림을 제자리에서 덮어쓴다.
+       * 그래서 tag 는 "덮어써도 되는 범위"와 정확히 같아야 한다.
+       *
+       * 이벤트 id 가 있으면 그것만 쓴다. 이벤트 하나 = 알림 하나이고, 서버가
+       * 같은 이벤트를 다시 보내도(배달 확인이 없을 때의 재발송) tag 가 같아
+       * 제자리 갱신될 뿐 두 번 뜨지 않는다. ts 를 쓰면 재발송마다 tag 가 달라져
+       * 그 보장이 깨진다.
+       *
+       * id 가 없는 payload(테스트 알림, 옛 서버)는 종전 규칙으로 흘린다 —
+       * 종류만으로 묶으면 어제 경기의 알림을 덮어써 새 알림이 안 온 것처럼
+       * 보이므로 경기까지 붙이고, 득점은 한 경기에 여러 번 나므로 ts 로 가른다.
+       */
+      tag: data.id != null
+        ? `nc-${data.id}`
+        : data.kind === 'score'
+          ? `score-${data.ts}`
+          : `nc-${data.kind ?? 'info'}-${data.gameId ?? data.ts}`,
+      renotify: true,
+      timestamp: data.ts ?? Date.now(),
+      vibrate: vibrateOn ? (VIBRATE[data.kind] ?? [200]) : [],
+      data: { url: '/' },
+    };
+
+    /*
+     * 이미 떠 있는 알림인지 단말이 먼저 확인한다. 같은 이벤트 id 면 같은 tag 라,
+     * 다시 띄워 봐야 더 보여 줄 것이 없고 renotify 때문에 한 번 더 울리기만 한다.
+     *
+     * 재발송만 검사하면 부족하다 — FCM 이 첫 푸시를 물고 있다가 재발송보다 늦게
+     * 흘리는 경우가 있어(2026-09-17 관측: 확인 신호가 다음 푸시에 묶여 2~3초 뒤
+     * 한꺼번에 도착) 그때 원래 푸시가 같은 tag 로 다시 울린다. 방향과 무관하게
+     * 막으려면 id 가 있는 모든 알림을 검사해야 한다.
+     *
+     * 서버는 "배달 확인이 안 왔다"까지만 알 수 있고 그 확인 자체가 실패할 때가
+     * 있으므로(2026-09-02: 화면에는 떴는데 확인만 안 올라간 건), 다시 띄울지는
+     * 알림함을 직접 볼 수 있는 단말이 정한다. 넘길 때도 확인은 다시 올려 보낸다.
+     *
+     * 사용자가 읽고 지운 뒤에 오면 알림함에 없으므로 다시 뜬다. 놓친 알림을
+     * 살리는 것이 목적이라 그 편을 택했다 — 반대로 하면 정작 못 받은 알림도 안 뜬다.
+     */
+    if (data.id != null) {
+      const already = await self.registration.getNotifications({ tag: options.tag });
+      if (already.length > 0) {
+        await reportDelivered(data.id);
+        return;
+      }
+    }
+
+    await Promise.all([
+      self.registration.showNotification(data.title ?? 'NC 다이노스', options),
+      // 앱이 열려 있으면 화면도 그 자리에서 갱신하게 알린다 — 알림만 뜨고
+      // 내용은 새로고침해야 바뀌는 상황을 없앤다. (app.js 의 refresh)
+      self.clients.matchAll({ type: 'window' }).then((list) => {
+        for (const client of list) client.postMessage({ type: 'refresh' });
+      }),
+    ]);
+
+    // 알림이 실제로 떴다고 서버에 알린다. 서버는 FCM 에 넘긴 것까지만 알 수
+    // 있어 이 신호가 없으면 단말에서 사라진 알림을 재지 못한다.
+    // showNotification 이 끝난 뒤에만 부른다 — "띄웠다"는 뜻이니까.
+    // 실패해도 알림은 이미 떠 있으므로 삼킨다. id 가 없는 payload(테스트 알림)는
+    // 서버에 대응하는 행이 없어 보내지 않는다.
+    if (data.id != null) await reportDelivered(data.id);
+  })());
 });
+
+async function reportDelivered(id) {
+  try {
+    const sub = await self.registration.pushManager.getSubscription();
+    if (!sub) return;
+    await fetch('/api/delivered', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: sub.endpoint, id }),
+    });
+  } catch {
+    // 서버가 잠깐 안 받아도 알림은 이미 떴다. 여기서 실패를 올리면
+    // waitUntil 이 거부돼 브라우저가 "백그라운드에서 갱신됨" 같은 대체
+    // 알림을 띄울 수 있다 — 조용히 넘긴다.
+  }
+}
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();

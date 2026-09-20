@@ -8,20 +8,54 @@ const nowIso = () => new Date().toISOString();
 /* ─────────────── 캐시 ─────────────── */
 
 /** 만료되지 않은 캐시 값을 돌려준다. 없거나 만료됐으면 null. */
-export async function getCache(db, key) {
+async function readCache(db, key, allowExpired) {
   const row = await db
     .prepare('SELECT value, expires_at FROM cache WHERE key = ?')
     .bind(key)
     .first();
 
   if (!row) return null;
-  if (Date.parse(row.expires_at) <= Date.now()) return null;
+  if (!allowExpired && Date.parse(row.expires_at) <= Date.now()) return null;
 
   try {
     return JSON.parse(row.value);
   } catch {
     return null; // 저장된 값이 깨졌으면 캐시 미스로 취급한다.
   }
+}
+
+export const getCache = (db, key) => readCache(db, key, false);
+
+/**
+ * 만료 여부를 무시하고 저장된 값을 읽는다.
+ *
+ * 외부 API 조회가 실패했을 때 "마지막으로 확인됐던 값"으로 되돌아가기 위한 것이다.
+ * putCache 는 행을 지우지 않고 덮어쓰기만 하므로, 만료된 값도 테이블에 그대로
+ * 남아 있다 — 이 함수는 그것을 꺼내 쓴다.
+ *
+ * 평상시 경로에서는 절대 쓰지 않는다. 실패한 catch 안에서만 부른다.
+ */
+export const getCacheStale = (db, key) => readCache(db, key, true);
+
+/**
+ * 날짜별 캐시(plan:·today:) 중 오래된 것을 지운다.
+ *
+ * 이 두 키만 하루 한 개씩 늘어난다. 지난 날짜의 값은 다시 읽히지 않으므로
+ * 남겨 둘 이유가 없다. 반면 연도별 키(opener:·schedule:·standings:)는
+ * 개수가 늘지 않고, 만료된 값이 곧 getCacheStale 의 폴백 재료이므로 건드리지 않는다.
+ *
+ * 키가 `접두사:YYYY-MM-DD` 라 사전순과 날짜순이 같다. 그래서 범위 비교만으로
+ * 고를 수 있고, key 가 기본 키라 인덱스를 그대로 탄다.
+ *
+ * @param {string} olderThan 이 날짜(YYYY-MM-DD) 이전 것을 지운다. 해당일은 남는다.
+ */
+export async function pruneDatedCache(db, olderThan) {
+  const range = (prefix) =>
+    db
+      .prepare('DELETE FROM cache WHERE key >= ? AND key < ?')
+      .bind(`${prefix}:`, `${prefix}:${olderThan}`);
+
+  await db.batch([range('plan'), range('today')]);
 }
 
 /** ttlMs 가 0 이하이면 즉시 만료된 값으로 넣어 사실상 무효화한다. */
@@ -50,20 +84,36 @@ export async function loadStates(db, gameIds) {
     .all();
 
   return new Map(
-    (results ?? []).map((r) => [
-      r.game_id,
-      {
-        gameId: r.game_id,
-        homeCode: r.home_code,
-        awayCode: r.away_code,
-        homeScore: r.home_score,
-        awayScore: r.away_score,
-        phase: r.phase,
-        series: r.series,
-        cancelled: Boolean(r.cancelled),
-        suspended: Boolean(r.suspended),
-      },
-    ]),
+    (results ?? []).map((r) => {
+      // 직전 틱까지 확인된 홈런 기록 문자열 목록. 저장된 전광판 JSON에서
+      // 꺼낸다 — 이 값을 위해 새 컬럼을 두지 않고 이미 있는 scoreboard 에
+      // 얹었다. Array.isArray 로 거르는 이유: 예전에 hr 을 개수(숫자)로
+      // 저장했던 적이 있어(되돌린 이력), 그 시절 값이 아직 남아 있어도
+      // 배열이 아니면 빈 목록으로 취급해 조용히 무시한다.
+      let hr = [];
+      try {
+        const parsed = JSON.parse(r.scoreboard)?.hr;
+        if (Array.isArray(parsed)) hr = parsed;
+      } catch {
+        /* 전광판이 없거나(경기 전) 깨졌으면 빈 목록으로 취급 */
+      }
+
+      return [
+        r.game_id,
+        {
+          gameId: r.game_id,
+          homeCode: r.home_code,
+          awayCode: r.away_code,
+          homeScore: r.home_score,
+          awayScore: r.away_score,
+          phase: r.phase,
+          series: r.series,
+          cancelled: Boolean(r.cancelled),
+          suspended: Boolean(r.suspended),
+          hr,
+        },
+      ];
+    }),
   );
 }
 
@@ -106,10 +156,65 @@ export function upsertStateStmt(db, g, scoreboardJson = null) {
     );
 }
 
+/**
+ * 이번 틱에 받은 원본 상태를 그대로 남긴다. 화면·알림과 무관한 디버깅 전용
+ * 로그다 — 네이버가 상태를 실제로 언제 바꿨는지, 우리가 매 분 제대로
+ * 폴링했는지를 나중에 D1 콘솔에서 SELECT 로 확인하려는 목적.
+ */
+export function insertPollLogStmt(db, g) {
+  return db
+    .prepare(
+      `INSERT INTO poll_log (game_id, status_code, status_info, home_score, away_score, created_at)
+       VALUES (?,?,?,?,?,?)`,
+    )
+    .bind(g.gameId, g.statusCode, g.statusInfo, g.homeScore, g.awayScore, nowIso());
+}
+
+/** poll_log 는 디버깅용이라 오래 둘 필요 없다 — 6개월 지난 건 지운다. */
+export async function prunePollLog(db, olderThanIso) {
+  await db.prepare('DELETE FROM poll_log WHERE created_at < ?').bind(olderThanIso).run();
+}
+
 /* ─────────────── 이벤트 ─────────────── */
 
 /**
+ * 주어진 경기가 모두 마무리됐고, 그 마지막이 cutoff 보다 이전인지.
+ *
+ * 경기가 끝난 뒤 폴링을 멈추는 판단에 쓴다. 종료(end)와 취소(cancel) 중
+ * 어느 쪽이든 더 지켜볼 이유가 없으므로 함께 센다.
+ *
+ * 별도 컬럼 대신 events 를 보는 이유: 이벤트의 created_at 이 곧 "우리가 종료를
+ * 감지한 시각"이라 그대로 쓸 수 있다. game_state.updated_at 은 매 틱 덮어써져서
+ * 종료 시각을 담지 못한다.
+ *
+ * @param {string[]} gameIds 지금 감시 중인 경기들
+ * @param {string} cutoffIso 이 시각 이전에 마무리됐으면 멈춰도 되는 기준선
+ */
+export async function allSettledBefore(db, gameIds, cutoffIso) {
+  if (gameIds.length === 0) return true;
+
+  const marks = gameIds.map(() => '?').join(',');
+  const row = await db
+    .prepare(
+      `SELECT COUNT(DISTINCT game_id) AS done, MAX(created_at) AS last_at
+         FROM events
+        WHERE kind IN ('end','cancel') AND game_id IN (${marks})`,
+    )
+    .bind(...gameIds)
+    .first();
+
+  // created_at 은 UTC ISO 문자열이라 사전순 비교가 곧 시각 비교다.
+  return row?.done === gameIds.length && row.last_at != null && row.last_at < cutoffIso;
+}
+
+/**
  * 이벤트를 기록한다. dedup_key 가 UNIQUE 이므로 같은 전이는 두 번 들어가지 않는다.
+ *
+ * kind 컬럼에는 발송용 ev.kind 가 아니라 기록용 ev.recordKind 를 넣는다 —
+ * 이 값은 기록 탭 타임라인이 읽어 라벨과 아이콘을 고른다. 실점이 유일하게
+ * 둘이 갈리는 경우로, 알림은 score 로 보내고 기록에는 concede 로 남는다.
+ * (detect.js push 참고)
+ *
  * @returns {Promise<boolean>} 실제로 새로 삽입됐으면 true (= 지금 발송해야 함)
  */
 export async function insertEvent(db, game, ev) {
@@ -120,11 +225,85 @@ export async function insertEvent(db, game, ev) {
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
-      game.gameId, game.gameDate, ev.kind, ev.series, ev.dedupKey,
+      game.gameId, game.gameDate, ev.recordKind ?? ev.kind, ev.series, ev.dedupKey,
       ev.title, ev.body, game.homeScore, game.awayScore, nowIso(),
     )
     .run();
 
+  // 새로 들어갔으면 그 행의 id, dedup_key 충돌로 무시됐으면 null.
+  // OR IGNORE 로 건너뛴 경우 last_row_id 에 직전 값이 남아 있을 수 있어
+  // changes 로 먼저 거른다. 호출부는 진리값으로 "발송할지"를, 값으로는
+  // 푸시 payload 에 실을 id 를 쓴다(sw.js 가 tag 와 배달 확인에 쓴다).
+  if ((res.meta?.changes ?? 0) === 0) return null;
+  return res.meta.last_row_id;
+}
+
+/**
+ * 배달 확인이 안 온 이벤트를 재발송 대상으로 골라 온다.
+ *
+ * 창을 두 겹으로 좁힌다.
+ *   olderThan  발송 직후는 뺀다. 확인이 늦게 오는 경우가 있어(2026-09-02 실측
+ *              2분 53초) 너무 이르면 멀쩡히 받은 알림을 다시 보내게 된다.
+ *   newerThan  한참 지난 것은 포기한다. 경기가 끝나고 한참 뒤에 뜨는 알림은
+ *              놓친 것을 알리는 값보다 혼란이 크다.
+ *
+ * resent_at 이 비어 있는 것만 고른다 — 재발송은 이벤트당 한 번이다.
+ *
+ * isHome 은 subscribersFor 가 "홈경기만 받기" 설정을 거르는 데 필요하다.
+ * events 에는 없고 game_state 에만 있어 join 해서 구한다.
+ *
+ * created_at 은 재발송 알림에 원래 감지 시각을 싣기 위해 함께 가져온다
+ * (index.js broadcast 의 ts 참고).
+ */
+export async function listUndelivered(db, teamCode, { olderThan, newerThan }) {
+  const { results } = await db
+    .prepare(
+      `SELECT e.id, e.kind, e.series, e.title, e.body, e.game_id, e.created_at, g.home_code
+         FROM events e
+         JOIN game_state g ON g.game_id = e.game_id
+        WHERE e.delivered_at IS NULL
+          AND e.resent_at IS NULL
+          AND e.created_at <= ?
+          AND e.created_at >= ?
+        ORDER BY e.id`,
+    )
+    .bind(olderThan, newerThan)
+    .all();
+
+  return (results ?? []).map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    series: r.series,
+    title: r.title,
+    body: r.body,
+    gameId: r.game_id,
+    createdAt: r.created_at,
+    isHome: r.home_code === teamCode,
+  }));
+}
+
+/** 재발송했음을 남긴다. 이 값이 있으면 다시 고르지 않는다(이벤트당 1회). */
+export async function markResent(db, eventId) {
+  await db
+    .prepare(`UPDATE events SET resent_at = ? WHERE id = ?`)
+    .bind(nowIso(), eventId)
+    .run();
+}
+
+/**
+ * 단말이 알림을 실제로 띄웠다고 알려오면 그 시각을 남긴다.
+ *
+ * 첫 응답만 남긴다(delivered_at IS NULL 조건) — 구독이 여럿이어도 "누군가는
+ * 봤다"까지만 기록한다. 되돌릴 일이 없는 값이라 덮어쓰지 않는다.
+ *
+ * @returns {Promise<boolean>} 이번 호출로 채워졌으면 true. 이미 채워져 있었거나
+ *   그런 id 가 없으면 false — 어느 쪽이든 호출부가 구분할 필요는 없다.
+ */
+export async function markDelivered(db, eventId) {
+  const res = await db
+    .prepare(`UPDATE events SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL`)
+    .bind(nowIso(), eventId)
+    .run();
   return (res.meta?.changes ?? 0) > 0;
 }
 

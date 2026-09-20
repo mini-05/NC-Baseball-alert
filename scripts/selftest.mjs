@@ -8,13 +8,19 @@
  * 복호문이 원문과 일치하면 구현이 맞다는 뜻이다.
  */
 
-import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url } from '../src/push.js';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url, sendPush } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
-         seasonYearOf, filterCurrentSeason, fetchScoreboard } from '../src/kbo.js';
-import { isPollWindow } from '../src/season.js';
-import { validateEndpoint, validateKeys, checkOrigin } from '../src/security.js';
-import { subscribersFor } from '../src/db.js';
+         seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf, headToHead,
+         inningSumMatches } from '../src/kbo.js';
+import { isPollWindow, pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener } from '../src/season.js';
+import { boardCoversScore } from '../src/index.js';
+import { validateEndpoint, validateKeys, checkOrigin, readJson } from '../src/security.js';
+import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
+         listUndelivered, markResent } from '../src/db.js';
+import { dispatchKindOf } from '../src/detect.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -138,6 +144,47 @@ async function testVapid() {
   // 앞뒤 공백·따옴표가 붙어도 정상 동작해야 한다 (콘솔 붙여넣기 사고 방지)
   const padded = await makeVapidHeader(endpoint, ` "${publicKey}" `, `\n ${jwk.d} \n`, 'mailto:t@e.com');
   check('공백·따옴표가 붙어도 통과', padded.startsWith('vapid t='));
+}
+
+/* ══ 2-b. 재발송 묶음(Topic) ══ */
+
+/**
+ * 원본과 재발송이 같은 Topic 으로 나가야 FCM 이 대기 중인 원본을 교체한다.
+ * 값이 달라지면(예: Date.now() 를 섞으면) 교체가 안 돼 알림이 두 번 울린다.
+ */
+async function testTopic() {
+  const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const p256dh = bytesToB64url(new Uint8Array(await crypto.subtle.exportKey('raw', ua.publicKey)));
+  const auth = bytesToB64url(crypto.getRandomValues(new Uint8Array(16)));
+
+  const vapid = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const env = {
+    VAPID_PUBLIC_KEY: bytesToB64url(new Uint8Array(await crypto.subtle.exportKey('raw', vapid.publicKey))),
+    VAPID_PRIVATE_KEY: (await crypto.subtle.exportKey('jwk', vapid.privateKey)).d,
+    VAPID_SUBJECT: 'mailto:test@example.com',
+  };
+  const sub = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc123', p256dh, auth };
+
+  const sent = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => { sent.push(init.headers); return { ok: true, status: 201 }; };
+  try {
+    await sendPush(sub, { kind: 'score', id: 77, ts: 1000 }, env);
+    await sendPush(sub, { kind: 'score', id: 77, ts: 1000, resend: true }, env);
+    await sendPush(sub, { kind: 'score', id: 78, ts: 2000 }, env);
+    await sendPush(sub, { kind: 'test', title: '테스트 알림', ts: 3000 }, env);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  check('원본과 재발송의 Topic 이 같다', sent[0].Topic === sent[1].Topic && sent[0].Topic === 'e77',
+    `${sent[0].Topic} / ${sent[1].Topic}`);
+  check('다른 이벤트는 다른 Topic', sent[2].Topic === 'e78', sent[2].Topic);
+  check('테스트 알림에는 Topic 이 없다', sent[3].Topic === undefined, String(sent[3].Topic));
+
+  // RFC 8030 §5.4 — 32자 이내, URL-safe base64 알파벳만.
+  check('Topic 이 RFC 8030 제한을 지킨다',
+    sent.every((h) => h.Topic === undefined || (h.Topic.length <= 32 && /^[A-Za-z0-9_-]+$/.test(h.Topic))));
 }
 
 /* ══ 3. 시리즈 판별 ══ */
@@ -266,13 +313,111 @@ function testDetect() {
   check('득점 dedup 키에 점수 포함', scored[0]?.dedupKey.endsWith(':score:3-0'), scored[0]?.dedupKey);
   check('정규시즌 scope', scored[0]?.scope === 'regular');
 
-  check('실점 문구', detectEvents(live(1, 0), live(1, 2), T)[0]?.title === '삼성 2점 실점');
+  /*
+   * 상대 득점 — 문구는 "실점"이 아니라 "득점"으로 알리고, 기록에는 concede 로
+   * 남긴다. 화면의 "실점" 라벨은 이 recordKind 가 정하므로(app.js KIND_LABEL)
+   * 아래 문구를 바꿔도 기록 화면은 흔들리지 않아야 한다.
+   */
+  const conceded = detectEvents(live(1, 0), live(1, 2), T)[0];
+  check('상대 득점 문구', conceded?.title === '삼성 2점 득점', conceded?.title);
+  check('상대 득점은 기록에 concede 로', conceded?.recordKind === 'concede', conceded?.recordKind);
+
+  // 발송용 kind 는 score 그대로여야 한다. concede 로 보내면 KIND_COLUMN 에
+  // 없는 값이라 subscribersFor 가 빈 배열을 돌려줘 알림이 아예 안 나간다.
+  check('상대 득점도 발송은 score 로', conceded?.kind === 'score', conceded?.kind);
+
+  // 우리 팀 득점·양 팀 득점은 기록도 score 다.
+  const ourRun = detectEvents(live(1, 0), live(3, 0), T)[0];
+  check('우리 득점 문구', ourRun?.title === 'NC 2점 득점!', ourRun?.title);
+  check('우리 득점은 기록도 score', ourRun?.recordKind === 'score', ourRun?.recordKind);
+
+  const bothScored = detectEvents(live(1, 1), live(2, 2), T)[0];
+  check('양 팀 득점 문구', bothScored?.title === '양 팀 득점', bothScored?.title);
+  check('양 팀 득점은 기록도 score', bothScored?.recordKind === 'score', bothScored?.recordKind);
+
+  /*
+   * 점수가 내려가는 경우 — 네이버가 기록을 정정하거나 일시적으로 옛 값·0:0 을
+   * 돌려줄 때다. 변화만 보면(!== 0) "삼성 0점 득점", "삼성 -2점 득점" 같은
+   * 알림이 만들어지고, dedup_key 때문에 되돌릴 수도 없다.
+   */
+  check('홈 점수 하향은 알리지 않는다', detectEvents(live(3, 0), live(2, 0), T).length === 0,
+    JSON.stringify(detectEvents(live(3, 0), live(2, 0), T).map((e) => e.title)));
+  check('원정 점수 하향도 알리지 않는다', detectEvents(live(2, 5), live(2, 3), T).length === 0);
+  check('일시적으로 0:0 이 와도 알리지 않는다', detectEvents(live(3, 2), live(0, 0), T).length === 0);
+
+  // 우리가 득점하면서 상대 점수가 정정돼 내려간 경우. oppGained === 0 으로 묶으면
+  // 우리 득점인데 "삼성 -1점 득점" 이 나간다 — 역전 순간에 정반대로 알리는 셈이다.
+  const comeback = detectEvents(live(2, 3), live(3, 2), T)[0];
+  check('우리 득점 + 상대 하향이면 우리 득점으로 알린다',
+    comeback?.title === 'NC 1점 득점!' && comeback?.recordKind === 'score', comeback?.title);
+
+  // 반대 방향 — 상대가 득점하면서 우리 점수가 내려간 경우.
+  const oppUp = detectEvents(live(3, 1), live(2, 3), T)[0];
+  check('상대 득점 + 우리 하향이면 상대 득점으로 알린다',
+    oppUp?.title === '삼성 2점 득점' && oppUp?.recordKind === 'concede', oppUp?.title);
+
+  // 득점 외 이벤트는 recordKind 를 따로 주지 않으므로 kind 와 같아야 한다.
+  const startEv = detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T)[0];
+  check('시작 이벤트는 recordKind 가 kind 와 같다', startEv?.recordKind === startEv?.kind);
+
+  // ── 득점 이닝 — 전광판이 총점과 맞아떨어질 때만 말한다 ──
+  // (statusInfo 는 폴링 순간의 이닝이라 쓰지 않는다. detect.js scoringInning 참고)
+  const withBoard = (h, a, board) => Object.assign(live(h, a), { board });
+  const side = (innings) => ({ innings, r: 0, h: 0, e: 0, b: 0 });
+  const bodyOf = (prev, cur) => detectEvents(prev, cur, T)[0]?.body;
+
+  check('홈 득점 이닝은 말',
+    bodyOf(live(1, 0), withBoard(3, 0, { home: side([0, 0, 1, 0, 2]), away: side([0, 0, 0, 0, 0]) }))
+      === 'NC 3 : 0 삼성 · 5회말');
+
+  check('원정 득점 이닝은 초',
+    bodyOf(live(1, 0), withBoard(1, 2, { home: side([0, 1]), away: side([0, 2]) }))
+      === 'NC 1 : 2 삼성 · 2회초');
+
+  check('이닝별 합이 총점과 다르면 이닝 생략 (두 API 시점 어긋남)',
+    bodyOf(live(1, 0), withBoard(3, 0, { home: side([0, 0, 1]), away: side([0, 0, 0]) }))
+      === 'NC 3 : 0 삼성');
+
+  check('양 팀이 같은 틱에 득점하면 이닝 생략',
+    bodyOf(live(1, 1), withBoard(2, 2, { home: side([1, 1]), away: side([1, 1]) }))
+      === 'NC 2 : 2 삼성');
+
+  check('전광판이 없으면 이닝 생략',
+    bodyOf(live(1, 0), withBoard(2, 0, null)) === 'NC 2 : 0 삼성');
+
+  check('연장 이닝도 그대로 센다',
+    bodyOf(live(3, 3), withBoard(4, 3, { home: side([1, 0, 0, 0, 0, 2, 0, 0, 0, 1]), away: side([]) }))
+      === 'NC 4 : 3 삼성 · 10회말');
 
   const ended = detectEvents(live(5, 3), g({ statusCode: 'RESULT', homeTeamScore: 5, awayTeamScore: 3 }), T);
   check('경기 종료 · 승리', ended[0]?.title === '경기 종료 · NC 승리', ended[0]?.title);
 
   const lost = detectEvents(live(2, 3), g({ statusCode: 'RESULT', homeTeamScore: 2, awayTeamScore: 7 }), T);
   check('종료 전이에서는 득점 알림 없음', kinds(lost) === 'end', kinds(lost));
+
+  // ENDED — RESULT 확정 전 최대 10여 분 거치는 상태(실측, poll_log). 이걸
+  // 놓치면 그 10분 동안 종료 알림이 밀린다. RESULT 와 동일하게 취급해야 한다.
+  const endedStatus = detectEvents(live(5, 3), g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }), T);
+  check('ENDED 도 종료로 감지', kinds(endedStatus) === 'end', kinds(endedStatus));
+  check('ENDED → RESULT 전이는 중복 아님(같은 스냅샷이면 재알림 없음)',
+    detectEvents(
+      g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }),
+      g({ statusCode: 'RESULT', homeTeamScore: 5, awayTeamScore: 3 }),
+      T,
+    ).length === 0);
+
+  // READY — BEFORE 와 STARTED 사이에 최대 53분 거치는 상태(실측, poll_log).
+  // statusInfo 가 "경기전"이고 점수도 0:0 으로 고정돼 있었다. live 로 처리하면
+  // 실제 플레이볼보다 최대 53분 이른 "경기 시작" 알림이 나간다.
+  const beforeToReady = detectEvents(g(), g({ statusCode: 'READY' }), T);
+  check('READY 는 아직 경기 전 — 시작 알림 없음', beforeToReady.length === 0, kinds(beforeToReady));
+
+  const readyToStarted = detectEvents(
+    g({ statusCode: 'READY' }),
+    g({ statusCode: 'STARTED', statusInfo: '1회초' }),
+    T,
+  );
+  check('READY → STARTED 전이에서 시작 알림', kinds(readyToStarted) === 'start', kinds(readyToStarted));
 
   // 원정 경기: 대상 팀이 away 여도 관점이 뒤집히지 않아야 한다.
   const away = (h, a) => g({
@@ -303,6 +448,26 @@ function testDetect() {
     ks({ statusCode: 'STARTED', homeTeamScore: 1, awayTeamScore: 0 }), T,
   );
   check('포스트시즌 득점 제목', ksScore[0]?.title === '[한국시리즈] NC 1점 득점!', ksScore[0]?.title);
+
+  // ── 홈런 표시 — index.js 가 poll() 에서 game.hr 을 채워 넘기는 것을 흉내낸다.
+  // hr 은 "오스틴33호(8회3점 손주환)" 같은 원문 문자열 목록이지 개수가 아니다.
+  const withHr = (game, hr) => Object.assign(game, { hr });
+  const HR1 = '오스틴33호(8회3점 손주환)';
+  const HR2 = '박건우5호(3회1점 김진수)';
+
+  const hrScored = detectEvents(withHr(live(1, 0), []), withHr(live(4, 0), [HR1]), T);
+  check('새 홈런이 원문 그대로 붙음', hrScored[0]?.body.endsWith(` · ${HR1}`), hrScored[0]?.body);
+
+  const noHrScored = detectEvents(withHr(live(1, 0), [HR1]), withHr(live(2, 0), [HR1]), T);
+  check('목록이 그대로면(새 홈런 없음) 표시 없음', !noHrScored[0]?.body.includes(HR1), noHrScored[0]?.body);
+
+  // 전광판 조회 실패로 hr 목록이 직전 값을 그대로 이어받은 경우 — 새 홈런이 아니다.
+  const carriedOver = detectEvents(withHr(live(1, 0), [HR1]), withHr(live(1, 1), [HR1]), T);
+  check('hr 목록이 안 늘면 실점이어도 표시 없음', !carriedOver[0]?.body.includes(HR1), carriedOver[0]?.body);
+
+  // 한 틱에 둘 이상 새로 생기면(드물지만) 둘 다 붙인다.
+  const twoHr = detectEvents(withHr(live(1, 0), []), withHr(live(5, 0), [HR1, HR2]), T);
+  check('한 틱에 홈런 2개면 둘 다 표시', twoHr[0]?.body.includes(HR1) && twoHr[0]?.body.includes(HR2), twoHr[0]?.body);
 }
 
 /* ══ 5. 포스트시즌 진출 판정 ══ */
@@ -352,6 +517,77 @@ function testOutlook() {
   // 진출 기준을 못 받아오면 추측하지 않고 판정을 포기한다.
   check('cutoff 없으면 null', postseasonOutlook({ ...standings, cutoff: null }, 'NC', 144) === null);
   check('없는 팀이면 null', postseasonOutlook(standings, 'XX', 144) === null);
+
+  /*
+   * 바로 아래 순위와의 승차(chaser). 표의 승차 칸은 1위 기준이라 이웃끼리의
+   * 거리가 안 드러나서 따로 계산한다.
+   */
+  check('목록 마지막이면 쫓아오는 팀 없음', o.chaser === null, JSON.stringify(o.chaser));
+
+  const withBelow = structuredClone(standings);
+  withBelow.teams.push(
+    { code: 'LT', name: '롯데', rank: 9, games: 106, wins: 45, draws: 1, losses: 60, pct: 0.429, gb: 17.5 },
+  );
+  const oBelow = postseasonOutlook(withBelow, 'NC', 144);
+  check('바로 아래 순위를 집어낸다', oBelow.chaser?.rank === 9 && oBelow.chaser?.name === '롯데',
+    JSON.stringify(oBelow.chaser));
+  // 둘 다 1위 기준 승차라 빼면 이웃 간 거리가 된다: 17.5 - 14.5
+  check('아래와의 승차 = 3', oBelow.chaser?.gap === 3, String(oBelow.chaser?.gap));
+
+  /*
+   * 공동 순위. rank + 1 로 찾으면(8위가 둘이면 다음은 10위) 빈손이 되므로
+   * 정렬된 목록의 다음 팀을 쓴다. 승차 0 은 "바로 뒤에 붙어 있다"는 뜻이다.
+   */
+  const tied = structuredClone(standings);
+  tied.teams.push(
+    { code: 'LT', name: '롯데', rank: 8, games: 105, wins: 48, draws: 2, losses: 55, pct: 0.466, gb: 14.5 },
+  );
+  const oTied = postseasonOutlook(tied, 'NC', 144);
+  check('공동 순위여도 다음 팀을 찾는다', oTied.chaser?.name === '롯데' && oTied.chaser?.gap === 0,
+    JSON.stringify(oTied.chaser));
+}
+
+/* ══ 5-b. 상대 전적 ══ */
+
+function testHeadToHead() {
+  const g = (oppName, result, series = 'regular') => ({ oppName, result, series });
+
+  const rows = headToHead([
+    g('삼성', 'win'), g('삼성', 'win'), g('삼성', 'lose'), g('삼성', 'draw'),
+    g('LG', 'lose'), g('LG', 'lose'), g('LG', 'win'),
+    g('KIA', 'win'),
+    // 아직 안 끝난 경기는 result 가 null 이라 세지 않는다.
+    g('한화', null),
+  ]);
+
+  const find = (o) => rows.find((r) => r.opp === o);
+  check('상대별로 묶어 센다', find('삼성')?.wins === 2 && find('삼성')?.losses === 1, JSON.stringify(find('삼성')));
+  check('무승부도 따로 센다', find('삼성')?.draws === 1, String(find('삼성')?.draws));
+  check('안 끝난 경기는 빼고 센다', find('한화') === undefined, JSON.stringify(find('한화')));
+
+  // KBO 공식대로 무승부는 승률에서 뺀다: 2/(2+1)
+  check('승률은 무승부 제외', Math.abs(find('삼성').pct - 2 / 3) < 1e-9, String(find('삼성').pct));
+  // 강한 상대부터: 삼성 .667 > KIA 1.000? → KIA 가 먼저다
+  check('승률 높은 상대부터 정렬', rows[0].opp === 'KIA' && rows.at(-1).opp === 'LG',
+    rows.map((r) => r.opp).join(','));
+
+  /*
+   * 포스트시즌은 빼고 센다. 16경기 표본에 5경기짜리 시리즈가 섞이면 조용히
+   * 오염되고, 숫자만 봐서는 알아채기 어렵다.
+   */
+  const mixed = headToHead([g('두산', 'win'), g('두산', 'win', 'semi_playoff'), g('두산', 'lose', 'korean_series')]);
+  check('포스트시즌은 상대전적에서 제외', mixed[0].wins === 1 && mixed[0].losses === 0,
+    JSON.stringify(mixed[0]));
+
+  /*
+   * 승부가 하나도 안 난 상대. 승/(승+패) 가 0 으로 나누게 되므로 null 이어야
+   * 한다 — 그대로 계산하면 화면에 NaN 이 찍힌다.
+   */
+  const allDraw = headToHead([g('키움', 'draw'), g('키움', 'draw')]);
+  check('승도 패도 없으면 승률 null (0 나눗셈 방지)',
+    allDraw[0].pct === null && allDraw[0].draws === 2, JSON.stringify(allDraw[0]));
+
+  check('경기가 없으면 빈 목록', headToHead([]).length === 0);
 }
 
 /* ══ 6. 시즌·시간대 게이팅 ══ */
@@ -370,6 +606,234 @@ function testWindow() {
   check('종료 후 8시간 → 감시 안 함', !isPollWindow(plan, start + 8 * HOUR));
   check('경기 없는 날 → 감시 안 함', !isPollWindow({ games: [] }, start));
   check('시각을 못 읽으면 안전하게 감시', isPollWindow({ games: [{ startAt: 'broken' }] }, start));
+
+  // 시간 창 안에 든 경기만 골라야 한다 — 감시 종료 판단의 대상이 되는 목록이다.
+  const two = {
+    games: [
+      { gameId: 'TODAY', startAt: '2026-08-22T18:30:00' },
+      { gameId: 'YESTERDAY', startAt: '2026-08-21T18:30:00' },
+    ],
+  };
+  const ids = (now) => pollWindowGames(two, now).map((g) => g.gameId).join(',');
+  check('창 안의 경기만 고른다', ids(start + HOUR) === 'TODAY', ids(start + HOUR));
+  check('창 밖이면 빈 목록', pollWindowGames(two, start + 9 * HOUR).length === 0);
+}
+
+/* ══ 6-b. 경기가 끝난 뒤 감시를 접는 판단 ══ */
+
+/** events 테이블만 지원하는 최소 D1 흉내. end/cancel 행을 세어 돌려준다. */
+function fakeEventsDb(rows) {
+  return {
+    prepare: () => ({
+      bind(...ids) {
+        this.ids = ids;
+        return this;
+      },
+      first: async function () {
+        const hit = rows.filter((r) => this.ids.includes(r.game_id));
+        return {
+          done: new Set(hit.map((r) => r.game_id)).size,
+          last_at: hit.length ? hit.map((r) => r.created_at).sort().at(-1) : null,
+        };
+      },
+    }),
+  };
+}
+
+async function testSettled() {
+  const db = fakeEventsDb([
+    { game_id: 'A', created_at: '2026-08-22T13:00:00.000Z' },
+    { game_id: 'B', created_at: '2026-08-22T13:20:00.000Z' },
+  ]);
+  const late = '2026-08-22T14:00:00.000Z'; // 두 경기 모두 끝나고 40분 지난 시점
+  const soon = '2026-08-22T13:10:00.000Z'; // B 가 아직 안 끝난 시점
+
+  check('감시 대상이 없으면 멈춘다', await allSettledBefore(db, [], late));
+  check('모두 끝나고 유예가 지나면 멈춘다', await allSettledBefore(db, ['A', 'B'], late));
+  check('한 경기만 끝났으면 계속 본다', !(await allSettledBefore(db, ['A', 'B'], soon)));
+  check('기록에 없는 경기가 섞이면 계속 본다', !(await allSettledBefore(db, ['A', 'C'], late)));
+}
+
+/**
+ * cache 테이블만 지원하는 최소 D1 흉내.
+ *
+ * @param rows 미리 들어 있는 캐시 행. { 'schedule:2026': { value, expires_at } }
+ *   value 는 문자열(JSON), expires_at 은 ISO 문자열이다. 비우면 캐시 미스가 되어
+ *   실제 조회 경로를 타게 된다.
+ */
+function fakeCacheDb(rows = {}) {
+  const deletes = []; // pruneDatedCache 가 무엇을 지우려 했는지 확인용
+  return {
+    deletes,
+    prepare(sql) {
+      return {
+        _sql: sql,
+        _args: [],
+        bind(...args) { this._args = args; return this; },
+        async first() { return rows[this._args[0]] ?? null; },
+        async run() {
+          if (this._sql.startsWith('DELETE')) deletes.push(this._args);
+          // putCache 의 upsert. 저장된 값을 다음 first() 가 읽을 수 있게 남긴다.
+          if (this._sql.includes('INSERT INTO cache')) {
+            const [key, value, expires_at] = this._args;
+            rows[key] = { value, expires_at };
+          }
+          return {};
+        },
+      };
+    },
+    async batch(stmts) {
+      for (const s of stmts) await s.run();
+      return [];
+    },
+  };
+}
+
+async function testScheduleResilience() {
+  const originalFetch = globalThis.fetch;
+  const expired = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  try {
+    // 네이버 API가 완전히 죽어 fetch 자체가 예외를 던지는 상황을 흉내낸다.
+    globalThis.fetch = async () => { throw new Error('naver down'); };
+
+    // 남아 있는 캐시조차 없으면(첫 배포 직후 등) 빈 목록으로 물러난다.
+    const games = await loadSchedule({ DB: fakeCacheDb(), TEAM_CODE: 'NC' }, 2026);
+    check(
+      '일정 조회 실패 + 캐시 없음 → 빈 목록',
+      Array.isArray(games) && games.length === 0,
+      JSON.stringify(games),
+    );
+
+    // 만료된 캐시가 남아 있으면 그것으로 되돌아간다 — 이번 변경의 핵심.
+    const lastGood = [{ gameId: '20260822SSNC02026', gameDate: '2026-08-22', oppName: '삼성' }];
+    const staleDb = fakeCacheDb({
+      'schedule:2026': { value: JSON.stringify(lastGood), expires_at: expired },
+    });
+    const fallback = await loadSchedule({ DB: staleDb, TEAM_CODE: 'NC' }, 2026);
+    check(
+      '일정 조회 실패 + 만료 캐시 있음 → 마지막 정상값',
+      JSON.stringify(fallback) === JSON.stringify(lastGood),
+      JSON.stringify(fallback),
+    );
+
+    // 정상 조회에는 조회 시각이 붙는다 — 화면의 "○○ 기준" 표시가 이 값을 쓴다.
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        success: true,
+        result: {
+          seasonTeamStats: [{
+            teamId: 'NC', teamName: 'NC', ranking: 8, gameCount: 107, winGameCount: 48,
+            drawnGameCount: 2, loseGameCount: 57, wra: 0.457, gameBehind: 12.5,
+            continuousGameResult: '3승',
+          }],
+        },
+      }),
+    });
+    const before = Date.now();
+    const fresh = await loadStandings({ DB: fakeCacheDb() }, 2026);
+    const at = Date.parse(fresh?.fetchedAt ?? '');
+    check('정상 조회한 순위에 fetchedAt 부착', at >= before && at <= Date.now(), fresh?.fetchedAt);
+
+    /*
+     * 연속 기록(순위 탭의 '연속' 칸)은 네이버의 continuousGameResult 를 그대로
+     * 실어 보낸다. 이 매핑이 끊기면 화면에서는 칸만 비고 아무 오류도 안 난다 —
+     * 비공식 API라 필드명이 바뀔 수 있어 여기서 고정해 둔다.
+     */
+    check('연속 기록을 순위에 실어 보낸다', fresh?.teams?.[0]?.streak === '3승', fresh?.teams?.[0]?.streak);
+
+    globalThis.fetch = async () => { throw new Error('naver down'); };
+
+    // 순위도 같은 방식으로 되돌아간다.
+    const lastStandings = { year: 2026, teams: [{ code: 'NC', rank: 8 }] };
+    const standDb = fakeCacheDb({
+      'standings:2026': { value: JSON.stringify(lastStandings), expires_at: expired },
+    });
+    const standFallback = await loadStandings({ DB: standDb }, 2026);
+    check(
+      '순위 조회 실패 + 만료 캐시 있음 → 마지막 정상값',
+      standFallback?.teams?.[0]?.rank === 8,
+      JSON.stringify(standFallback),
+    );
+
+    // 만료된 값을 평상시 경로가 집어 오면 안 된다 — getCache 는 여전히 미스여야 한다.
+    const plain = await getCache(
+      fakeCacheDb({ 'schedule:2026': { value: '[1,2,3]', expires_at: expired } }),
+      'schedule:2026',
+    );
+    check('만료된 캐시는 평상시 getCache 로는 안 읽힘', plain === null, JSON.stringify(plain));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+/**
+ * 개막일을 못 정한 결과도 캐시되는지.
+ *
+ * tick() 이 매 틱 resolveSeasonOpener 를 먼저 부르므로, 개막 전(순위표 경기 수 0)이나
+ * 조회 실패를 캐시하지 않으면 1분마다 외부 호출이 나간다 — 이 검사가 그 회귀를 막는다.
+ */
+async function testOpenerCaching() {
+  const originalFetch = globalThis.fetch;
+  try {
+    let fetches = 0;
+    const standingsWith = (gameCount) => async () => {
+      fetches++;
+      return {
+        ok: true,
+        json: async () => ({
+          success: true,
+          result: { seasonTeamStats: [{ teamId: 'NC', teamName: 'NC', ranking: 1, gameCount }] },
+        }),
+      };
+    };
+
+    // 개막 전: 순위표는 오지만 경기 수가 0
+    globalThis.fetch = standingsWith(0);
+    const env = { DB: fakeCacheDb(), TEAM_CODE: 'NC' };
+    for (let i = 0; i < 5; i++) await resolveSeasonOpener(env, 2027);
+    check('개막 전 5틱 → 외부 호출 1회 (결과 null 도 캐시)', fetches === 1, `${fetches}회`);
+
+    // 조회 실패도 마찬가지
+    fetches = 0;
+    globalThis.fetch = async () => { fetches++; throw new Error('naver down'); };
+    const env2 = { DB: fakeCacheDb(), TEAM_CODE: 'NC' };
+    for (let i = 0; i < 5; i++) await resolveSeasonOpener(env2, 2027);
+    check('조회 실패 5틱 → 외부 호출 1회', fetches === 1, `${fetches}회`);
+
+    // 못 정한 결과는 짧게만 캐시된다 — 개막하면 곧 다시 물어봐야 한다.
+    const db3 = fakeCacheDb();
+    await resolveSeasonOpener({ DB: db3, TEAM_CODE: 'NC' }, 2027);
+    const row = await db3.prepare('SELECT value, expires_at FROM cache WHERE key = ?').bind('opener:2027').first();
+    const ttlH = (Date.parse(row?.expires_at ?? '') - Date.now()) / 3600000;
+    check('미확정 캐시는 하루 안에 만료', ttlH > 0 && ttlH < 24, `${ttlH.toFixed(1)}시간`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+/** 날짜별 캐시 청소가 지울 대상과 남길 대상을 올바르게 고르는지. */
+async function testCachePrune() {
+  const db = fakeCacheDb();
+  await pruneDatedCache(db, '2026-08-19');
+
+  const ranges = db.deletes.map((args) => args.join(' ~ '));
+  check('plan: 범위로 지움', ranges.includes('plan: ~ plan:2026-08-19'), ranges.join(' / '));
+  check('today: 범위로 지움', ranges.includes('today: ~ today:2026-08-19'), ranges.join(' / '));
+  check('지우는 대상은 이 둘뿐', db.deletes.length === 2, String(db.deletes.length));
+
+  /*
+   * 범위 비교가 연도별 키를 건드리지 않는지 문자열로 직접 확인한다.
+   * 키가 기본 키라 SQLite 도 같은 사전순 비교를 쓴다.
+   */
+  const inRange = (key, prefix) => key >= `${prefix}:` && key < `${prefix}:2026-08-19`;
+  check('지난 plan 은 범위 안', inRange('plan:2026-08-01', 'plan'));
+  check('오늘 plan 은 범위 밖', !inRange('plan:2026-08-25', 'plan'));
+  check('schedule 은 범위 밖 (폴백 보존)', !inRange('schedule:2026', 'plan'));
+  check('standings 는 범위 밖 (폴백 보존)', !inRange('standings:2026', 'plan'));
+  check('opener 는 범위 밖 (폴백 보존)', !inRange('opener:2026', 'plan'));
+  check('today 키는 plan 범위에 안 걸림', !inRange('today:2026-08-01', 'plan'));
 }
 
 /* ══ 7. 보안 검증 ══ */
@@ -409,6 +873,34 @@ function testSecurity() {
   check('같은 출처 통과', checkOrigin(req('https://app.example.com'), url));
   check('다른 출처 거부', !checkOrigin(req('https://evil.example.com'), url));
   check('Origin 없으면 통과', checkOrigin(req(null), url));
+}
+
+/**
+ * 본문 크기 상한 검사가 문자 수가 아니라 실제 바이트 수로 걸리는지.
+ *
+ * Content-Length 헤더 없이 오는 요청은 declared 검사를 피해 text.length 검사만
+ * 남는다. UTF-8 에서 한글은 3바이트라, text.length 로 재면 같은 4096자라도
+ * ASCII 는 4KB, 한글은 최대 12KB 까지 통과해 상한이 사실상 무력화된다.
+ */
+async function testReadJsonByteLimit() {
+  const req = (text) => ({
+    headers: { get: () => null }, // Content-Length 없음 — text.text() 검사만 남는 경로
+    text: async () => text,
+  });
+
+  // 한글 1400자 ≈ 4200바이트: 문자 수로는 상한(4096) 안이지만 바이트로는 넘는다.
+  const asciiJson = `{"a":"${'a'.repeat(4000)}"}`; // 문자 수·바이트 수 모두 상한 안
+  const koreanOverflow = `{"a":"${'가'.repeat(1400)}"}`; // 문자 수는 상한 안, 바이트는 초과
+
+  check(
+    '문자 수 기준으로는 상한 안인 한글 본문도 바이트 기준으로 거부',
+    !(await readJson(req(koreanOverflow))).ok,
+    `문자 수 ${koreanOverflow.length}, 바이트 ${new TextEncoder().encode(koreanOverflow).byteLength}`,
+  );
+  check(
+    'ASCII 상한 근처 정상 본문은 그대로 통과',
+    (await readJson(req(asciiJson))).ok,
+  );
 }
 
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
@@ -476,12 +968,12 @@ async function testHomeOnly() {
 /* ══ 9. 전광판 조회 ══ */
 
 /** 네이버 record 응답을 흉내 낸다. 실제 2026-08-22 SS@NC 경기 응답을 그대로 옮겨 왔다. */
-function fakeRecordResponse(scoreBoard) {
+function fakeRecordResponse(scoreBoard, etcRecords) {
   return {
     ok: true,
     json: async () => ({
       code: 200, success: true,
-      result: { recordData: scoreBoard ? { scoreBoard } : null },
+      result: { recordData: scoreBoard ? { scoreBoard, etcRecords } : null },
     }),
   };
 }
@@ -498,6 +990,22 @@ async function testScoreboard() {
     check('전광판 파싱 — 이닝 배열', JSON.stringify(sb.away.innings) === '[1,1,0,3,0,0,0,2,1]');
     check('전광판 파싱 — R/H/E/B', sb.home.r === 6 && sb.home.h === 12 && sb.home.e === 1 && sb.home.b === 0);
     check('전광판 파싱 — 원정 R', sb.away.r === 8);
+    check('etcRecords 없으면 홈런 빈 목록', Array.isArray(sb.hr) && sb.hr.length === 0, JSON.stringify(sb.hr));
+
+    // 실제 2026-08-25 NC@LG 10회말 응답에서 그대로 옮겨 왔다(오스틴 8회 3점 홈런).
+    // etcRecords 는 홈런 외에 결승타·실책·도루 같은 다른 기록도 섞여 온다 —
+    // how 로만 걸러야 하고, result 는 재가공 없이 원문 그대로 뽑아야 한다.
+    globalThis.fetch = async () => fakeRecordResponse(
+      { rheb: { away: { r: 4, b: 6, e: 0, h: 10 }, home: { r: 5, b: 5, e: 1, h: 11 } },
+        inn: { away: [0], home: [0] } },
+      [
+        { result: '홍창기(10회 2사 만루서 우중간 안타)', how: '결승타' },
+        { result: '오스틴33호(8회3점 손주환)', how: '홈런' },
+        { result: '오지환(3회)', how: '실책' },
+      ],
+    );
+    const withHr = await fetchScoreboard('20260825NCLG02026');
+    check('etcRecords 에서 홈런만 원문 그대로', JSON.stringify(withHr.hr) === '["오스틴33호(8회3점 손주환)"]', JSON.stringify(withHr.hr));
 
     // 경기 전에는 recordData 자체가 null — 정상이며 오류가 아니다.
     globalThis.fetch = async () => fakeRecordResponse(null);
@@ -516,20 +1024,482 @@ async function testScoreboard() {
   } finally {
     globalThis.fetch = originalFetch;
   }
+
+  // 이닝 합 검증 — detect.js scoringInning 이 이닝을 말해도 되는지 이 함수로
+  // 판단한다(record API 가 schedule API 보다 늦게 응답해 합이 어긋나는 경우 대비).
+  check('이닝 합이 총점과 일치', inningSumMatches([1, 0, 2, 0], 3));
+  check('이닝 합이 총점과 불일치(record API 지연)', !inningSumMatches([1, 0, 1, 0], 3));
+  check('빈 배열은 불일치', !inningSumMatches([], 0));
+  check('배열이 아니면 불일치', !inningSumMatches(undefined, 0));
+
+  // index.js 가 "전광판을 다시 부를지" 판단하는 기준. 한쪽만 어긋나도 못 쓴다 —
+  // 어긋났다는 건 두 API 시점이 갈렸다는 뜻이라 반대쪽도 믿을 근거가 없다.
+  const sb2 = (home, away) => ({ home: { innings: home }, away: { innings: away } });
+  const sc = (h, a) => ({ homeScore: h, awayScore: a });
+
+  check('양쪽 합이 다 맞으면 쓸 수 있다',
+    boardCoversScore(sb2([1, 0, 2], [0, 1, 0]), sc(3, 1)));
+  check('홈만 어긋나도 못 쓴다',
+    !boardCoversScore(sb2([1, 0, 0], [0, 1, 0]), sc(3, 1)));
+  check('원정만 어긋나도 못 쓴다',
+    !boardCoversScore(sb2([1, 0, 2], [0, 0, 0]), sc(3, 1)));
+  check('전광판을 아예 못 받았으면 못 쓴다 (null 에 접근해 터지지 않는다)',
+    !boardCoversScore(null, sc(3, 1)));
+  check('한쪽 배열이 통째로 없어도 터지지 않는다',
+    !boardCoversScore({ home: {}, away: {} }, sc(0, 0)));
+}
+
+/* ══ 11-b. 문자중계 종료 감지 ══ */
+
+/**
+ * 실제 relay 응답(2026-08-29 NC-한화)에서 판정에 쓰는 부분만 남긴 모양.
+ * 종료 블록은 type 99 + "=====" 구분선으로 붙고, 투구·타격 결과는 다른 type 이다.
+ */
+function fakeRelayResponse({ ended, homeScore = 4, awayScore = 11 }) {
+  const playing = [
+    { textOptions: [{ type: 8, text: '9번타자 박정현' }, { type: 1, text: '1구 스트라이크' }] },
+    { textOptions: [{ type: 13, text: '박정현 : 삼진 아웃' }] },
+  ];
+  const finish = {
+    textOptions: [
+      { type: 99, text: '=====================================' },
+      { type: 99, text: '승리투수: 라일리' },
+    ],
+  };
+  return {
+    ok: true,
+    json: async () => ({
+      result: {
+        textRelayData: {
+          currentGameState: { homeScore: String(homeScore), awayScore: String(awayScore), out: '3' },
+          textRelays: ended ? [finish, ...playing] : playing,
+        },
+      },
+    }),
+  };
+}
+
+async function testRelayFinish() {
+  check('회차 추출', inningOf('9회말') === 9 && inningOf('10회초') === 10);
+  check('회차를 못 읽으면 0 (문자중계를 안 보는 쪽이 안전)',
+    inningOf('경기전') === 0 && inningOf(null) === 0 && inningOf(undefined) === 0);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => fakeRelayResponse({ ended: true });
+    const done = await fetchRelayFinish('20260829NCHH02026');
+    check('종료 블록(type 99 + 구분선)을 잡아낸다',
+      done?.homeScore === 4 && done?.awayScore === 11, JSON.stringify(done));
+
+    globalThis.fetch = async () => fakeRelayResponse({ ended: false });
+    check('진행 중이면 null', (await fetchRelayFinish('x')) === null);
+
+    // 종료 판정을 문자열이 아니라 type 으로 하는지 — 타격 결과에 "====" 가 섞여도
+    // 종료로 읽으면 안 된다.
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          textRelayData: {
+            currentGameState: { homeScore: '1', awayScore: '0' },
+            textRelays: [{ textOptions: [{ type: 13, text: '=====' }] }],
+          },
+        },
+      }),
+    });
+    check('type 이 99 가 아니면 종료 아님', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: false, status: 500 });
+    check('HTTP 오류 → null', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    check('네트워크 예외 → null (throw 안 함)', (await fetchRelayFinish('x')) === null);
+
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: {} }) });
+    check('스키마가 달라져도 null', (await fetchRelayFinish('x')) === null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+/* ══ 12. 서비스 워커 진동 설정 ══ */
+
+/**
+ * public/sw.js 를 고치지 않고 그대로 실행해 검증한다. 서비스워커 전용
+ * 전역(self·indexedDB)만 최소한으로 흉내 내므로, 여기서 통과하면 실제 배포되는
+ * 코드가 통과한 것이다 — 로직을 여기에 다시 옮겨 적으면 그때부터 둘이 갈라진다.
+ *
+ * @param {'ok'|'blocked'|'error'} idbMode IndexedDB open 이 어떻게 끝나는지
+ */
+function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}, fetchMode = 'ok') {
+  const fakeIdb = {
+    open() {
+      const req = { result: { objectStoreNames: { contains: () => true } } };
+      req.result.close = onClose;
+      req.result.transaction = () => ({
+        objectStore: () => ({
+          get: () => {
+            const getReq = {};
+            queueMicrotask(() => { getReq.result = store.get('vibrate'); getReq.onsuccess?.(); });
+            return getReq;
+          },
+        }),
+      });
+      queueMicrotask(() => {
+        if (idbMode === 'blocked') req.onblocked?.();
+        else if (idbMode === 'error') req.onerror?.();
+        else req.onsuccess?.();
+      });
+      return req;
+    },
+  };
+
+  const listeners = {};
+  const notifications = [];
+  const acks = []; // sw.js 가 /api/delivered 로 보낸 body 들
+  const sandbox = {
+    self: {
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      registration: {
+        showNotification: (title, opts) => { notifications.push({ title, opts }); return Promise.resolve(); },
+        // 알림함 흉내 — 이미 띄운 것 중 같은 tag 를 돌려준다. 재발송이 왔을 때
+        // sw.js 가 "이미 받은 알림인지" 판단하는 데 쓴다.
+        getNotifications: async ({ tag }) => notifications.filter((n) => n.opts.tag === tag),
+        pushManager: { getSubscription: async () => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/TEST' }) },
+      },
+      clients: { matchAll: async () => [] },
+    },
+    indexedDB: fakeIdb,
+    fetch: async (url, init) => {
+      if (fetchMode === 'fail') throw new Error('offline');
+      acks.push({ url, body: JSON.parse(init.body) });
+      return { ok: true };
+    },
+    console,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8'), sandbox);
+
+  const push = async (payload) => {
+    let waited;
+    listeners.push({ data: { json: () => payload }, waitUntil: (p) => { waited = p; } });
+    await waited;
+  };
+  return { push, notifications, acks };
+}
+
+async function testServiceWorkerVibrate() {
+  const PATTERN = {
+    start: [200], cancel: [200, 100, 200], score: [120, 80, 120], end: [200, 100, 200, 100, 200],
+  };
+  const store = new Map();
+
+  for (const kind of ['start', 'cancel', 'score', 'end']) {
+    for (const on of [true, false]) {
+      store.set('vibrate', { start: true, cancel: true, score: true, end: true, [kind]: on });
+      const { push, notifications } = loadServiceWorker(store);
+      await push({ kind, title: 't', body: 'b', ts: Date.now() });
+
+      const want = on ? PATTERN[kind] : [];
+      check(`${kind} 진동 ${on ? 'ON' : 'OFF'}`,
+        JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(want),
+        JSON.stringify(notifications[0]?.opts.vibrate));
+    }
+  }
+
+  // 설정을 못 읽는 경우들 — 어느 쪽이든 알림 자체는 반드시 떠야 한다.
+  store.clear();
+  {
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
+    check('설정 없음(첫 실행) → 기본값은 켬',
+      JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(PATTERN.score));
+  }
+  {
+    // onblocked 갈래가 비어 있으면 Promise 가 영영 안 끝나 알림이 아예 안 뜬다.
+    const { push, notifications } = loadServiceWorker(store, 'blocked');
+    const raced = await Promise.race([
+      push({ kind: 'score', title: 't', body: 'b', ts: Date.now() }).then(() => 'DONE'),
+      new Promise((r) => setTimeout(() => r('TIMEOUT'), 500)),
+    ]);
+    check('IDB upgrade 대기(onblocked) 여도 알림은 뜬다',
+      raced === 'DONE' && notifications.length === 1, `${raced}, ${notifications.length}건`);
+  }
+  {
+    const { push, notifications } = loadServiceWorker(store, 'error');
+    await push({ kind: 'end', title: 't', body: 'b', ts: Date.now() });
+    check('IDB 열기 실패여도 알림은 뜬다', notifications.length === 1);
+  }
+
+  // 연결을 안 닫으면 나중에 스키마 버전을 올릴 때 upgrade 가 막힌다.
+  store.set('vibrate', { score: true });
+  let closes = 0;
+  const { push } = loadServiceWorker(store, 'ok', () => { closes++; });
+  await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
+  check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
+
+  /*
+   * tag 가 같으면 새 알림이 뜨지 않고 기존 알림을 덮어쓴다. 2026-08-30 실측:
+   * 종료 알림이 서버에서 정상 발송됐는데(Observability fetch OK ×2, 오류 로그
+   * 없음) 단말에 안 뜬 건이 있었다. 종류만으로 tag 를 만들면 어제 경기의
+   * 종료 알림을 덮어쓰기 때문이다.
+   */
+  const tagOf = async (payload) => {
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ title: 't', body: 'b', ts: Date.now(), ...payload });
+    return notifications[0]?.opts.tag;
+  };
+
+  const endA = await tagOf({ kind: 'end', gameId: '20260829NCHH02026' });
+  const endB = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
+  check('경기가 다르면 종료 알림 tag 도 다르다', endA !== endB, `${endA} vs ${endB}`);
+
+  const endSame = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
+  check('같은 경기의 종료 알림은 같은 tag (중복 표시 방지)', endB === endSame);
+
+  const startB = await tagOf({ kind: 'start', gameId: '20260830NCHH02026' });
+  check('같은 경기라도 종류가 다르면 tag 도 다르다', endB !== startB, `${endB} vs ${startB}`);
+
+  // 득점은 한 경기에 여러 번 난다 — 경기 단위로 묶으면 마지막 것만 남는다.
+  const { push: pushScore, notifications: scored } = loadServiceWorker(store);
+  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 1 });
+  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 2 });
+  check('같은 경기의 득점은 매번 다른 tag',
+    scored[0]?.opts.tag !== scored[1]?.opts.tag,
+    `${scored[0]?.opts.tag} vs ${scored[1]?.opts.tag}`);
+
+  // gameId 가 없는 payload(테스트 알림)도 겹치면 안 된다.
+  const t1 = await tagOf({ kind: 'test', ts: 1 });
+  const t2 = await tagOf({ kind: 'test', ts: 2 });
+  check('gameId 없는 알림은 ts 로 갈린다', t1 !== t2, `${t1} vs ${t2}`);
+
+  /*
+   * 이벤트 id 가 있으면 tag 는 id 하나로 정해진다. 서버가 같은 이벤트를 다시
+   * 보낼 때(배달 확인이 없을 때의 재발송) ts 는 새로 찍히므로, ts 기반 tag 로는
+   * 같은 알림이 두 번 뜬다. id 기반이면 제자리 갱신으로 끝난다.
+   */
+  const first = await tagOf({ kind: 'score', id: 66, ts: 1 });
+  const resend = await tagOf({ kind: 'score', id: 66, ts: 2 });
+  check('같은 이벤트를 다시 보내도 tag 가 같다 (재발송 중복 방지)', first === resend, `${first} vs ${resend}`);
+  const other = await tagOf({ kind: 'score', id: 67, ts: 2 });
+  check('이벤트가 다르면 tag 도 다르다', first !== other, `${first} vs ${other}`);
+
+  // ── 배달 확인 — 알림을 띄운 뒤 서버에 id 를 알린다 ──
+  {
+    const { push, acks } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 66, title: 't', body: 'b', ts: 1 });
+    check('띄운 뒤 /api/delivered 에 id 와 endpoint 를 보낸다',
+      acks.length === 1 && acks[0].url === '/api/delivered'
+        && acks[0].body.id === 66 && acks[0].body.endpoint.endsWith('/TEST'),
+      JSON.stringify(acks));
+  }
+  {
+    const { push, acks, notifications } = loadServiceWorker(store);
+    await push({ kind: 'test', title: 't', body: 'b', ts: 1 });
+    check('id 없는 payload(테스트 알림)는 배달 확인을 안 보낸다',
+      acks.length === 0 && notifications.length === 1);
+  }
+  {
+    // 확인 요청이 실패해도 알림은 이미 떠 있다. 여기서 waitUntil 이 거부되면
+    // 브라우저가 대체 알림을 띄우거나 SW 를 문제로 볼 수 있다 — 삼켜야 한다.
+    const { push, notifications } = loadServiceWorker(store, 'ok', () => {}, 'fail');
+    const outcome = await push({ kind: 'end', id: 69, title: 't', body: 'b', ts: 1 })
+      .then(() => 'RESOLVED', () => 'REJECTED');
+    check('배달 확인 실패가 알림을 막지 않는다', outcome === 'RESOLVED' && notifications.length === 1,
+      `${outcome}, ${notifications.length}건`);
+  }
+
+  /*
+   * ── 재발송 ──
+   * 서버의 "확인이 안 왔다"는 판단은 틀릴 수 있다(2026-09-02: 화면에는 떴는데
+   * 확인만 실패). 그래서 다시 띄울지는 단말이 알림함을 보고 정한다.
+   */
+  {
+    const { push, notifications, acks } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 75, title: 't', body: 'b', ts: 1 });
+    check('재발송 전: 알림 1건', notifications.length === 1);
+
+    await push({ kind: 'score', id: 75, title: 't', body: 'b', ts: 2, resend: true });
+    check('이미 떠 있으면 재발송으로 다시 울리지 않는다', notifications.length === 1,
+      `${notifications.length}건`);
+    check('대신 배달 확인을 다시 올린다 (서버가 그만 보내도록)',
+      acks.filter((a) => a.body.id === 75).length === 2,
+      JSON.stringify(acks.map((a) => a.body.id)));
+  }
+  {
+    // 알림함에 없으면(못 받았거나 사용자가 지웠거나) 재발송은 정상적으로 뜬다.
+    // 이게 이 기능의 목적이다 — 놓친 알림을 살리는 것.
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'end', id: 76, title: 't', body: 'b', ts: 1, resend: true });
+    check('알림함에 없으면 재발송은 정상적으로 뜬다', notifications.length === 1,
+      `${notifications.length}건`);
+
+    /*
+     * 그때 찍히는 시각은 서버가 payload 에 넣어 준 ts 그대로여야 한다.
+     * 여기서 Date.now() 로 덮으면 5분 전에 감지한 알림이 방금 일어난 일처럼
+     * 보인다 — 2026-09-17 에 실제로 그렇게 읽혔다(감지 19:28, 알림함 7:33).
+     */
+    const detectedAt = Date.parse('2026-09-17T10:28:34.334Z');
+    await push({ kind: 'score', id: 77, title: 't', body: 'b', ts: detectedAt, resend: true });
+    check('재발송 알림은 서버가 준 감지 시각으로 찍힌다',
+      notifications.at(-1).opts.timestamp === detectedAt,
+      String(notifications.at(-1).opts.timestamp));
+  }
+  {
+    // 다른 이벤트가 떠 있다고 해서 이 이벤트를 받은 것은 아니다 — tag 로 갈린다.
+    const { push, notifications } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 80, title: 't', body: 'b', ts: 1 });
+    await push({ kind: 'score', id: 81, title: 't', body: 'b', ts: 2, resend: true });
+    check('다른 이벤트가 떠 있어도 이 이벤트는 뜬다', notifications.length === 2,
+      `${notifications.length}건`);
+  }
+  {
+    /*
+     * FCM 이 첫 푸시를 물고 있다가 재발송보다 늦게 흘리는 경우.
+     * 알림함 검사를 재발송에만 걸면 이 원래 푸시가 같은 tag 로 다시 울린다
+     * (renotify: true). 방향과 무관하게 막혀야 한다.
+     */
+    const { push, notifications, acks } = loadServiceWorker(store);
+    await push({ kind: 'score', id: 90, title: 't', body: 'b', ts: 1, resend: true });
+    await push({ kind: 'score', id: 90, title: 't', body: 'b', ts: 1 });
+    check('재발송이 먼저 뜬 뒤 원래 푸시가 와도 다시 울리지 않는다',
+      notifications.length === 1, `${notifications.length}건`);
+    check('그때도 배달 확인은 올린다', acks.filter((a) => a.body.id === 90).length === 2,
+      JSON.stringify(acks.map((a) => a.body.id)));
+  }
+}
+
+/* ══ 6-c. 배달 확인 — events.delivered_at ══ */
+
+/**
+ * INSERT/UPDATE 의 결과(meta.changes, last_row_id)만 흉내 내는 최소 D1.
+ * 실행된 SQL 과 인자를 남겨 조건절이 의도대로인지도 본다.
+ */
+function fakeWriteDb(meta) {
+  const calls = [];
+  return {
+    calls,
+    prepare: (sql) => ({
+      bind(...args) { calls.push({ sql, args }); return this; },
+      async run() { return { meta }; },
+    }),
+  };
+}
+
+async function testDelivered() {
+  const game = { gameId: 'G', gameDate: '2026-09-01', homeScore: 3, awayScore: 1 };
+  const ev = { kind: 'score', series: 'regular', dedupKey: 'G:score:3-1', title: 't', body: 'b' };
+
+  // 새로 들어간 행의 id 를 돌려줘야 payload 에 실을 수 있다.
+  const inserted = fakeWriteDb({ changes: 1, last_row_id: 66 });
+  check('insertEvent 는 새 행의 id 를 돌려준다', (await insertEvent(inserted, game, ev)) === 66);
+
+  // OR IGNORE 로 건너뛰면 last_row_id 에 직전 값이 남아 있어도 null 이어야 한다 —
+  // 호출부가 이 값으로 "발송할지"를 정하므로 stale id 가 새면 중복 발송된다.
+  const ignored = fakeWriteDb({ changes: 0, last_row_id: 66 });
+  check('dedup 충돌이면 stale last_row_id 를 무시하고 null', (await insertEvent(ignored, game, ev)) === null);
+
+  const marked = fakeWriteDb({ changes: 1 });
+  check('markDelivered 는 채웠으면 true', await markDelivered(marked, 66));
+  check('delivered_at 이 비어 있을 때만 채운다 (첫 응답만 남김)',
+    /WHERE id = \? AND delivered_at IS NULL/.test(marked.calls[0].sql) && marked.calls[0].args[1] === 66,
+    marked.calls[0].sql);
+
+  const already = fakeWriteDb({ changes: 0 });
+  check('이미 채워져 있거나 없는 id 면 false', !(await markDelivered(already, 66)));
+
+  // ── 재발송 대상 고르기 ──
+  const picked = {
+    prepare: (sql) => ({
+      _sql: sql,
+      bind(...args) { this._args = args; return this; },
+      async all() {
+        return { results: [
+          { id: 75, kind: 'concede', series: 'regular', title: 't', body: 'b',
+            game_id: '20260902HTNC02026', home_code: 'NC',
+            created_at: '2026-09-17T10:28:34.334Z' },
+        ] };
+      },
+    }),
+  };
+  const rows = await listUndelivered(picked, 'NC', { olderThan: 'B', newerThan: 'A' });
+  check('재발송 대상은 홈/원정까지 풀어서 준다',
+    rows[0].id === 75 && rows[0].isHome === true && rows[0].gameId === '20260902HTNC02026',
+    JSON.stringify(rows[0]));
+
+  const away = await listUndelivered(picked, 'LG', { olderThan: 'B', newerThan: 'A' });
+  check('우리 팀이 홈이 아니면 isHome=false', away[0].isHome === false);
+
+  /*
+   * 재발송 알림의 시각은 재발송 시각이 아니라 원래 감지 시각이어야 한다.
+   *
+   * sw.js 가 이 값을 notification timestamp 로 써서 알림함에 찍는다. 재발송
+   * 시각을 쓰면 제때 감지한 알림이 5분 늦은 것처럼 보인다 — 2026-09-17 에
+   * 실제로 그렇게 읽혔다(감지 19:28:34, 알림함 "오후 7:33").
+   */
+  check('재발송 대상은 원래 감지 시각을 함께 준다',
+    rows[0].createdAt === '2026-09-17T10:28:34.334Z', rows[0].createdAt);
+
+  /*
+   * 조건절을 눈으로 확인한다. 하나라도 빠지면 조용히 어긋난다 —
+   * resent_at 을 빼면 매 틱 같은 알림이 다시 나가고, 창을 빼면 방금 보낸
+   * 알림까지 대상이 된다.
+   */
+  let q = '';
+  await listUndelivered(
+    { prepare: (sql) => { q = sql; return { bind() { return this; }, async all() { return { results: [] }; } }; } },
+    'NC',
+    { olderThan: 'B', newerThan: 'A' },
+  );
+  check('배달 확인이 없는 것만', /delivered_at IS NULL/.test(q));
+  check('아직 재발송 안 한 것만', /resent_at IS NULL/.test(q));
+  check('창 밖은 제외', /created_at <= \?/.test(q) && /created_at >= \?/.test(q), q.replace(/\s+/g, ' '));
+
+  // SELECT 목록에서 빠지면 위 createdAt 이 undefined 가 되고, 호출부의
+  // `Date.parse(ev.createdAt) || Date.now()` 가 조용히 재발송 시각으로 되돌아간다.
+  // WHERE 절에도 e.created_at 이 있으므로 SELECT~FROM 사이만 본다.
+  const selectList = /SELECT([^]*?)FROM/.exec(q)?.[1] ?? '';
+  check('원래 감지 시각을 SELECT 목록에 넣는다',
+    /e\.created_at/.test(selectList), selectList.replace(/\s+/g, ' ').trim());
+
+  const resentDb = fakeWriteDb({ changes: 1 });
+  await markResent(resentDb, 75);
+  check('markResent 는 그 행만 표시한다',
+    /UPDATE events SET resent_at = \? WHERE id = \?/.test(resentDb.calls[0].sql)
+      && resentDb.calls[0].args[1] === 75,
+    resentDb.calls[0].sql);
+
+  /*
+   * events.kind 는 기록용 값이라 실점이 concede 로 남는다. 되돌리지 않고
+   * 발송하면 KIND_COLUMN 에 없어 subscribersFor 가 빈 배열을 주고, 실점
+   * 알림만 조용히 재발송되지 않는다.
+   */
+  check('재발송 때 concede 는 score 로 되돌린다', dispatchKindOf('concede') === 'score');
+  check('나머지 종류는 그대로', dispatchKindOf('end') === 'end' && dispatchKindOf('start') === 'start');
 }
 
 /* ══ 실행 ══ */
 
 console.log('\n[1] 푸시 페이로드 암복호화');  await testEncryption();
 console.log('\n[2] VAPID JWT');              await testVapid();
+console.log('\n[2-b] 재발송 묶음(Topic)');  await testTopic();
 console.log('\n[3] 시리즈 판별');            testSeries();
 console.log('\n[3b] 이번 시즌 필터');        testSeasonFilter();
 console.log('\n[4] 상태 전이 감지');         testDetect();
 console.log('\n[5] 포스트시즌 진출 판정');   testOutlook();
+console.log('\n[5-b] 상대 전적');            testHeadToHead();
 console.log('\n[6] 시즌·시간대 게이팅');     testWindow();
+console.log('\n[6-b] 종료 후 감시 종료');     await testSettled();
+console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
+console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLimit();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
+console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
+console.log('\n[10-b] 개막일 미확정 캐시');    await testOpenerCaching();
+console.log('\n[11] 날짜별 캐시 청소');       await testCachePrune();
+console.log('\n[11-b] 문자중계 종료 감지');   await testRelayFinish();
+console.log('\n[12] 서비스 워커 진동 설정');  await testServiceWorkerVibrate();
 
 console.log(failed === 0 ? '\n전부 통과.\n' : `\n실패 ${failed}건.\n`);
 process.exit(failed === 0 ? 0 : 1);

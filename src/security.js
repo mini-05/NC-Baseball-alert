@@ -114,7 +114,11 @@ export async function readJson(request) {
   }
 
   const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) {
+  // text.length 는 문자 수라 한글처럼 UTF-8 로 3바이트인 문자가 섞이면 실제
+  // 바이트 수보다 최대 3배 작게 나온다 — Content-Length 헤더 없이(또는 거짓
+  // 값으로) 오는 요청은 위 검사를 피해 이 줄만 남으므로, 여기서는 실제
+  // 바이트 수로 다시 잰다.
+  if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
     return { ok: false, reason: '요청 본문이 너무 큽니다.' };
   }
 

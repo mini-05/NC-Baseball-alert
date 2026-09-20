@@ -12,16 +12,53 @@ import {
   fetchGames, filterTeam, filterCurrentSeason, fetchStandings, perspective,
   kstDateOffset, kstIsoToEpoch, seasonYearOf, TEAM_CODES,
 } from './kbo.js';
-import { getCache, putCache } from './db.js';
+import { getCache, getCacheStale, putCache, pruneDatedCache, prunePollLog } from './db.js';
 
 /** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
 const PRE_START_MIN = 90;
 
-/** 경기 시작 후 몇 시간까지 감시할지. 연장·중단을 포함해도 이 안에서 끝난다. */
+/**
+ * 경기 시작 후 몇 시간까지 감시할지. 연장·중단을 포함해도 이 안에서 끝난다.
+ *
+ * 실제로는 대개 이보다 훨씬 일찍 멈춘다 — 경기가 끝나면 FINISH_COOLDOWN_MIN
+ * 뒤에 감시를 접기 때문이다(index.js tick). 이 값은 종료를 끝내 감지하지 못했을
+ * 때를 대비한 상한선이다.
+ */
 const POST_START_HOURS = 7;
+
+/**
+ * 경기가 끝난 뒤에도 얼마나 더 지켜볼지.
+ *
+ * 종료를 감지한 직후 끊지 않는 이유: 더블헤더처럼 뒤에 붙는 경기가 있을 수 있고,
+ * 네이버가 최종 기록을 늦게 확정하는 일이 있어 그 뒤 변화를 놓치지 않기 위함이다.
+ */
+export const FINISH_COOLDOWN_MIN = 30;
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
+
+/**
+ * 날짜별 캐시(plan:·today:)를 며칠치까지 남길지.
+ *
+ * 지난 날짜 값은 다시 읽히지 않으므로 기능상 며칠이든 상관없다. 1년으로 둔
+ * 것은 지난 시즌 기록을 들여다볼 일이 생겼을 때 남아 있게 하려는 것이고,
+ * 하루 두 행씩이라 1년치를 다 남겨도 700행 남짓이라 부담이 없다.
+ */
+const CACHE_KEEP_DAYS = 365;
+
+/** poll_log 는 디버깅용이라 이만큼만 남긴다. */
+const POLL_LOG_KEEP_DAYS = 183;
+
+/**
+ * 개막일을 못 정했을 때(개막 전이라 순위표에 경기가 없거나, 조회 실패) 다시
+ * 물어보기까지의 간격.
+ *
+ * 이 경우도 캐시해야 한다 — tick() 이 매 틱 resolveSeasonOpener 를 먼저 부르므로,
+ * 못 정한 결과를 안 남기면 해가 바뀐 1월부터 개막일까지 석 달 동안 1분마다
+ * 네이버 순위 API 를 두드린다(하루 1,440회). 개막일은 하루 안에 바뀌지
+ * 않으니 이 정도면 충분히 자주 다시 본다.
+ */
+const OPENER_RETRY_MS = 6 * HOUR;
 
 /**
  * 정규시즌 개막일을 알아낸다.
@@ -41,36 +78,42 @@ export async function resolveSeasonOpener(env, year) {
   const cached = await getCache(env.DB, key);
   if (cached !== null) return cached.date;
 
+  let date = null;
   try {
     const standings = await fetchStandings(year);
     const me = standings.teams.find((t) => t.code === env.TEAM_CODE);
-    if (!me || !me.games) return null; // 아직 정규시즌 경기가 없다
 
-    // 시즌 전체 일정이 필요하다. 한 달 단위로 쪼개 받으므로 요청이 여러 번 나간다.
-    // 30일 캐시라 시즌당 몇 번만 실행된다.
-    const all = await fetchGames(`${year}-01-01`, `${year}-12-31`);
+    // me.games 가 0 이면 아직 정규시즌 경기가 없다 — date 는 null 로 남는다.
+    if (me?.games) {
+      // 시즌 전체 일정이 필요하다. 한 달 단위로 쪼개 받으므로 요청이 여러 번 나간다.
+      // 30일 캐시라 시즌당 몇 번만 실행된다.
+      const all = await fetchGames(`${year}-01-01`, `${year}-12-31`);
 
-    const done = filterTeam(all, env.TEAM_CODE)
-      .filter(
-        (g) =>
-          seasonYearOf(g.gameId) === year &&
-          g.phase === 'result' &&
-          !g.cancelled &&
-          TEAM_CODES.has(g.homeCode) &&
-          TEAM_CODES.has(g.awayCode),
-      )
-      .sort((a, b) => (a.gameDate + a.gameId).localeCompare(b.gameDate + b.gameId));
+      const done = filterTeam(all, env.TEAM_CODE)
+        .filter(
+          (g) =>
+            seasonYearOf(g.gameId) === year &&
+            g.phase === 'result' &&
+            !g.cancelled &&
+            TEAM_CODES.has(g.homeCode) &&
+            TEAM_CODES.has(g.awayCode),
+        )
+        .sort((a, b) => (a.gameDate + a.gameId).localeCompare(b.gameDate + b.gameId));
 
-    const skip = done.length - me.games;
-    // skip 이 음수면 순위표가 일정보다 앞서 있다는 뜻이라 신뢰할 수 없다.
-    const date = skip >= 0 && skip < done.length ? done[skip].gameDate : null;
-
-    await putCache(env.DB, key, { date }, 30 * 24 * HOUR);
-    return date;
+      const skip = done.length - me.games;
+      // skip 이 음수면 순위표가 일정보다 앞서 있다는 뜻이라 신뢰할 수 없다.
+      if (skip >= 0 && skip < done.length) date = done[skip].gameDate;
+    }
   } catch (err) {
     console.error('season opener resolution failed', err.message);
-    return null;
   }
+
+  // 못 정한 결과(null)도 짧게 캐시한다. 안 그러면 위 OPENER_RETRY_MS 주석대로
+  // 개막 전 석 달 동안 매 틱 외부 호출이 나간다. 캐시 쓰기 실패는 삼킨다 —
+  // 이 함수는 원래 예외를 내지 않고, 호출부는 null 로도 정상 진행한다.
+  await putCache(env.DB, key, { date }, date ? 30 * 24 * HOUR : OPENER_RETRY_MS)
+    .catch((err) => console.error('season opener cache failed', err.message));
+  return date;
 }
 
 /**
@@ -105,26 +148,42 @@ export async function loadDailyPlan(env, today) {
 
   // 계획은 당일에만 유효하다. 자정이 지나면 새로 만든다.
   await putCache(env.DB, key, plan, 12 * HOUR);
+
+  /*
+   * 지난 날짜 캐시 청소를 여기에 붙인다. 이 지점은 계획을 새로 만드는 때,
+   * 즉 하루 한두 번만 지나가므로 1분마다 도는 크론에 부담을 주지 않는다.
+   *
+   * 청소가 실패해도 계획은 이미 저장됐으므로 그대로 진행한다 — 뒷정리 때문에
+   * 폴링이 한 틱 밀리는 편이 더 나쁘다.
+   */
+  await pruneDatedCache(env.DB, kstDateOffset(-CACHE_KEEP_DAYS))
+    .catch((err) => console.error('cache prune failed', err.message));
+  await prunePollLog(env.DB, new Date(Date.now() - POLL_LOG_KEEP_DAYS * 24 * HOUR).toISOString())
+    .catch((err) => console.error('poll log prune failed', err.message));
+
   return plan;
 }
 
 /**
- * 지금이 감시가 필요한 시간대인지 판단한다.
+ * 지금 감시해야 할 경기만 골라 준다.
  *
  * 이미 끝난(result) 경기만 있는 계획이라면 더 볼 이유가 없다. 다만 계획은
  * 하루 한 번만 갱신되므로 phase 는 오래된 값일 수 있다. 따라서 phase 로
- * 건너뛰지 않고 시간 창만으로 판단한다.
+ * 건너뛰지 않고 시간 창만으로 판단한다. 실제로 끝났는지는 매 틱 갱신되는
+ * events 를 보고 호출부가 따로 확인한다(index.js tick).
  */
-export function isPollWindow(plan, now = Date.now()) {
-  for (const g of plan.games) {
+export function pollWindowGames(plan, now = Date.now()) {
+  return plan.games.filter((g) => {
     const start = kstIsoToEpoch(g.startAt);
     if (start == null) return true; // 시각을 못 읽으면 안전하게 감시한다.
 
-    if (now >= start - PRE_START_MIN * MIN && now <= start + POST_START_HOURS * HOUR) {
-      return true;
-    }
-  }
-  return false;
+    return now >= start - PRE_START_MIN * MIN && now <= start + POST_START_HOURS * HOUR;
+  });
+}
+
+/** 지금이 감시가 필요한 시간대인지. */
+export function isPollWindow(plan, now = Date.now()) {
+  return pollWindowGames(plan, now).length > 0;
 }
 
 /** 계획을 강제로 다시 만든다. (경기가 추가·변경됐을 때 쓰는 관리용) */
@@ -143,44 +202,56 @@ export async function loadSchedule(env, year) {
   const cached = await getCache(env.DB, key);
   if (cached) return cached;
 
-  const opener = await resolveSeasonOpener(env, year);
+  try {
+    const opener = await resolveSeasonOpener(env, year);
 
-  // 시즌 전체를 받는다. 지난 경기의 결과까지 함께 보여주기 위함이다.
-  const games = filterCurrentSeason(
-    filterTeam(await fetchGames(`${year}-01-01`, `${year}-12-31`), env.TEAM_CODE),
-    year,
-    opener,
-  );
+    // 시즌 전체를 받는다. 지난 경기의 결과까지 함께 보여주기 위함이다.
+    const games = filterCurrentSeason(
+      filterTeam(await fetchGames(`${year}-01-01`, `${year}-12-31`), env.TEAM_CODE),
+      year,
+      opener,
+    );
 
-  const schedule = games
-    .map((g) => {
-      const p = perspective(g, env.TEAM_CODE);
+    const schedule = games
+      .map((g) => {
+        const p = perspective(g, env.TEAM_CODE);
 
-      return {
-        gameId: g.gameId,
-        gameDate: g.gameDate,
-        startAt: g.startAt,
-        stadium: g.stadium,
-        series: g.series,
-        isHome: p.isHome,
-        oppName: p.oppName,
-        phase: g.phase,
-        cancelled: g.cancelled,
-        statusInfo: g.statusInfo,
-        // 지난 경기의 결과. 아직 안 끝난 경기는 화면에서 phase 로 걸러 쓴다.
-        teamScore: p.teamScore,
-        oppScore: p.oppScore,
-        result:
-          g.phase === 'result' && !g.cancelled
-            ? p.teamScore > p.oppScore ? 'win' : p.teamScore < p.oppScore ? 'lose' : 'draw'
-            : null,
-      };
-    })
-    .sort((a, b) => a.startAt.localeCompare(b.startAt));
+        return {
+          gameId: g.gameId,
+          gameDate: g.gameDate,
+          startAt: g.startAt,
+          stadium: g.stadium,
+          series: g.series,
+          isHome: p.isHome,
+          oppName: p.oppName,
+          phase: g.phase,
+          cancelled: g.cancelled,
+          statusInfo: g.statusInfo,
+          // 지난 경기의 결과. 아직 안 끝난 경기는 화면에서 phase 로 걸러 쓴다.
+          teamScore: p.teamScore,
+          oppScore: p.oppScore,
+          result:
+            g.phase === 'result' && !g.cancelled
+              ? p.teamScore > p.oppScore ? 'win' : p.teamScore < p.oppScore ? 'lose' : 'draw'
+              : null,
+        };
+      })
+      .sort((a, b) => a.startAt.localeCompare(b.startAt));
 
-  // 경기 결과가 반영돼야 하므로 짧게 잡고, 경기가 끝나면 invalidateSchedule 로 즉시 비운다.
-  await putCache(env.DB, key, schedule, 30 * MIN);
-  return schedule;
+    // 경기 결과가 반영돼야 하므로 짧게 잡고, 경기가 끝나면 invalidateSchedule 로 즉시 비운다.
+    await putCache(env.DB, key, schedule, 30 * MIN);
+    return schedule;
+  } catch (err) {
+    // loadStandings·loadTodayStatus 와 같은 이유로 감싼다: 네이버 API가 잠깐만
+    // 흔들려도(타임아웃·5xx·응답 형태 변경) 이 예외가 그대로 올라가면 index.js
+    // 최상위 캐치올이 "서버 오류가 발생했습니다"를 돌려준다 — 일정 하나가 잠깐
+    // 안 나오는 것과 전체 API가 500이 되는 것은 전혀 다른 심각도다.
+    // 실패를 캐시하지는 않는다. 대신 마지막으로 확인됐던 일정으로 되돌아간다 —
+    // 시즌 일정은 몇 달 전에 확정돼 거의 바뀌지 않으므로, 조금 오래된 값이라도
+    // 빈 화면보다 훨씬 쓸모 있다.
+    console.error('schedule fetch failed', err.message);
+    return (await getCacheStale(env.DB, key)) ?? [];
+  }
 }
 
 /** 경기가 끝났을 때 호출한다. 지난 일정의 결과를 바로 반영하기 위함이다. */
@@ -201,16 +272,68 @@ export async function loadStandings(env, year) {
   if (cached) return cached;
 
   try {
-    const standings = await fetchStandings(year);
+    /*
+     * 조회 시각을 값에 함께 넣어 둔다(loadDailyPlan 의 fetchedAt 과 같은 방식).
+     * 화면의 "○○ 기준" 표시가 이 값을 쓴다 — 폴백으로 옛 순위를 보여줄 때
+     * 그 값이 언제 것인지 알려야 하기 때문이다. 캐시된 값을 그대로 돌려주는
+     * 경로에서도 이 시각이 함께 따라오므로 별도 처리가 필요 없다.
+     */
+    const standings = { ...(await fetchStandings(year)), fetchedAt: new Date().toISOString() };
     await putCache(env.DB, key, standings, 10 * MIN);
     return standings;
   } catch (err) {
+    // 마지막으로 확인됐던 순위로 되돌아간다. 며칠 지난 순위라도 빈 화면보다 낫다.
     console.error('standings fetch failed', err.message);
-    return null;
+    return (await getCacheStale(env.DB, key)) ?? null;
   }
 }
 
 /** 경기가 끝났을 때 호출한다. 다음 조회에서 최신 순위를 새로 받아 온다. */
 export async function invalidateStandings(env, year) {
   await putCache(env.DB, `standings:${year}`, null, -1);
+}
+
+/**
+ * 오늘 경기의 팀별 진행 상태. 순위표에서 "이 팀 순위에 오늘 경기가 들어갔는지"를
+ * 표시하는 데 쓴다. 우리 팀만 보는 loadDailyPlan 과 달리 10개 구단을 모두 본다.
+ *
+ * 반환: 팀코드 → 'done'(종료) | 'pending'(경기 전·진행 중)
+ * 오늘 경기가 없는 팀은 키 자체가 없다 — 기다릴 것이 없다는 뜻이다.
+ *
+ * 취소된 경기는 순위에 반영될 일이 자체가 없으므로 제외한다. 남겨 두면
+ * 그 팀만 하루 종일 '대기' 표시가 붙은 채로 남는다.
+ *
+ * ponytail: 'done' 은 "경기가 끝났다"이지 "순위표 숫자가 이미 갱신됐다"가
+ * 아니다. 둘 사이에는 종료 직후 짧은 공백이 있다(크론이 종료를 감지하면
+ * invalidateStandings 로 캐시를 비워 곧 따라잡는다). 이 공백까지 정확히
+ * 구분하려면 10개 구단의 시즌 전체 완료 경기 수를 세어 gameCount 와
+ * 대조해야 해서, 표시 하나를 위해 치를 비용이 아니다.
+ */
+export async function loadTodayStatus(env, today, year) {
+  const key = `today:${today}`;
+  const cached = await getCache(env.DB, key);
+  if (cached) return cached;
+
+  const status = {};
+  try {
+    const opener = await resolveSeasonOpener(env, year);
+    const games = filterCurrentSeason(await fetchGames(today, today), year, opener);
+
+    for (const g of games) {
+      if (g.cancelled) continue;
+      const s = g.phase === 'result' ? 'done' : 'pending';
+      status[g.homeCode] = s;
+      status[g.awayCode] = s;
+    }
+  } catch (err) {
+    // 순위표에 붙는 부가 표시일 뿐이라, 실패해도 순위 자체는 그대로 보여준다.
+    console.error('today status fetch failed', err.message);
+    return {};
+  }
+
+  // 아직 안 끝난 경기가 있을 때만 짧게 잡는다. 다 끝났거나 경기가 없는 날은
+  // 남은 하루 동안 값이 바뀌지 않으므로 길게 잡아 외부 호출을 아낀다.
+  const pending = Object.values(status).some((s) => s === 'pending');
+  await putCache(env.DB, key, status, pending ? 3 * MIN : 6 * HOUR);
+  return status;
 }

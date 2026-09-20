@@ -116,15 +116,26 @@ export const TEAM_CODES = new Set(['HT', 'SS', 'LG', 'OB', 'KT', 'SK', 'LT', 'NC
 /**
  * 네이버 원본 경기 객체를 내부 표현으로 변환한다.
  *
- * phase 판정: 관측으로 확인된 값은 BEFORE(경기 전)와 RESULT(종료)뿐이다.
- * 경기 중 상태값은 문서화돼 있지 않으므로 "둘 중 어느 쪽도 아니면 진행 중"으로 본다.
- * 원본 statusCode 를 그대로 저장해 두어 나중에 추적할 수 있게 한다.
+ * phase 판정: 관측으로 확인된 값은 BEFORE·READY(경기 전)·RESULT·ENDED(종료),
+ * 나머지는 진행 중으로 본다.
+ *
+ * ENDED 는 문서화돼 있지 않지만 실측(poll_log)으로 확인했다 — 스코어가 확정된
+ * 직후 RESULT 로 넘어가기 전 최대 10여 분간 이 값을 거친다. 그동안 점수는
+ * 더 바뀌지 않으므로 RESULT 와 동일하게 취급해도 안전하고, 그렇게 해야 종료
+ * 알림이 그 10분을 기다리지 않는다.
+ *
+ * READY 도 문서화돼 있지 않지만 실측으로 확인했다 — BEFORE 와 STARTED 사이에
+ * 최대 53분간 이 값을 거치며, statusInfo 가 그동안 계속 "경기전"이고 점수도
+ * 0:0 으로 고정돼 있다. live 로 처리하면 실제 플레이볼보다 최대 53분 이른
+ * "경기 시작" 알림이 나가므로 BEFORE 와 동일하게 취급한다.
+ *
+ * 원본 statusCode 를 그대로 저장해 두어 나중에 새 값이 나타나도 추적할 수 있게 한다.
  */
 export function normalizeGame(g) {
   const status = String(g.statusCode || '').toUpperCase();
   let phase;
-  if (status === 'RESULT') phase = 'result';
-  else if (status === 'BEFORE') phase = 'before';
+  if (status === 'RESULT' || status === 'ENDED') phase = 'result';
+  else if (status === 'BEFORE' || status === 'READY') phase = 'before';
   else phase = 'live';
 
   return {
@@ -332,6 +343,20 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
   const gamesBehindLine = inside ? 0 : Number((me.gb - (line?.gb ?? 0)).toFixed(1));
   const lineName = line?.name ?? `${standings.cutoff}위`;
 
+  /*
+   * 바로 아래 순위 팀과의 승차. "누가 나를 쫓고 있나"는 진출권 경쟁만큼 자주
+   * 보는 값인데, 표의 승차 칸은 1위 기준이라 이웃끼리의 거리가 드러나지 않는다.
+   *
+   * rank + 1 로 찾지 않고 정렬된 목록의 다음 팀을 쓴다 — 공동 순위가 생기면
+   * (7위가 둘이면 그다음은 9위) rank + 1 은 빈손으로 돌아온다. 공동 순위인
+   * 경우 승차 0 으로 나오는데, 그것도 "바로 뒤에 붙어 있다"는 사실 그대로다.
+   * teams 는 fetchStandings 에서 rank 순으로 정렬해 둔다.
+   */
+  const below = standings.teams[standings.teams.indexOf(me) + 1];
+  const chaser = below
+    ? { name: below.name, rank: below.rank, gap: Number((below.gb - me.gb).toFixed(1)) }
+    : null;
+
   // 문장을 서버에서 완성해 내려보낸다. 조사 처리를 한곳(es-hangul)에 모으기 위함이다.
   let note;
   if (status === 'in') {
@@ -350,15 +375,52 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
     remaining,
     // 진출권 팀과의 승차. 이미 진출권 안이면 0.
     gamesBehindLine,
+    // 바로 아래 순위 팀과 그 승차. 꼴찌면 null.
+    chaser,
     tierTitle: tier?.title ?? null,
     status, // in | chasing | eliminated
     note,
   };
 }
 
+/**
+ * 상대 팀별 시즌 전적을 센다.
+ *
+ * 순위 API 에는 상대전적이 없다. 대신 loadSchedule 이 이미 시즌 전 경기를
+ * 상대팀(oppName)과 결과(result)까지 붙여 내려주므로, 그것만 묶어 세면 된다 —
+ * 새로 조회할 것이 없다.
+ *
+ * 정규시즌만 센다. 지금은 포스트시즌이 없어 무의미하지만, 10월에 시리즈가
+ * 열리면 16경기 표본에 5경기가 섞여 조용히 오염된다.
+ *
+ * pct 는 KBO 공식대로 무승부를 뺀 승/(승+패)다. 화면에는 아직 쓰지 않고
+ * 정렬에만 쓰지만, 필요해지면 그대로 표시하면 된다. 승도 패도 없으면(시즌 초,
+ * 우천으로 일정이 통째로 밀린 상대) 0 으로 나누게 되므로 null 로 둔다.
+ *
+ * @param {Array} games loadSchedule() 결과
+ */
+export function headToHead(games) {
+  const by = new Map();
+
+  for (const g of games) {
+    if (g.series !== 'regular' || !g.result) continue;
+    const r = by.get(g.oppName) ?? { opp: g.oppName, wins: 0, draws: 0, losses: 0 };
+    if (g.result === 'win') r.wins++;
+    else if (g.result === 'lose') r.losses++;
+    else r.draws++;
+    by.set(g.oppName, r);
+  }
+
+  // 강한 상대부터. 승부가 안 난 상대(pct null)는 뒤로 보낸다.
+  return [...by.values()]
+    .map((r) => ({ ...r, pct: r.wins + r.losses ? r.wins / (r.wins + r.losses) : null }))
+    .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+}
+
 /* ─────────────────────────── 전광판 ─────────────────────────── */
 
 const RECORD_URL = 'https://api-gw.sports.naver.com/schedule/games';
+const RELAY_URL = 'https://api-gw.sports.naver.com/schedule/games';
 
 /**
  * 경기 하나의 이닝별 점수(전광판)를 가져온다.
@@ -377,7 +439,8 @@ export async function fetchScoreboard(gameId) {
     if (!res.ok) return null;
 
     const json = await res.json();
-    const board = json?.result?.recordData?.scoreBoard;
+    const record = json?.result?.recordData;
+    const board = record?.scoreBoard;
     if (!board?.inn || !board?.rheb) return null;
 
     const side = (team) => ({
@@ -388,9 +451,86 @@ export async function fetchScoreboard(gameId) {
       b: Number(board.rheb[team]?.b ?? 0),
     });
 
-    return { home: side('home'), away: side('away') };
+    /*
+     * 홈런은 별도 필드가 아니라 etcRecords(기타 기록: 홈런·3루타·실책 등) 안에
+     * how:'홈런' 으로 섞여 온다. result 문자열에 "누가·몇 회·몇 점"이 이미
+     * 다 들어 있다("오스틴33호(8회3점 손주환)") — 실제 타자 기록(rbi)과
+     * 대조해 확인했다. 숫자를 다시 뽑아내 재조합하지 않고 이 문자열을
+     * 그대로 쓴다: 몇 점 중 몇 점이 홈런인지를 이쪽에서 잘못 계산해
+     * 되돌릴 일이 없게 하려는 것이다.
+     */
+    const hr = Array.isArray(record?.etcRecords)
+      ? record.etcRecords.filter((r) => r.how === '홈런').map((r) => r.result)
+      : [];
+
+    return { home: side('home'), away: side('away'), hr };
   } catch (err) {
     console.error('scoreboard fetch failed', gameId, err.message);
+    return null;
+  }
+}
+
+/* ─────────── 문자중계(relay) — 종료를 앞당겨 잡는 용도 ─────────── */
+
+/**
+ * statusInfo("9회말")에서 회차만 뽑는다. 못 읽으면 0.
+ * 문자중계를 언제부터 볼지 정하는 데만 쓰므로, 실패하면 안 보는 쪽이 안전하다.
+ */
+export function inningOf(statusInfo) {
+  return Number(/^(\d+)회/.exec(String(statusInfo ?? ''))?.[1]) || 0;
+}
+
+/**
+ * 전광판 이닝별 점수의 합이 총점(schedule API 값)과 같은지 본다.
+ *
+ * record API 는 schedule API 와 별도로 조회하는 응답이라, 같은 폴링 틱
+ * 안에서도 두 API 의 시점이 미묘하게 어긋날 수 있다(record 쪽이 방금 난
+ * 점수를 아직 안 실은 경우). 그 상태의 전광판으로 득점 이닝을 고르면 확신에
+ * 찬 오답이 나오므로, 합이 맞을 때만 쓸 수 있다고 판단한다.
+ */
+export function inningSumMatches(innings, score) {
+  if (!Array.isArray(innings) || innings.length === 0) return false;
+  return innings.reduce((sum, v) => sum + (Number(v) || 0), 0) === score;
+}
+
+/**
+ * 문자중계에서 "경기가 끝났는가"만 확인한다. 끝났으면 그 시점의 최종 점수를,
+ * 아니면 null 을 준다.
+ *
+ * 왜 필요한가 — schedule API 의 statusCode 는 마지막 아웃 뒤 2분쯤 지나서야
+ * ENDED 로 바뀐다(2026-08-29 실측: 마지막 투구 21:22:09 → ENDED 21:24:17).
+ * 문자중계에는 그 아웃이 기록되는 즉시 종료 블록이 붙으므로 2분을 앞당길 수 있다.
+ *
+ * 종료 판정은 세 겹으로 막는다 — 잘못 보낸 종료 알림은 dedup_key 때문에
+ * 되돌릴 수 없다(detect.js `${gameId}:end`).
+ *   1) 호출부가 9회 이후 진행 중인 경기에서만 부른다 (index.js poll)
+ *   2) type 99 + "=====" 구분선. 투구·교체·타격 결과는 전부 다른 type 이고,
+ *      99 는 종료 블록에만 붙는다(실측 응답에서 확인).
+ *   3) 점수는 호출부가 schedule API 값과 대조한다 — 어긋나면 쓰지 않는다.
+ *
+ * 응답이 커서(이닝 하나 분량) 매 폴링마다 부르면 안 된다. 위 1) 게이트가 그 역할.
+ */
+export async function fetchRelayFinish(gameId) {
+  try {
+    const res = await fetch(`${RELAY_URL}/${gameId}/relay`, { headers: HEADERS });
+    if (!res.ok) return null;
+
+    const relay = (await res.json())?.result?.textRelayData;
+    if (!relay) return null;
+
+    const ended = (relay.textRelays ?? []).some((tr) =>
+      (tr.textOptions ?? []).some((o) => o.type === 99 && /^=+$/.test(String(o.text ?? ''))),
+    );
+    if (!ended) return null;
+
+    const s = relay.currentGameState ?? {};
+    const homeScore = Number(s.homeScore);
+    const awayScore = Number(s.awayScore);
+    if (!Number.isFinite(homeScore) || !Number.isFinite(awayScore)) return null;
+
+    return { homeScore, awayScore };
+  } catch (err) {
+    console.error('relay fetch failed', gameId, err.message);
     return null;
   }
 }

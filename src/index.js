@@ -6,18 +6,20 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
-  fetchScoreboard,
+  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, isPostseason, headToHead,
 } from './kbo.js';
-import { detectEvents, KINDS, SCOPES } from './detect.js';
+import { detectEvents, dispatchKindOf, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
-  loadDailyPlan, isPollWindow, loadStandings, loadSchedule,
+  loadDailyPlan, pollWindowGames, loadStandings, loadSchedule, loadTodayStatus,
   invalidatePlan, resolveSeasonOpener, invalidateStandings, invalidateSchedule,
+  FINISH_COOLDOWN_MIN,
 } from './season.js';
 import {
-  loadStates, upsertStateStmt, insertEvent, listHistory,
+  loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
+  allSettledBefore, markDelivered, listUndelivered, markResent,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -28,6 +30,56 @@ import {
 const REGULAR_SEASON_GAMES = 144;
 
 /* ============================ 크론: 상태 감시 ============================ */
+
+/**
+ * 한 번 깨어날 때 몇 번 볼지, 그 사이 간격은 얼마인지.
+ *
+ * 크론의 최소 간격은 1분이라 득점 알림이 최대 60초까지 밀린다. 그보다 촘촘히
+ * 보려고 크론을 더 자주 부를 수는 없으니, 대신 한 번 깨어난 김에 나눠서 본다.
+ * 2회 × 30초면 지연이 절반으로 줄어든다.
+ *
+ * 무료 플랜의 크론 CPU 한도는 10ms 지만 대기는 CPU 를 쓰지 않아 걸리지 않고,
+ * 총 30초는 스케줄드 워커의 15분 실행 한도 안에 넉넉히 들어간다. 횟수를 더
+ * 늘리려면 CPU 한도부터 확인해야 한다 — 폴링 한 번마다 CPU 도 그만큼 더 쓴다.
+ */
+const POLLS_PER_TICK = 2;
+const POLL_GAP_MS = 30 * 1000;
+
+/**
+ * 전광판(record API)이 총점(schedule API)을 아직 못 따라왔을 때 다시 부르기
+ * 전에 기다리는 시간. 곧바로 다시 부르면 같은 뒤처진 값이 돌아올 뿐이라
+ * 재조회의 의미가 없다 — 네이버 쪽이 반영할 틈을 준다.
+ *
+ * 득점이 난 틱에서만, 그것도 합이 어긋난 경우에만 타므로 총 대기에 거의
+ * 영향이 없다. 폴링 간격(30초)보다 훨씬 짧게 잡아 다음 폴링을 밀지 않는다.
+ */
+const BOARD_RETRY_MS = 2 * 1000;
+
+/**
+ * 배달 확인이 이만큼 지나도 안 오면 다시 보낸다.
+ *
+ * 확인이 늦게 오는 일이 있다 — 2026-09-02 에 2분 53초 걸린 사례가 있었다.
+ * 다만 그 지연은 단말이 느려서가 아니다. 확인은 늘 *다음* 푸시가 도착한 2~3초
+ * 뒤에 왔다(2026-09 기록 전수). 워커가 잠들어 있는 동안 /api/delivered 가 밀려
+ * 있다가 다음 푸시가 워커를 깨울 때 함께 나가는 것이다. 즉 기다린다고 오지 않는다.
+ *
+ * 그래서 창을 5분에서 90초로 줄인다. 헛다리 재발송이 늘지만 대가가 없다 —
+ * sendPush 가 Topic 을 붙이므로 원본이 아직 FCM 에 쌓여 있으면 재발송이 그것을
+ * 교체하고, 이미 단말에 떴으면 sw.js 가 알림함을 보고 넘긴다. 어느 쪽이든 한 번만
+ * 울린다. 재발송은 이벤트당 한 번(markResent)이라 무한히 늘지도 않는다.
+ *
+ * 90초인 이유: 득점 알림이 1분 30초 늦으면 이미 다음 타자가 나온다. 그보다
+ * 짧게 잡으면 FCM 이 정상 전달 중인 것까지 앞질러 재발송하게 된다.
+ */
+const RESEND_AFTER_MS = 90 * 1000;
+
+/**
+ * 이보다 오래된 이벤트는 포기한다. 경기가 한참 지난 뒤 뒤늦게 뜨는 알림은
+ * 놓친 것을 알리는 값보다 혼란이 크다.
+ */
+const RESEND_GIVE_UP_MS = 30 * 60 * 1000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * 오늘 경기 계획을 보고 감시가 필요한 시간인지 판단한다.
@@ -42,9 +94,58 @@ async function tick(env) {
   const plan = await loadDailyPlan(env, kst.date);
 
   if (plan.games.length === 0) return { skipped: 'no-games-today' };
-  if (!isPollWindow(plan)) return { skipped: 'outside-window' };
 
-  return poll(env, opener);
+  const watching = pollWindowGames(plan);
+  if (watching.length === 0) return { skipped: 'outside-window' };
+
+  /*
+   * 배달 확인이 안 온 알림을 먼저 챙긴다. 아래 all-finished 판단보다 앞서야
+   * 한다 — 놓치는 알림 중에는 종료 알림이 있고, 그 뒤 구간이 바로 감시를
+   * 접는 구간이다. 뒤에 두면 정작 필요한 때 못 돈다.
+   */
+  const resent = await resendUndelivered(env)
+    .catch((err) => { console.error('resend failed', err); return 0; });
+
+  /*
+   * 시간 창 안이라도 감시 대상이 모두 끝났으면 더 볼 이유가 없다. 종료 직후
+   * 바로 끊지 않고 FINISH_COOLDOWN_MIN 만큼 더 지켜본다 — 이 확인은 경기
+   * 시간대에만 도므로(위 두 return 이 먼저 걸러 낸다) 평소에는 부담이 없다.
+   *
+   * 아래 대기·폴링보다 먼저 판단해야 한다. 경기 없는 날에도 30초씩 붙잡고
+   * 있으면 하루 1400여 번의 헛된 대기가 생긴다.
+   */
+  const cutoff = new Date(Date.now() - FINISH_COOLDOWN_MIN * 60 * 1000).toISOString();
+  if (await allSettledBefore(env.DB, watching.map((g) => g.gameId), cutoff)) {
+    return { skipped: 'all-finished', resent };
+  }
+
+  // 앞선 폴링이 실패해도 남은 폴링은 그대로 진행한다. 한 번의 조회 실패가
+  // 이번 분 전체를 날리면 1분에 한 번 보던 때보다 오히려 나빠진다.
+  const runs = [];
+  for (let i = 0; i < POLLS_PER_TICK; i++) {
+    if (i > 0) await sleep(POLL_GAP_MS);
+    runs.push(
+      await poll(env, opener).catch((err) => {
+        console.error('poll failed', err);
+        return { error: err.message };
+      }),
+    );
+  }
+  return { runs, resent };
+}
+
+/**
+ * 이 전광판으로 득점 이닝을 되짚을 수 있는가 — 양 팀 모두 이닝별 합이 총점과
+ * 맞아야 한다. 전광판을 못 받았으면(null) 당연히 못 쓴다.
+ *
+ * detect.js scoringInning 이 실제로 쓰는 것은 점수를 낸 쪽 하나뿐이지만,
+ * 여기서는 양쪽을 다 본다 — 어느 쪽이 냈는지 판단하는 로직을 이 자리에
+ * 한 번 더 두지 않으려는 것이고, 어긋난 김에 같이 받아 두면 손해가 없다.
+ */
+export function boardCoversScore(board, game) {
+  return !!board
+    && inningSumMatches(board.home?.innings, game.homeScore)
+    && inningSumMatches(board.away?.innings, game.awayScore);
 }
 
 /** opener 를 생략하면(예: /api/admin/poll 에서 tick() 없이 직접 호출) 직접 구한다. */
@@ -78,10 +179,72 @@ async function poll(env, opener) {
 
   for (const game of games) {
     const prev = prevStates.get(game.gameId) ?? null;
-    const board = scoreboards.get(game.gameId);
+    let board = scoreboards.get(game.gameId) ?? null;
+
+    const scored = prev
+      && (game.homeScore !== prev.homeScore || game.awayScore !== prev.awayScore);
+
+    /*
+     * 득점이 난 틱인데 전광판을 쓸 수 없으면(아예 못 받았거나, 이닝 합이 아직
+     * 새 총점을 못 따라왔거나) 잠깐 뒤 한 번만 다시 불러본다.
+     *
+     * 왜 이 틱에서 끝을 봐야 하나 — 그냥 넘어가면 detect.js 가 득점 이닝을
+     * 못 밝힌 채로 알림이 나가고, 그 이벤트는 dedup_key 로 묶여 있어 다음
+     * 틱에 다시 보낼 기회가 없다(detect.js `${gameId}:score:${점수}`).
+     * 즉 여기서 놓친 이닝은 영영 안 붙는다.
+     *
+     * 재조회해도 여전히 안 맞으면 방금 받은 값을 그대로 쓴다 — 이닝이 빠질
+     * 뿐이고, 합이 안 맞는 전광판으로 이닝을 고르는 일은 scoringInning 이
+     * 막는다. 틀린 이닝을 단언하느니 생략하는 편이 낫다.
+     */
+    if (scored && game.phase === 'live' && !boardCoversScore(board, game)) {
+      await sleep(BOARD_RETRY_MS);
+      board = (await fetchScoreboard(game.gameId)) ?? board;
+    }
+
+    /*
+     * 9회 이후 진행 중인 경기만 문자중계로 종료를 앞당겨 확인한다.
+     *
+     * schedule API 의 statusCode 는 마지막 아웃 뒤 2분쯤 지나서야 ENDED 로
+     * 바뀐다(2026-08-29 실측: 마지막 투구 21:22:09 → ENDED 21:24:17). 문자중계에는
+     * 그 아웃이 기록되는 즉시 종료 블록이 붙으므로 그 2분을 앞당길 수 있다.
+     *
+     * 점수가 어긋나면 쓰지 않는다 — 두 API 의 시점이 갈렸다는 뜻이라, 그 상태로
+     * 종료를 알리면 틀린 최종 점수를 단언하게 된다. 그 경우 다음 폴링(30초)이나
+     * ENDED 를 기다리는 편이 낫다. 잘못 보낸 종료 알림은 dedup_key 때문에
+     * 되돌릴 수 없다(detect.js `${gameId}:end`).
+     *
+     * 응답이 커서(이닝 하나 분량) 이 게이트 없이 매 폴링마다 부르면 안 된다.
+     *
+     * 이번 틱에 점수가 났으면(scored) 종료를 앞당기지 않고 다음 폴링에 맡긴다.
+     * 끝내기 득점이 그렇다 — 여기서 phase 를 result 로 바꿔 버리면 detect.js
+     * 의 득점 감지가 live 상태만 보므로(detect.js `cur.phase === 'live'`)
+     * "끝내기" 득점 알림이 통째로 사라지고 종료 알림만 남는다. 30초 뒤 다음
+     * 폴링에서 종료를 잡아도 schedule API 의 ENDED(2분 지연)보다 훨씬 빠르다.
+     */
+    if (!scored && game.phase === 'live' && inningOf(game.statusInfo) >= 9) {
+      const finish = await fetchRelayFinish(game.gameId);
+      if (finish
+        && finish.homeScore === game.homeScore
+        && finish.awayScore === game.awayScore) {
+        game.phase = 'result';
+      }
+    }
 
     // 스냅샷은 이벤트 발생 여부와 무관하게 항상 최신으로 맞춘다.
     writes.push(upsertStateStmt(env.DB, game, board ? JSON.stringify(board) : null));
+    // 디버깅용 원본 상태 로그 — 언제 네이버가 상태를 바꿨는지 나중에 되짚기 위함.
+    writes.push(insertPollLogStmt(env.DB, game));
+
+    // 이번 틱에 전광판을 못 가져왔으면(board null) 홈런 목록은 직전 값을
+    // 그대로 이어받는다 — 저장 쪽의 COALESCE(위 upsertStateStmt)와 같은 이유로,
+    // 일시적 조회 실패가 "홈런 기록이 사라졌다"로 잘못 읽히지 않게 한다.
+    game.hr = board?.hr ?? prev?.hr ?? [];
+
+    // 득점 이닝을 되짚는 데 쓴다(detect.js scoringInning). 못 가져왔으면 null —
+    // 그 경우 이닝 없이 알린다. 여기서는 hr 처럼 직전 값을 잇지 않는다:
+    // 옛 전광판으로 이닝을 고르면 틀린 이닝을 단언하게 된다.
+    game.board = board ?? null;
 
     for (const ev of detectEvents(prev, game, env.TEAM_CODE)) {
       pending.push({ game, ev });
@@ -94,10 +257,11 @@ async function poll(env, opener) {
   let ended = false;
 
   for (const { game, ev } of pending) {
-    // dedup_key 충돌이면 이미 발송한 이벤트이므로 건너뛴다.
-    if (!(await insertEvent(env.DB, game, ev))) continue;
+    // dedup_key 충돌이면(null) 이미 발송한 이벤트이므로 건너뛴다.
+    const eventId = await insertEvent(env.DB, game, ev);
+    if (!eventId) continue;
 
-    await broadcast(env, ev);
+    await broadcast(env, ev, game.gameId, eventId);
     if (ev.kind === 'end') ended = true;
     fired++;
   }
@@ -112,10 +276,60 @@ async function poll(env, opener) {
 }
 
 /**
+ * 배달 확인이 안 온 알림을 한 번 더 보낸다.
+ *
+ * 서버는 FCM 이 받았다는 것까지만 알 수 있어, 그 뒤 단말에 안 뜨는 유실을
+ * 스스로 알아채지 못한다(2026-08-30·09-01·09-02·09-09 각 1건 확인). sw.js 가
+ * 보내오는 배달 확인이 창 안에 안 오면 못 받은 것으로 보고 다시 보낸다.
+ *
+ * 다만 그 확인 신호 자체가 완전하지 않다 — 화면에는 떴는데 확인만 실패한
+ * 경우가 있었다(2026-09-02 id 74). 그래서 여기서는 "안 받았을 수 있다"까지만
+ * 판단하고, 실제로 다시 띄울지는 단말이 정한다(sw.js 가 payload.resend 를 보고
+ * 알림함에 같은 tag 가 남아 있는지 확인한다). 서버가 단정하면 멀쩡히 본 알림이
+ * 두 번 울린다.
+ */
+async function resendUndelivered(env) {
+  const now = Date.now();
+  const pending = await listUndelivered(env.DB, env.TEAM_CODE, {
+    olderThan: new Date(now - RESEND_AFTER_MS).toISOString(),
+    newerThan: new Date(now - RESEND_GIVE_UP_MS).toISOString(),
+  });
+
+  for (const ev of pending) {
+    /*
+     * 보내기 전에 먼저 표시한다. 발송이 실패해도 다시 시도하지 않는다 —
+     * 재발송은 이벤트당 한 번이고, 실패를 되풀이하면 창이 닫힐 때까지 매 틱
+     * 같은 발송이 반복된다. 한 번 놓친 알림보다 그쪽이 나쁘다.
+     */
+    await markResent(env.DB, ev.id);
+    await broadcast(
+      env,
+      {
+        ...ev,
+        // events.kind 는 기록용이라 실점이 concede 로 남아 있다. 되돌리지 않으면
+        // subscribersFor 가 빈 배열을 줘 실점만 조용히 재발송되지 않는다.
+        kind: dispatchKindOf(ev.kind),
+        scope: isPostseason(ev.series) ? 'postseason' : 'regular',
+        // 알림함에 재발송 시각이 아니라 원래 감지 시각이 찍히게 한다.
+        ts: Date.parse(ev.createdAt) || Date.now(),
+      },
+      ev.gameId,
+      ev.id,
+      true,
+    );
+  }
+
+  if (pending.length > 0) {
+    console.log('resent undelivered', pending.map((e) => `${e.id}:${e.kind}`).join(','));
+  }
+  return pending.length;
+}
+
+/**
  * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
  * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
  */
-async function broadcast(env, ev) {
+async function broadcast(env, ev, gameId, eventId, resend = false) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) return;
 
@@ -126,19 +340,51 @@ async function broadcast(env, ev) {
     isHome: ev.isHome,
     title: ev.title,
     body: ev.body,
-    ts: Date.now(),
+    // sw.js 가 두 곳에 쓴다. 알림 tag(같은 이벤트를 다시 보내도 같은 tag 라
+    // 제자리 갱신될 뿐 두 번 뜨지 않는다)와 /api/delivered 배달 확인.
+    // 재발송을 붙일 때 이 id 가 중복 표시를 막는 유일한 장치다.
+    id: eventId,
+    // 위 id 가 없는 payload(테스트 알림)를 위한 tag 재료. 없으면 어제 경기의
+    // 같은 종류 알림을 덮어써 새 알림이 안 뜬 것처럼 보인다.
+    gameId,
+    /*
+     * 알림함에 찍히는 시각(sw.js 의 notification timestamp).
+     *
+     * 재발송은 원래 감지 시각을 그대로 싣는다 — Date.now() 를 쓰면 5분 뒤
+     * 재발송 시각이 찍혀, 제때 감지한 알림이 그만큼 늦은 것처럼 보인다.
+     * 2026-09-17 실측: 감지 19:28:34 → 재발송 19:33:59 → 알림함 "오후 7:33".
+     * 경쟁 앱과 1분 차이였는데 6분 뒤처진 것으로 읽혔다.
+     */
+    ts: ev.ts ?? Date.now(),
   };
 
+  // 재발송임을 알려 sw.js 가 이미 떠 있는 알림인지 먼저 확인하게 한다.
+  // 처음 보내는 알림에는 넣지 않는다 — 그쪽은 확인할 것이 없다.
+  if (resend) payload.resend = true;
+
+  /*
+   * 2026-08-30 종료 알림 미표시 건 조사용 — 서버가 FCM 에 전달을 확인한 시각과
+   * 사용자가 실제로 알림을 본 시각을 대조하려면, 지금까지는 poll_log/events
+   * (DB 시각)와 Observability 의 `fetch OK` 줄(발송 시각)을 시:분 단위로 눈대중
+   * 대조해야 했다 — 한 틱에 fetch 가 여러 번 찍혀 어느 줄이 이 발송인지 특정이
+   * 안 됐다. kind·gameId·endpoint 로 걸러 찾을 수 있게 로그에 남긴다.
+   * endpoint 는 끝 12자만 남긴다 — 식별에 충분하고 전체를 로그에 남기지 않는다.
+   */
+  const sentAt = Date.now();
   const results = await Promise.allSettled(subs.map((s) => sendPush(s, payload, env)));
 
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
+    const ep = subs[i].endpoint.slice(-12);
     if (r.status === 'rejected') {
-      console.error('push failed', r.reason?.message);
+      console.error('push failed', ev.kind, gameId, ep, r.reason?.message);
     } else if (r.value.gone) {
+      console.log('push gone, deleting sub', ev.kind, gameId, ep, r.value.status);
       await deleteSubscription(env.DB, subs[i].endpoint);
     } else if (!r.value.ok) {
-      console.error('push rejected with status', r.value.status);
+      console.error('push rejected with status', ev.kind, gameId, ep, r.value.status);
+    } else {
+      console.log('push sent', ev.kind, gameId, ep, `${Date.now() - sentAt}ms`);
     }
   }
 }
@@ -214,17 +460,31 @@ async function handleApi(request, env, url) {
    */
   if (path === '/api/schedule' && method === 'GET') {
     const { year, date } = kstNow();
-    return json({ today: date, games: await loadSchedule(env, year) });
+    const games = await loadSchedule(env, year);
+    // 상대전적은 이 일정에서 세면 되므로 따로 조회하지 않는다(kbo.js headToHead).
+    return json({ today: date, games, headToHead: headToHead(games) });
   }
 
   /** 순위와 포스트시즌 진출 상황. 비시즌이면 standings 가 null 이다. */
   if (path === '/api/standings' && method === 'GET') {
-    const { year } = kstNow();
+    const { year, date } = kstNow();
     const standings = await loadStandings(env, year);
     if (!standings) return json({ standings: null, outlook: null });
 
+    // 팀별 잔여 경기와 "오늘 경기가 순위에 들어갔는지"를 붙여 내려준다.
+    // 캐시된 순위 자체는 건드리지 않고 응답에서만 덧붙인다 — 잔여 경기 수는
+    // 시즌 상수(여기)에 달려 있고, 오늘 상태는 순위보다 빨리 바뀌기 때문이다.
+    const todayStatus = await loadTodayStatus(env, date, year);
+
     return json({
-      standings,
+      standings: {
+        ...standings,
+        teams: standings.teams.map((t) => ({
+          ...t,
+          remaining: Math.max(0, REGULAR_SEASON_GAMES - t.games),
+          todayGame: todayStatus[t.code] ?? null,
+        })),
+      },
       outlook: postseasonOutlook(standings, env.TEAM_CODE, REGULAR_SEASON_GAMES),
     });
   }
@@ -292,6 +552,26 @@ async function handleApi(request, env, url) {
 
     await updateSettings(env.DB, req.endpoint, patch);
     return json({ ok: true, settings: await getSettings(env.DB, req.endpoint) });
+  }
+
+  /*
+   * ── 배달 확인 ──
+   * sw.js 가 알림을 실제로 띄운 뒤 부른다. 서버는 FCM 에 넘긴 것까지만 알 수
+   * 있어(broadcast 의 fetch OK), 그 뒤 단말에 뜨지 않는 유실을 이 신호 없이는
+   * 재지 못한다. 등록된 구독만 받는다(requireSubscription) — 아무나 남의
+   * 이벤트를 "봤다"로 만들지 못하게.
+   */
+  if (path === '/api/delivered' && method === 'POST') {
+    const req = await requireSubscription(request, env);
+    if (req.error) return req.error;
+
+    const id = req.body.id;
+    if (!Number.isInteger(id) || id <= 0) {
+      return json({ error: '이벤트 id 가 필요합니다.' }, 400);
+    }
+
+    await markDelivered(env.DB, id);
+    return json({ ok: true });
   }
 
   /* ── 테스트 알림 ── */
