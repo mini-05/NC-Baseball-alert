@@ -621,6 +621,17 @@ main {
   white-space: nowrap;
 }
 
+/*
+ * 전적 속 숫자 칸. 두 자리 자리를 늘 확보해 "10승"과 "9승"의 시작점이 밀리지
+ * 않게 한다. ch 는 그 폰트의 "0" 너비라 tabular-nums 와 맞물려 정확히 두 자리가
+ * 된다 — 폭을 px 로 박으면 폰트가 바뀔 때 어긋난다. min- 이라 세 자리도 안 잘린다.
+ */
+.h2h-rec .n {
+  display: inline-block;
+  min-width: 2ch;
+  text-align: right;
+}
+
 /* 승률. 위 순위표의 .tpct 와 같은 표기(.625)·정렬을 쓴다. */
 .h2h-pct {
   font-size: 13.5px;
