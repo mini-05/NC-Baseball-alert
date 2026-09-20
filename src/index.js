@@ -42,7 +42,7 @@ const REGULAR_SEASON_GAMES = 144;
  * 총 30초는 스케줄드 워커의 15분 실행 한도 안에 넉넉히 들어간다. 횟수를 더
  * 늘리려면 CPU 한도부터 확인해야 한다 — 폴링 한 번마다 CPU 도 그만큼 더 쓴다.
  */
-const POLLS_PER_TICK = 2;
+export const POLLS_PER_TICK = 2;
 const POLL_GAP_MS = 30 * 1000;
 
 /**
