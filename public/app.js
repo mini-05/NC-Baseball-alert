@@ -774,12 +774,17 @@ function renderHeadToHead(rows) {
     return;
   }
 
+  const n = (v) => el('span', { class: 'n', text: String(v) });
+
   box.append(
     el('div', { class: 'card table-card' },
       ...rows.map((r) =>
         el('div', { class: 'h2h-row' },
           el('span', { class: 'h2h-opp', text: r.opp }),
-          el('span', { class: 'h2h-rec', text: `${r.wins}승 ${r.draws}무 ${r.losses}패` }),
+          // 숫자를 고정 폭 칸(.n)에 담아 자릿수가 달라도 세로로 줄이 맞게 한다.
+          // 문자열로만 두면 "10승"과 "9승"의 시작점이 한 자리씩 밀린다.
+          el('span', { class: 'h2h-rec' },
+            n(r.wins), '승 ', n(r.draws), '무 ', n(r.losses), '패'),
           el('span', {
             class: 'h2h-pct',
             text: r.pct === null ? '-' : r.pct.toFixed(3).replace(/^0/, ''),
