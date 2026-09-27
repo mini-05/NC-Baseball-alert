@@ -774,9 +774,17 @@ export default {
         });
         if (pinged) return;
 
-        await tick(env).catch((err) => {
+        /*
+         * 결과를 한 줄 남긴다. 조기 종료 세 경로(no-games-today·outside-window·
+         * all-finished)가 모두 무음이라, 로그만 봐서는 "건너뛰는 중"과 "크론이
+         * 아예 안 도는 중"을 구별할 수 없었다. 2026-09 에 알림이 일주일 안 왔을
+         * 때 그 둘을 못 가려 원인 찾기가 늦어졌다. 1분에 한 줄이면 값싸다.
+         */
+        const result = await tick(env).catch((err) => {
           console.error('tick failed', err);
+          return { error: err.message };
         });
+        console.log('tick', JSON.stringify(result));
       })(),
     );
   },
