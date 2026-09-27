@@ -399,7 +399,16 @@ async function resendUndelivered(env) {
  */
 async function broadcast(env, ev, gameId, eventId, resend = false) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
-  if (subs.length === 0) return;
+  if (subs.length === 0) {
+    /*
+     * 조용히 끝내면 "보낼 사람이 없다" 와 "보냈는데 안 떴다" 가 구별되지 않는다.
+     * 구독은 멀쩡한데 설정 때문에 걸러지는 경우가 여기로 빠지는데, 그 상태에서는
+     * 서버·푸시 경로를 아무리 들여다봐도 정상으로 보인다. kind·scope·isHome 을
+     * 함께 남겨 어느 설정이 걸렀는지 바로 짚게 한다.
+     */
+    console.log('broadcast skipped: 수신 대상 0명', ev.kind, ev.scope, `isHome=${ev.isHome}`, gameId);
+    return;
+  }
 
   const payload = {
     kind: ev.kind,
