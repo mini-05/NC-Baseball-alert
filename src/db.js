@@ -467,6 +467,17 @@ export async function makeRoomForSubscription(db, max) {
   return (results ?? []).map((r) => r.endpoint);
 }
 
+/**
+ * 진단용 — 알림 종류·시리즈 설정과 무관하게 모든 구독을 준다.
+ *
+ * subscribersFor 를 안 쓰는 이유: 설정 자체가 원인일 수 있다. "on_score 가 0
+ * 이라 안 갔다" 와 "푸시 서비스가 거절했다" 를 가르려면 거르지 않고 보내 봐야 한다.
+ */
+export async function listAllSubscriptions(db) {
+  const { results } = await db.prepare('SELECT endpoint, p256dh, auth FROM subscriptions').all();
+  return results ?? [];
+}
+
 export async function getSubscription(db, endpoint) {
   return db
     .prepare('SELECT endpoint, p256dh, auth, last_test_at FROM subscriptions WHERE endpoint = ?')
