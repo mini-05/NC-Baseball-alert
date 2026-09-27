@@ -20,6 +20,7 @@ import {
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, makeRoomForSubscription, touchTestSent, pruneOtherSeasons,
   allSettledBefore, markDelivered, listUndelivered, markResent,
+  listAllSubscriptions, getCache, putCache,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -43,6 +44,20 @@ const REGULAR_SEASON_GAMES = 144;
  * 늘리려면 CPU 한도부터 확인해야 한다 — 폴링 한 번마다 CPU 도 그만큼 더 쓴다.
  */
 export const POLLS_PER_TICK = 2;
+
+/**
+ * 진단 핑 표시. GitHub Actions 가 D1 에 이 키를 써 두면(쓰기 한 번, 읽기 없음)
+ * 다음 크론에서 워커가 스스로 실제 푸시를 보낸다. runDiagPing 참고.
+ */
+const DIAG_PING_KEY = 'diag:ping';
+
+/**
+ * 진단 알림이 쓰는 가짜 이벤트 id. sw.js 가 이 값으로 알림 tag 를 만들고
+ * /api/delivered 를 부르는데, events 에 없는 id 라 markDelivered 가 0행을
+ * 고치고 끝난다. 실제 이벤트 번호와 안 겹치게 크게 잡는다.
+ */
+const DIAG_EVENT_ID = 999999999;
+
 const POLL_GAP_MS = 30 * 1000;
 
 /**
@@ -80,6 +95,59 @@ const RESEND_AFTER_MS = 90 * 1000;
 const RESEND_GIVE_UP_MS = 30 * 60 * 1000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 진단용 강제 발송. cache 에 diag:ping 이 있으면 한 번 소비하고, 모든 구독에
+ * 실제 푸시를 두 번 보낸다 — Topic 을 붙인 것과 안 붙인 것.
+ *
+ * 왜 이것이 필요한가 — 개발 환경에서 workers.dev 로 나가는 길이 막혀 있어
+ * 밖에서 워커를 부를 수가 없다. 대신 D1 에 "한 번 보내라" 는 표시만 써 두면
+ * (쓰기 한 번이다. 구독을 읽지 않는다) 다음 크론에서 워커가 스스로 보낸다.
+ * 구독 암호키는 워커 밖으로 한 발짝도 안 나간다.
+ *
+ * 둘을 함께 보내는 것이 요점이다. 경기 알림에는 Topic 이 붙고 테스트 알림에는
+ * 안 붙는다(id 유무). 한쪽만 도착하면 Topic 이 범인이라는 뜻이고, 둘 다 안
+ * 오면 구독이나 VAPID 쪽이다. 로그에 푸시 서비스가 준 HTTP 상태가 남는다.
+ *
+ * 이 틱은 여기서 끝낸다(tick 을 건너뛴다). 구독 하나당 2건을 보내므로 평소
+ * 폴링과 겹치면 호출당 subrequest 예산(50)을 넘길 수 있다. 진단은 수동으로
+ * 한 번 하는 일이라 그 1분을 양보하는 편이 낫다.
+ *
+ * @returns {Promise<boolean>} 핑을 처리했으면 true.
+ */
+async function runDiagPing(env) {
+  if (!(await getCache(env.DB, DIAG_PING_KEY))) return false;
+  // 먼저 지운다. 발송이 실패해도 다음 틱마다 되풀이되지 않게 한다.
+  await putCache(env.DB, DIAG_PING_KEY, null, -1);
+
+  const subs = await listAllSubscriptions(env.DB);
+  console.log('diag ping start', `subs=${subs.length}`);
+
+  const cases = [
+    // id 가 있으면 sendPush 가 Topic 을 붙인다 — 경기 알림과 같은 경로다.
+    ['with-topic', { kind: 'test', id: DIAG_EVENT_ID, title: '진단 알림 1/2',
+      body: 'Topic 있는 경로. 이것만 안 오면 Topic 이 원인입니다.' }],
+    // id 가 없으면 Topic 이 안 붙는다 — 테스트 알림과 같은 경로다.
+    ['no-topic', { kind: 'test', title: '진단 알림 2/2',
+      body: 'Topic 없는 경로. 이것만 오면 Topic 이 원인입니다.' }],
+  ];
+
+  for (const s of subs) {
+    // endpoint 는 끝 12자만 남긴다 — 식별에 충분하고 전체를 로그에 남기지 않는다.
+    const ep = s.endpoint.slice(-12);
+    for (const [label, payload] of cases) {
+      try {
+        const res = await sendPush(s, { ...payload, ts: Date.now() }, env);
+        console.log('diag ping', label, ep, `status=${res.status}`, res.ok ? 'OK' : 'FAIL');
+      } catch (err) {
+        console.error('diag ping', label, ep, 'threw', err.message);
+      }
+    }
+  }
+
+  console.log('diag ping done');
+  return true;
+}
 
 /**
  * 오늘 경기 계획을 보고 감시가 필요한 시간인지 판단한다.
@@ -698,9 +766,18 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
-      tick(env).catch((err) => {
-        console.error('tick failed', err);
-      }),
+      (async () => {
+        // 진단 핑을 처리한 틱은 거기서 끝낸다(runDiagPing 주석 참고).
+        const pinged = await runDiagPing(env).catch((err) => {
+          console.error('diag ping failed', err.message);
+          return false;
+        });
+        if (pinged) return;
+
+        await tick(env).catch((err) => {
+          console.error('tick failed', err);
+        });
+      })(),
     );
   },
 };
