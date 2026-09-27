@@ -21,7 +21,8 @@ import { boardCoversScore, POLLS_PER_TICK } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin, readJson, MAX_SUBSCRIPTIONS,
          SUBREQUEST_BUDGET } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
-         listUndelivered, markResent, makeRoomForSubscription, saveSubscription } from '../src/db.js';
+         listUndelivered, markResent, makeRoomForSubscription, saveSubscription,
+         deleteSubscription } from '../src/db.js';
 import { dispatchKindOf } from '../src/detect.js';
 
 let failed = 0;
@@ -930,22 +931,19 @@ function testSubrequestBudget() {
 }
 
 
-/* ══ 7-d. 상한에 찼을 때 새 기기를 받아들이는가 ══ */
+/* ══ 7-d. 상한에 찼을 때 그 기기에 알림이 가는가 ══ */
 
 /**
  * 2026-09-20 에 상한을 200 → 8 로 내리면서 등록 거절(429)이 생겼는데, 그 길로
- * 기기가 영영 잠길 수 있었다 — 엔드포인트가 만료되면 서버가 410 을 받아 행을
- * 지우고, 그 기기는 앱을 열 때 다시 등록하는데 거기서 막히면 끝이다.
+ * 기기가 영영 잠겼다. 9월 27일에 실제로 알림이 끊겨서 찾았다.
  *
- * 그래서 거절 대신 가장 오래된 행을 밀어낸다. SQL 이 실제로 수렴하는지는
- * 눈으로 못 본다(LIMIT 안의 부질의·RETURNING). 진짜 SQLite 로 돌려서 확인한다:
- * 어떤 시작 개수에서도 상한을 넘지 않고, 새 구독은 반드시 들어가야 한다.
+ * 여기서 확인할 것은 행 개수가 아니라 *알림이 가느냐* 다. 표가 아무리 단정해도
+ * subscribersFor 가 그 기기를 안 돌려주면 발송 대상에서 빠지고, 그것이 사용자가
+ * 겪는 증상이다. 그래서 실제 스키마(schema.sql)로 subscribersFor 까지 돌린다.
  */
 async function testSubscriptionEviction() {
   const sqlite = new DatabaseSync(':memory:');
-  sqlite.exec(`CREATE TABLE subscriptions (
-    endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+  sqlite.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
 
   const db = {
     prepare(sql) {
@@ -961,31 +959,62 @@ async function testSubscriptionEviction() {
     },
   };
 
+  // 기본값(모든 알림 켜짐)으로 n 건을 채운다. updated_at 이 오래된 순으로 ep0..
   const seed = (n) => {
     sqlite.exec('DELETE FROM subscriptions');
     for (let i = 0; i < n; i++) {
-      sqlite.prepare('INSERT INTO subscriptions VALUES (?,?,?,?,?)')
+      sqlite
+        .prepare('INSERT INTO subscriptions (endpoint,p256dh,auth,created_at,updated_at) VALUES (?,?,?,?,?)')
         .run(`ep${i}`, 'p', 'a', '2026-01-01', `2026-01-${String(i + 1).padStart(2, '0')}`);
     }
   };
   const rows = () => sqlite.prepare('SELECT endpoint FROM subscriptions ORDER BY updated_at').all()
     .map((r) => r.endpoint);
+  // 실제 발송 대상. broadcast 가 이 목록으로 푸시를 보낸다(index.js).
+  const willBeNotified = async (endpoint) =>
+    (await subscribersFor(db, 'score', 'regular', false)).some((r) => r.endpoint === endpoint);
 
-  // 상한을 내리기 전에 쌓인 표(12건)도 한 번에 상한까지 내려가야 한다.
+  /*
+   * 실제로 겪은 사고를 그대로 재현한다.
+   *   1. 표가 상한까지 차 있다.
+   *   2. 쓰던 기기의 엔드포인트가 만료돼 410 이 오고 행이 지워진다.
+   *   3. 앱을 열어 새 엔드포인트로 다시 등록한다.
+   *   4. 그 기기에 알림이 가야 한다.
+   * 옛 코드는 3에서 429 로 막아 4가 영영 안 됐다.
+   */
+  seed(8);
+  await deleteSubscription(db, 'ep3');                      // 410 으로 지워짐
+  sqlite.prepare('INSERT INTO subscriptions (endpoint,p256dh,auth,created_at,updated_at) VALUES (?,?,?,?,?)')
+    .run('ep8', 'p', 'a', '2026-02-01', '2026-02-01');      // 그 사이 다른 기기가 자리를 채움
+  await makeRoomForSubscription(db, 8);
+  await saveSubscription(db, { endpoint: 'ep3-rotated', p256dh: 'p', auth: 'a' });
+
+  check('엔드포인트가 바뀐 기기가 다시 등록된다', rows().includes('ep3-rotated'), rows().join(','));
+  check('그 기기가 실제 발송 대상에 든다 (알림이 간다)',
+    await willBeNotified('ep3-rotated'));
+  check('표는 여전히 상한 이하', rows().length <= 8, `${rows().length}건`);
+
+  // 자리 비우기가 어떤 시작 개수에서도 수렴하는지. LIMIT 안의 부질의와
+  // RETURNING 은 눈으로 못 본다. 12건은 상한을 내리기 전에 쌓인 표다 —
   // 한 행씩 지우면 영원히 안 줄어든다.
-  for (const [start, max] of [[12, 8], [8, 8], [7, 8], [0, 8], [1, 1]]) {
-    seed(start);
+  for (const [startCount, max] of [[12, 8], [8, 8], [7, 8], [0, 8], [1, 1]]) {
+    seed(startCount);
     await makeRoomForSubscription(db, max);
     await saveSubscription(db, { endpoint: 'NEW', p256dh: 'p', auth: 'a' });
     const after = rows();
-    check(`구독 ${start}건·상한 ${max} → 새 기기가 들어가고 상한을 안 넘는다 (${after.length}건)`,
-      after.includes('NEW') && after.length <= max, after.join(','));
+    check(`구독 ${startCount}건·상한 ${max} → 새 기기에 알림이 가고 상한을 안 넘는다 (${after.length}건)`,
+      after.includes('NEW') && after.length <= max && await willBeNotified('NEW'),
+      after.join(','));
   }
 
   // 밀려나는 것은 가장 오래 갱신 안 된 행이어야 한다 — 죽은 엔드포인트가 거기 모인다.
   seed(8);
   const evicted = await makeRoomForSubscription(db, 8);
   check('가장 오래된 행부터 밀어낸다', evicted.length === 1 && evicted[0] === 'ep0', evicted.join(','));
+
+  // 밀려난 기기는 발송 대상에서도 빠져야 한다 — 표에서만 지우고 발송이 남으면
+  // 예산 계산이 무너진다.
+  check('밀려난 기기는 발송 대상에서도 빠진다', !(await willBeNotified('ep0')));
 }
 
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
@@ -1579,7 +1608,7 @@ console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLimit();
 console.log('\n[7-c] 구독 상한 vs subrequest 예산'); testSubrequestBudget();
-console.log('\n[7-d] 상한 도달 시 새 기기 수용'); await testSubscriptionEviction();
+console.log('\n[7-d] 상한 도달 시 알림 수신'); await testSubscriptionEviction();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
