@@ -1,22 +1,25 @@
 name: Diagnose push
 
-# 수동 실행 전용. 알림이 안 올 때 "지금 실제로 보내 보는" 진단 도구다.
+# 수동 실행 전용. 알림이 안 올 때 밖에서 워커 상태를 보는 진단 도구다.
 #
-# 왜 필요한가 — 개발 환경에서 workers.dev 로 나가는 길이 막혀 있어 밖에서
-# 워커를 부를 수가 없다. Actions 러너는 닿는다.
+# 왜 필요한가 — 개발 환경 프록시가 workers.dev 로 나가는 길을 게이트웨이
+# 정책으로 막는다(403 CONNECT). Actions 러너는 닿는다.
 #
-# 여기서 하는 일은 딱 둘이다.
-#   1. D1 cache 에 diag:ping 한 줄을 *쓴다*. 구독 표는 읽지 않는다.
-#   2. wrangler tail 로 워커가 남기는 로그를 지켜본다.
+# CI 는 구독 표를 읽지 않는다. 하는 일은 셋뿐이다.
+#   1. 공개 API(/api/history·/api/schedule) 조회 — 이벤트가 감지되고 있는지
+#   2. (선택) D1 cache 에 diag:ping 한 줄 *쓰기* — SELECT 없음
+#   3. (선택) wrangler tail 로 워커 로그 보기
 # 발송은 워커가 스스로 한다(src/index.js runDiagPing). 구독 암호키는 워커 밖으로
-# 한 발짝도 안 나가고, CI 는 구독을 한 줄도 안 읽는다.
-#
-# 로그에 남는 것: 구독 수, endpoint 끝 12자, 푸시 서비스가 준 HTTP 상태.
+# 나가지 않는다.
 on:
   workflow_dispatch:
     inputs:
       send:
-        description: '실제로 푸시를 보낼지 (false 면 로그만 지켜본다)'
+        description: '실제 푸시를 보낼지'
+        type: boolean
+        default: false
+      tail:
+        description: '워커 로그를 지켜볼지'
         type: boolean
         default: true
       watch_seconds:
@@ -27,13 +30,13 @@ on:
 permissions:
   contents: read
 
+env:
+  BASE: https://nc-baseball-alert.nc-kbo-alert.workers.dev
+
 jobs:
   diagnose:
     runs-on: ubuntu-latest
     environment: production
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -41,9 +44,42 @@ jobs:
           node-version: 22
       - run: npm ci --ignore-scripts
 
+      # 알림이 안 오는 원인은 크게 둘이다 — 감지가 안 됐거나, 감지는 됐는데
+      # 발송이 막혔거나. events 에 행이 있으면 감지는 된 것이다. 둘을 여기서 가른다.
+      - name: 감지 상태 보기 (공개 API)
+        run: |
+          set -uo pipefail
+          FROM=$(date -u -d '8 days ago' +%Y-%m-%d)
+          curl -sS "$BASE/api/history?days=10" > hist.json
+          curl -sS "$BASE/api/schedule"        > sched.json
+
+          echo "오늘(KST): $(jq -r '.today' sched.json)   기준일: $FROM 이후"
+          echo
+          echo "── 최근 경기와 감지된 이벤트 ──"
+          jq -r --arg from "$FROM" '
+            .games
+            | map(select(.gameDate >= $from))
+            | if length == 0 then "해당 기간 경기 기록 없음"
+              else (.[] | "  \(.gameDate) \(.oppName) \(.teamScore):\(.oppScore) "
+                        + "phase=\(.phase) 이벤트=\(.events|length)"
+                        + (if (.events|length) > 0
+                           then " [" + ([.events[].kind] | join(",")) + "]"
+                           else "  <- 이벤트 0건" end))
+              end' hist.json
+
+          echo
+          echo "── 일정에 잡힌 최근 경기 ──"
+          jq -r --arg from "$FROM" '
+            .games | map(select(.gameDate >= $from))
+            | "일정 \(length)건",
+              (.[] | "  \(.gameDate) \(.oppName) 결과=\(.result // "미정")")' sched.json
+
       # 쓰기 한 번. SELECT 가 없다는 점이 이 단계의 전부다.
       - name: 진단 핑 표시하기
         if: ${{ inputs.send }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           npx wrangler d1 execute nc-alert --remote --command \
@@ -53,11 +89,18 @@ jobs:
                value='1', expires_at=excluded.expires_at, updated_at=excluded.updated_at"
           echo "핑을 써 뒀다. 다음 크론(최대 1분)에서 워커가 실제 푸시를 보낸다."
 
-      # 크론은 1분마다 돈다. 핑 처리와 그 뒤 한두 틱을 함께 지켜본다.
+      # 크론은 1분마다 돈다. 매 틱의 결과가 'tick {...}' 한 줄로 찍힌다.
+      #
+      # timeout 에 -s KILL 을 준다. 기본 SIGTERM 은 wrangler tail 이 받고도 안
+      # 끝나 단계가 그대로 멈춘다(2026-09-27 실측: 150초짜리가 끝나지 않았다).
       - name: 워커 로그 지켜보기
+        if: ${{ inputs.tail }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -uo pipefail
           echo "=== ${{ inputs.watch_seconds }}초 동안 워커 로그를 지켜본다 ==="
-          timeout "${{ inputs.watch_seconds }}" npx wrangler tail nc-baseball-alert \
-            --format pretty || true
+          timeout -s KILL "${{ inputs.watch_seconds }}" \
+            npx wrangler tail nc-baseball-alert --format pretty || true
           echo "=== 끝 ==="
