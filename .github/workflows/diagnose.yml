@@ -101,6 +101,13 @@ jobs:
         run: |
           set -uo pipefail
           echo "=== ${{ inputs.watch_seconds }}초 동안 워커 로그를 지켜본다 ==="
-          timeout -s KILL "${{ inputs.watch_seconds }}" \
-            npx wrangler tail nc-baseball-alert --format pretty || true
+          # timeout 으로는 안 끝난다. npx 를 죽여도 자식 wrangler 가 살아남아
+          # 단계의 stdout 을 붙잡고 있어서, 러너가 고아 프로세스를 정리할 때까지
+          # 멈춰 있는다(2026-09-27 실측, -s KILL 로도 마찬가지). 직접 띄우고
+          # 이름으로 확실히 죽인다.
+          npx wrangler tail nc-baseball-alert --format pretty > tail.log 2>&1 &
+          sleep "${{ inputs.watch_seconds }}"
+          pkill -9 -f 'wrangler tail' || true
+          sleep 2
+          cat tail.log
           echo "=== 끝 ==="
