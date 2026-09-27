@@ -18,7 +18,7 @@ import {
 import {
   loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
-  updateSettings, subscribersFor, countSubscriptions, touchTestSent, pruneOtherSeasons,
+  updateSettings, subscribersFor, makeRoomForSubscription, touchTestSent, pruneOtherSeasons,
   allSettledBefore, markDelivered, listUndelivered, markResent,
 } from './db.js';
 import {
@@ -503,10 +503,19 @@ async function handleApi(request, env, url) {
     const keyCheck = validateKeys(keys?.p256dh, keys?.auth);
     if (!keyCheck.ok) return json({ error: keyCheck.reason }, 400);
 
-    // 이미 있는 구독의 갱신은 개수 제한과 무관하다.
+    /*
+     * 이미 있는 구독의 갱신은 자리를 새로 만들 필요가 없다.
+     *
+     * 새 endpoint 면 상한만큼 자리를 비우고 받는다 — 거절하지 않는다. 거절하면
+     * 엔드포인트가 만료된 기기가 다시 등록하지 못해 영영 알림이 끊긴다
+     * (db.js makeRoomForSubscription 주석 참고). 2026-09-20 에 상한을 200 에서
+     * 8 로 내리면서 실제로 그 길이 열렸다.
+     */
     if (!(await getSubscription(env.DB, endpoint))) {
-      if ((await countSubscriptions(env.DB)) >= MAX_SUBSCRIPTIONS) {
-        return json({ error: '구독 수 한도에 도달했습니다.' }, 429);
+      const evicted = await makeRoomForSubscription(env.DB, MAX_SUBSCRIPTIONS);
+      // endpoint 는 끝 12자만 남긴다 — 식별에 충분하고 전체를 로그에 남기지 않는다.
+      if (evicted.length > 0) {
+        console.log('evicted for new subscription', evicted.map((e) => e.slice(-12)).join(','));
       }
     }
 

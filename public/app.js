@@ -1269,20 +1269,31 @@ async function initPush() {
   }
 
   subscription = existing;
-  setPushUi('on', '이 기기로 알림을 보내드려요.');
 
-  // 서버에 남아 있는 설정을 복원한다. 서버에서 사라졌다면 다시 등록한다.
+  /*
+   * 서버에 남아 있는 설정을 복원한다. 서버에서 사라졌다면 다시 등록한다.
+   *
+   * "켜짐"은 서버가 이 구독을 안다고 확인한 뒤에 쓴다. 먼저 켜 두면 재등록이
+   * 실패해도 카드가 "이 기기로 알림을 보내드려요" 로 남아, 서버는 이 기기를
+   * 모르는데 화면만 멀쩡해 보인다 — 알림이 안 오는데 볼 곳이 없는 상태가 된다.
+   * 2026-09 에 실제로 그 조합이 가능했다(구독 상한이 재등록을 막았다).
+   */
   try {
-    const { settings } = await api(
-      `/api/settings?endpoint=${encodeURIComponent(existing.endpoint)}`,
-    );
+    let settings;
+    try {
+      ({ settings } = await api(
+        `/api/settings?endpoint=${encodeURIComponent(existing.endpoint)}`,
+      ));
+    } catch {
+      ({ settings } = await api('/api/subscribe', {
+        method: 'POST',
+        body: JSON.stringify(serialize(existing)),
+      }));
+    }
     applySettings(settings);
-  } catch {
-    const { settings } = await api('/api/subscribe', {
-      method: 'POST',
-      body: JSON.stringify(serialize(existing)),
-    });
-    applySettings(settings);
+    setPushUi('on', '이 기기로 알림을 보내드려요.');
+  } catch (err) {
+    setPushUi('off', `알림 등록을 확인하지 못했어요. 다시 켜 주세요. (${err.message})`);
   }
 }
 
