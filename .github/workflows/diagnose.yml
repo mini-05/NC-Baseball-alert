@@ -5,19 +5,18 @@ name: Diagnose push
 # 왜 필요한가 — 개발 환경 프록시가 workers.dev 로 나가는 길을 게이트웨이
 # 정책으로 막는다(403 CONNECT). Actions 러너는 닿는다.
 #
-# CI 는 구독 표를 읽지 않는다. 하는 일은 셋뿐이다.
+# 보기만 한다. 하는 일은 둘뿐이다.
 #   1. 공개 API(/api/history·/api/schedule) 조회 — 이벤트가 감지되고 있는지
-#   2. (선택) D1 cache 에 diag:ping 한 줄 *쓰기* — SELECT 없음
-#   3. (선택) wrangler tail 로 워커 로그 보기
-# 발송은 워커가 스스로 한다(src/index.js runDiagPing). 구독 암호키는 워커 밖으로
-# 나가지 않는다.
+#   2. (선택) wrangler tail 로 워커 로그 보기
+#
+# 알림을 실제로 보내는 기능은 뺐다. 저장소에 상시 놓인 "전 기기에 푸시 발송"
+# 버튼은 진단 한 번의 값어치보다 위험이 크다 — 저장소에 쓰기 권한이 생기는
+# 사람은 누구든 누를 수 있다. 다시 필요하면 그때 만든다.
+#
+# D1 도 구독 표도 건드리지 않는다. 읽는 것은 공개 GET 두 개와 워커 로그뿐이다.
 on:
   workflow_dispatch:
     inputs:
-      send:
-        description: '실제 푸시를 보낼지'
-        type: boolean
-        default: false
       tail:
         description: '워커 로그를 지켜볼지'
         type: boolean
@@ -74,25 +73,7 @@ jobs:
             | "일정 \(length)건",
               (.[] | "  \(.gameDate) \(.oppName) 결과=\(.result // "미정")")' sched.json
 
-      # 쓰기 한 번. SELECT 가 없다는 점이 이 단계의 전부다.
-      - name: 진단 핑 표시하기
-        if: ${{ inputs.send }}
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          npx wrangler d1 execute nc-alert --remote --command \
-            "INSERT INTO cache (key, value, expires_at, updated_at)
-             VALUES ('diag:ping', '1', datetime('now','+10 minutes'), datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET
-               value='1', expires_at=excluded.expires_at, updated_at=excluded.updated_at"
-          echo "핑을 써 뒀다. 다음 크론(최대 1분)에서 워커가 실제 푸시를 보낸다."
-
       # 크론은 1분마다 돈다. 매 틱의 결과가 'tick {...}' 한 줄로 찍힌다.
-      #
-      # timeout 에 -s KILL 을 준다. 기본 SIGTERM 은 wrangler tail 이 받고도 안
-      # 끝나 단계가 그대로 멈춘다(2026-09-27 실측: 150초짜리가 끝나지 않았다).
       - name: 워커 로그 지켜보기
         if: ${{ inputs.tail }}
         env:
