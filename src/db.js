@@ -419,11 +419,6 @@ export async function pruneOtherSeasons(db, seasonYear) {
 
 /* ─────────────── 구독 ─────────────── */
 
-export async function countSubscriptions(db) {
-  const row = await db.prepare('SELECT COUNT(*) AS n FROM subscriptions').first();
-  return row?.n ?? 0;
-}
-
 export async function saveSubscription(db, sub) {
   const ts = nowIso();
   await db
@@ -439,6 +434,48 @@ export async function saveSubscription(db, sub) {
 
 export async function deleteSubscription(db, endpoint) {
   await db.prepare('DELETE FROM subscriptions WHERE endpoint = ?').bind(endpoint).run();
+}
+
+/**
+ * 새 구독 하나가 들어갈 자리를 비운다. 상한에 찼으면 가장 오래 갱신 안 된
+ * 행부터 지운다.
+ *
+ * 상한에 걸렸다고 등록을 거절하면 안 된다 — 푸시 엔드포인트는 만료·회전되고,
+ * 그때 서버는 410 을 받아 행을 지운다(index.js broadcast). 그러면 멀쩡히 쓰던
+ * 기기가 앱을 열 때 "없는 구독"이 되어 다시 등록하는데(app.js), 거기서 막히면
+ * 그 기기는 영영 알림을 못 받는다. 가장 오래된 행은 거의 항상 그렇게 죽은
+ * 엔드포인트라, 밀어내야 할 것을 밀어내는 셈이다.
+ *
+ * 한 번에 상한까지 내려가게 지운다. 한 행씩 지우면 이미 상한을 넘겨 쌓인
+ * 표(상한을 내리기 전에 등록된 것들)가 영원히 안 줄어든다.
+ *
+ * @returns {Promise<string[]>} 지운 endpoint 목록. 지울 필요가 없었으면 빈 배열.
+ */
+export async function makeRoomForSubscription(db, max) {
+  const { results } = await db
+    .prepare(
+      `DELETE FROM subscriptions
+         WHERE endpoint IN (
+           SELECT endpoint FROM subscriptions
+            ORDER BY updated_at ASC
+            LIMIT MAX(0, (SELECT COUNT(*) FROM subscriptions) - ? + 1)
+         )
+       RETURNING endpoint`,
+    )
+    .bind(max)
+    .all();
+  return (results ?? []).map((r) => r.endpoint);
+}
+
+/**
+ * 진단용 — 알림 종류·시리즈 설정과 무관하게 모든 구독을 준다.
+ *
+ * subscribersFor 를 안 쓰는 이유: 설정 자체가 원인일 수 있다. "on_score 가 0
+ * 이라 안 갔다" 와 "푸시 서비스가 거절했다" 를 가르려면 거르지 않고 보내 봐야 한다.
+ */
+export async function listAllSubscriptions(db) {
+  const { results } = await db.prepare('SELECT endpoint, p256dh, auth FROM subscriptions').all();
+  return results ?? [];
 }
 
 export async function getSubscription(db, endpoint) {

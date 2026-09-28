@@ -9,6 +9,7 @@
  */
 
 import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url, sendPush } from '../src/push.js';
 import { detectEvents } from '../src/detect.js';
@@ -20,7 +21,8 @@ import { boardCoversScore, POLLS_PER_TICK } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin, readJson, MAX_SUBSCRIPTIONS,
          SUBREQUEST_BUDGET } from '../src/security.js';
 import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
-         listUndelivered, markResent } from '../src/db.js';
+         listUndelivered, markResent, makeRoomForSubscription, saveSubscription,
+         deleteSubscription } from '../src/db.js';
 import { dispatchKindOf } from '../src/detect.js';
 
 let failed = 0;
@@ -928,6 +930,93 @@ function testSubrequestBudget() {
     `구독 ${N + 1} → ${oneMore}`);
 }
 
+
+/* ══ 7-d. 상한에 찼을 때 그 기기에 알림이 가는가 ══ */
+
+/**
+ * 2026-09-20 에 상한을 200 → 8 로 내리면서 등록 거절(429)이 생겼는데, 그 길로
+ * 기기가 영영 잠겼다. 9월 27일에 실제로 알림이 끊겨서 찾았다.
+ *
+ * 여기서 확인할 것은 행 개수가 아니라 *알림이 가느냐* 다. 표가 아무리 단정해도
+ * subscribersFor 가 그 기기를 안 돌려주면 발송 대상에서 빠지고, 그것이 사용자가
+ * 겪는 증상이다. 그래서 실제 스키마(schema.sql)로 subscribersFor 까지 돌린다.
+ */
+async function testSubscriptionEviction() {
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+
+  const db = {
+    prepare(sql) {
+      const st = sqlite.prepare(sql);
+      let args = [];
+      const api = {
+        bind: (...a) => { args = a; return api; },
+        all: async () => ({ results: st.all(...args) }),
+        first: async () => st.get(...args) ?? null,
+        run: async () => st.run(...args),
+      };
+      return api;
+    },
+  };
+
+  // 기본값(모든 알림 켜짐)으로 n 건을 채운다. updated_at 이 오래된 순으로 ep0..
+  const seed = (n) => {
+    sqlite.exec('DELETE FROM subscriptions');
+    for (let i = 0; i < n; i++) {
+      sqlite
+        .prepare('INSERT INTO subscriptions (endpoint,p256dh,auth,created_at,updated_at) VALUES (?,?,?,?,?)')
+        .run(`ep${i}`, 'p', 'a', '2026-01-01', `2026-01-${String(i + 1).padStart(2, '0')}`);
+    }
+  };
+  const rows = () => sqlite.prepare('SELECT endpoint FROM subscriptions ORDER BY updated_at').all()
+    .map((r) => r.endpoint);
+  // 실제 발송 대상. broadcast 가 이 목록으로 푸시를 보낸다(index.js).
+  const willBeNotified = async (endpoint) =>
+    (await subscribersFor(db, 'score', 'regular', false)).some((r) => r.endpoint === endpoint);
+
+  /*
+   * 실제로 겪은 사고를 그대로 재현한다.
+   *   1. 표가 상한까지 차 있다.
+   *   2. 쓰던 기기의 엔드포인트가 만료돼 410 이 오고 행이 지워진다.
+   *   3. 앱을 열어 새 엔드포인트로 다시 등록한다.
+   *   4. 그 기기에 알림이 가야 한다.
+   * 옛 코드는 3에서 429 로 막아 4가 영영 안 됐다.
+   */
+  seed(8);
+  await deleteSubscription(db, 'ep3');                      // 410 으로 지워짐
+  sqlite.prepare('INSERT INTO subscriptions (endpoint,p256dh,auth,created_at,updated_at) VALUES (?,?,?,?,?)')
+    .run('ep8', 'p', 'a', '2026-02-01', '2026-02-01');      // 그 사이 다른 기기가 자리를 채움
+  await makeRoomForSubscription(db, 8);
+  await saveSubscription(db, { endpoint: 'ep3-rotated', p256dh: 'p', auth: 'a' });
+
+  check('엔드포인트가 바뀐 기기가 다시 등록된다', rows().includes('ep3-rotated'), rows().join(','));
+  check('그 기기가 실제 발송 대상에 든다 (알림이 간다)',
+    await willBeNotified('ep3-rotated'));
+  check('표는 여전히 상한 이하', rows().length <= 8, `${rows().length}건`);
+
+  // 자리 비우기가 어떤 시작 개수에서도 수렴하는지. LIMIT 안의 부질의와
+  // RETURNING 은 눈으로 못 본다. 12건은 상한을 내리기 전에 쌓인 표다 —
+  // 한 행씩 지우면 영원히 안 줄어든다.
+  for (const [startCount, max] of [[12, 8], [8, 8], [7, 8], [0, 8], [1, 1]]) {
+    seed(startCount);
+    await makeRoomForSubscription(db, max);
+    await saveSubscription(db, { endpoint: 'NEW', p256dh: 'p', auth: 'a' });
+    const after = rows();
+    check(`구독 ${startCount}건·상한 ${max} → 새 기기에 알림이 가고 상한을 안 넘는다 (${after.length}건)`,
+      after.includes('NEW') && after.length <= max && await willBeNotified('NEW'),
+      after.join(','));
+  }
+
+  // 밀려나는 것은 가장 오래 갱신 안 된 행이어야 한다 — 죽은 엔드포인트가 거기 모인다.
+  seed(8);
+  const evicted = await makeRoomForSubscription(db, 8);
+  check('가장 오래된 행부터 밀어낸다', evicted.length === 1 && evicted[0] === 'ep0', evicted.join(','));
+
+  // 밀려난 기기는 발송 대상에서도 빠져야 한다 — 표에서만 지우고 발송이 남으면
+  // 예산 계산이 무너진다.
+  check('밀려난 기기는 발송 대상에서도 빠진다', !(await willBeNotified('ep0')));
+}
+
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
 
 /**
@@ -1186,10 +1275,25 @@ function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}, fetchMode 
     self: {
       addEventListener: (type, fn) => { listeners[type] = fn; },
       registration: {
-        showNotification: (title, opts) => { notifications.push({ title, opts }); return Promise.resolve(); },
-        // 알림함 흉내 — 이미 띄운 것 중 같은 tag 를 돌려준다. 재발송이 왔을 때
-        // sw.js 가 "이미 받은 알림인지" 판단하는 데 쓴다.
-        getNotifications: async ({ tag }) => notifications.filter((n) => n.opts.tag === tag),
+        /*
+         * 같은 tag 는 알림함에서 덮어쓴다 — 실제 동작을 그대로 흉내 낸다.
+         * 밀어 넣기만 하면 "최신 하나만 남는가"를 검증할 수 없다.
+         */
+        showNotification: (title, opts) => {
+          const at = notifications.findIndex((n) => n.opts.tag === opts.tag);
+          const entry = { title, opts };
+          if (at >= 0) notifications[at] = entry;
+          else notifications.push(entry);
+          return Promise.resolve();
+        },
+        /*
+         * 알림함 흉내. 실제 getNotifications 는 Notification 객체를 주고 옵션이
+         * 속성으로 올라와 있다(n.data·n.timestamp). sw.js 가 n.data 를 읽으므로
+         * 같은 모양으로 돌려준다 — {opts} 로만 주면 검사가 늘 통과해 버린다.
+         */
+        getNotifications: async ({ tag }) => notifications
+          .filter((n) => n.opts.tag === tag)
+          .map((n) => ({ ...n.opts, title: n.title })),
         pushManager: { getSubscription: async () => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/TEST' }) },
       },
       clients: { matchAll: async () => [] },
@@ -1264,10 +1368,8 @@ async function testServiceWorkerVibrate() {
   check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
 
   /*
-   * tag 가 같으면 새 알림이 뜨지 않고 기존 알림을 덮어쓴다. 2026-08-30 실측:
-   * 종료 알림이 서버에서 정상 발송됐는데(Observability fetch OK ×2, 오류 로그
-   * 없음) 단말에 안 뜬 건이 있었다. 종류만으로 tag 를 만들면 어제 경기의
-   * 종료 알림을 덮어쓰기 때문이다.
+   * tag 가 같으면 새 알림이 뜨지 않고 기존 알림을 제자리에서 덮어쓴다.
+   * tag 의 범위는 경기 하나다 — 한 경기의 알림은 알림함에 항상 하나만 남는다.
    */
   const tagOf = async (payload) => {
     const { push, notifications } = loadServiceWorker(store);
@@ -1275,39 +1377,74 @@ async function testServiceWorkerVibrate() {
     return notifications[0]?.opts.tag;
   };
 
+  /*
+   * 경기까지는 갈라야 한다. 2026-08-30 실측: 종료 알림이 서버에서 정상
+   * 발송됐는데(fetch OK ×2, 오류 없음) 단말에 안 뜬 건이 있었다. 종류만으로
+   * tag 를 만들어 어제 경기의 종료 알림을 덮어썼기 때문이다.
+   */
   const endA = await tagOf({ kind: 'end', gameId: '20260829NCHH02026' });
   const endB = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
-  check('경기가 다르면 종료 알림 tag 도 다르다', endA !== endB, `${endA} vs ${endB}`);
-
-  const endSame = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
-  check('같은 경기의 종료 알림은 같은 tag (중복 표시 방지)', endB === endSame);
+  check('경기가 다르면 tag 도 다르다', endA !== endB, `${endA} vs ${endB}`);
 
   const startB = await tagOf({ kind: 'start', gameId: '20260830NCHH02026' });
-  check('같은 경기라도 종류가 다르면 tag 도 다르다', endB !== startB, `${endB} vs ${startB}`);
-
-  // 득점은 한 경기에 여러 번 난다 — 경기 단위로 묶으면 마지막 것만 남는다.
-  const { push: pushScore, notifications: scored } = loadServiceWorker(store);
-  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 1 });
-  await pushScore({ kind: 'score', gameId: '20260830NCHH02026', title: 't', body: 'b', ts: 2 });
-  check('같은 경기의 득점은 매번 다른 tag',
-    scored[0]?.opts.tag !== scored[1]?.opts.tag,
-    `${scored[0]?.opts.tag} vs ${scored[1]?.opts.tag}`);
-
-  // gameId 가 없는 payload(테스트 알림)도 겹치면 안 된다.
-  const t1 = await tagOf({ kind: 'test', ts: 1 });
-  const t2 = await tagOf({ kind: 'test', ts: 2 });
-  check('gameId 없는 알림은 ts 로 갈린다', t1 !== t2, `${t1} vs ${t2}`);
+  check('같은 경기면 종류가 달라도 같은 tag (최신 하나만 남긴다)', endB === startB, `${endB} vs ${startB}`);
 
   /*
-   * 이벤트 id 가 있으면 tag 는 id 하나로 정해진다. 서버가 같은 이벤트를 다시
-   * 보낼 때(배달 확인이 없을 때의 재발송) ts 는 새로 찍히므로, ts 기반 tag 로는
-   * 같은 알림이 두 번 뜬다. id 기반이면 제자리 갱신으로 끝난다.
+   * 여기가 이번 변경의 요점이다. 득점이 여러 번 나도 알림함에는 하나만,
+   * 그것도 가장 최근 것이 남아야 한다. 종전에는 득점마다 tag 가 달라 다섯 번
+   * 득점하면 알림이 다섯 개 쌓였다.
    */
-  const first = await tagOf({ kind: 'score', id: 66, ts: 1 });
-  const resend = await tagOf({ kind: 'score', id: 66, ts: 2 });
-  check('같은 이벤트를 다시 보내도 tag 가 같다 (재발송 중복 방지)', first === resend, `${first} vs ${resend}`);
-  const other = await tagOf({ kind: 'score', id: 67, ts: 2 });
-  check('이벤트가 다르면 tag 도 다르다', first !== other, `${first} vs ${other}`);
+  {
+    const { push, notifications } = loadServiceWorker(store);
+    const game = '20260830NCHH02026';
+    await push({ kind: 'start', gameId: game, id: 1, title: '경기 시작', body: '', ts: 1000 });
+    await push({ kind: 'score', gameId: game, id: 2, title: '1회 득점', body: '1:0', ts: 2000 });
+    await push({ kind: 'score', gameId: game, id: 3, title: '3회 득점', body: '2:0', ts: 3000 });
+    await push({ kind: 'score', gameId: game, id: 4, title: '5회 득점', body: '3:0', ts: 4000 });
+    check('한 경기에 알림이 넷 와도 알림함에는 하나만 남는다',
+      notifications.length === 1, `${notifications.length}건`);
+    check('남는 것은 가장 최근 알림이다',
+      notifications[0]?.title === '5회 득점', notifications[0]?.title);
+  }
+
+  /*
+   * 도즈에서 깨어날 때 밀린 푸시가 한꺼번에 오는데 순서가 보장되지 않는다.
+   * 옛 알림이 나중에 도착해도 최신 자리를 뺏으면 안 된다 — 점수가 거꾸로 간다.
+   */
+  {
+    const { push, notifications } = loadServiceWorker(store);
+    const game = '20260830NCHH02026';
+    await push({ kind: 'score', gameId: game, id: 9, title: '5회 득점', body: '3:0', ts: 4000 });
+    await push({ kind: 'score', gameId: game, id: 8, title: '3회 득점', body: '2:0', ts: 3000 });
+    check('늦게 도착한 옛 알림이 최신 알림을 덮지 않는다',
+      notifications.length === 1 && notifications[0]?.title === '5회 득점',
+      `${notifications.length}건 / ${notifications[0]?.title}`);
+  }
+
+  /*
+   * tag 를 공유하게 되면서 "같은 tag 가 있으면 건너뛴다" 로는 안 된다 —
+   * 그러면 새 득점이 직전 알림에 막혀 영영 안 뜬다. 같은 *이벤트*일 때만 넘긴다.
+   */
+  {
+    const { push, notifications, acks } = loadServiceWorker(store);
+    const game = '20260830NCHH02026';
+    await push({ kind: 'score', gameId: game, id: 66, title: '1회 득점', body: '', ts: 1000 });
+    await push({ kind: 'score', gameId: game, id: 66, title: '1회 득점', body: '', ts: 2000, resend: true });
+    check('같은 이벤트를 다시 보내도 다시 울리지 않는다',
+      notifications.length === 1 && notifications[0]?.title === '1회 득점');
+    check('그때도 배달 확인은 다시 올린다', acks.map((a) => a.body.id).join(',') === '66,66',
+      acks.map((a) => a.body.id).join(','));
+
+    await push({ kind: 'score', gameId: game, id: 67, title: '3회 득점', body: '', ts: 3000 });
+    check('다른 이벤트는 같은 tag 라도 최신으로 갱신된다',
+      notifications.length === 1 && notifications[0]?.title === '3회 득점',
+      `${notifications.length}건 / ${notifications[0]?.title}`);
+  }
+
+  // gameId 가 없는 payload(테스트 알림)도 경기 알림을 덮으면 안 된다.
+  const t1 = await tagOf({ kind: 'test', ts: 1 });
+  check('gameId 없는 알림은 종류로 묶인다', t1 === 'nc-test', t1);
+  check('그 tag 는 경기 알림과 겹치지 않는다', t1 !== endB, `${t1} vs ${endB}`);
 
   // ── 배달 확인 — 알림을 띄운 뒤 서버에 id 를 알린다 ──
   {
@@ -1371,12 +1508,16 @@ async function testServiceWorkerVibrate() {
       String(notifications.at(-1).opts.timestamp));
   }
   {
-    // 다른 이벤트가 떠 있다고 해서 이 이벤트를 받은 것은 아니다 — tag 로 갈린다.
+    /*
+     * 다른 이벤트가 떠 있다고 해서 이 이벤트를 받은 것은 아니다. tag 가 같아도
+     * 묻히면 안 된다 — 알림함에는 하나만 남되 그 하나가 새 이벤트여야 한다.
+     */
     const { push, notifications } = loadServiceWorker(store);
-    await push({ kind: 'score', id: 80, title: 't', body: 'b', ts: 1 });
-    await push({ kind: 'score', id: 81, title: 't', body: 'b', ts: 2, resend: true });
-    check('다른 이벤트가 떠 있어도 이 이벤트는 뜬다', notifications.length === 2,
-      `${notifications.length}건`);
+    await push({ kind: 'score', id: 80, title: '먼저', body: 'b', ts: 1 });
+    await push({ kind: 'score', id: 81, title: '나중', body: 'b', ts: 2, resend: true });
+    check('다른 이벤트가 떠 있어도 이 이벤트로 갱신된다',
+      notifications.length === 1 && notifications[0]?.title === '나중',
+      `${notifications.length}건 / ${notifications[0]?.title}`);
   }
   {
     /*
@@ -1519,6 +1660,7 @@ console.log('\n[6-c] 배달 확인');            await testDelivered();
 console.log('\n[7] 보안 검증');              testSecurity();
 console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLimit();
 console.log('\n[7-c] 구독 상한 vs subrequest 예산'); testSubrequestBudget();
+console.log('\n[7-d] 상한 도달 시 알림 수신'); await testSubscriptionEviction();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
