@@ -71,13 +71,16 @@ jobs:
           # 몰려 오는 증상은 이 값으로만 잡힌다. 미배달이면 유실이다.
           echo
           echo "── 이벤트별 배달 지연 (감지 → 단말 표시) ──"
+          # 시각에 소수점 초가 붙는다(2026-10-01T09:31:16.355Z). fromdateiso8601 은
+          # 그 형식을 못 읽고 통째로 죽는다 — 떼고 넘긴다.
           jq -r --arg from "$FROM" '
+            def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
             .games
             | map(select(.gameDate >= $from))
             | [.[] | .gameDate as $d | .events[] | {
                 d: $d, kind, t: .createdAt,
                 lag: (if .deliveredAt == null then null
-                      else ((.deliveredAt | fromdateiso8601) - (.createdAt | fromdateiso8601))
+                      else ((.deliveredAt | ts) - (.createdAt | ts))
                       end)
               }]
             | if length == 0 then "이벤트 없음"
