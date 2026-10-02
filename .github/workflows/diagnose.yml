@@ -66,6 +66,32 @@ jobs:
                            else "  <- 이벤트 0건" end))
               end' hist.json
 
+          # 감지 시각과 단말이 "띄웠다"고 알려온 시각의 차이 = 실제 배달 지연.
+          # 서버 로그는 "FCM 이 받았다"까지만 알려줘서, 득점 때 안 오고 종료 때
+          # 몰려 오는 증상은 이 값으로만 잡힌다. 미배달이면 유실이다.
+          echo
+          echo "── 이벤트별 배달 지연 (감지 → 단말 표시) ──"
+          jq -r --arg from "$FROM" '
+            .games
+            | map(select(.gameDate >= $from))
+            | [.[] | .gameDate as $d | .events[] | {
+                d: $d, kind, t: .createdAt,
+                lag: (if .deliveredAt == null then null
+                      else ((.deliveredAt | fromdateiso8601) - (.createdAt | fromdateiso8601))
+                      end)
+              }]
+            | if length == 0 then "이벤트 없음"
+              else
+                (.[] | "  \(.d) \(.kind | . + "      " | .[0:7]) \(.t[11:19])  "
+                     + (if .lag == null then "미배달" else "\(.lag)초" end)),
+                "",
+                "  배달됨 \([.[] | select(.lag != null)] | length)건 / 전체 \(length)건",
+                (([.[] | select(.lag != null) | .lag]) as $l
+                 | if ($l | length) == 0 then "  지연 통계: 배달된 건이 없다"
+                   else "  지연 중앙값 \($l | sort | .[(length/2|floor)])초, 최대 \($l | max)초"
+                   end)
+              end' hist.json
+
           echo
           echo "── 일정에 잡힌 최근 경기 ──"
           jq -r --arg from "$FROM" '

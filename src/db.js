@@ -333,7 +333,7 @@ export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } =
 
   const events = await db
     .prepare(
-      `SELECT game_id, kind, series, title, body, created_at FROM events
+      `SELECT game_id, kind, series, title, body, created_at, delivered_at FROM events
        WHERE ${seasonFilter} AND ${dateFilter} ORDER BY id ASC`,
     )
     .bind(season, season, limitDays)
@@ -347,6 +347,12 @@ export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } =
       title: e.title,
       body: e.body,
       createdAt: e.created_at,
+      /*
+       * 단말이 알림을 띄우고 알려온 시각. created_at 과의 차이가 곧 배달 지연이고,
+       * null 이면 끝내 안 떴다는 뜻이다(schema.sql 주석 참고). 그 둘을 재려면
+       * 밖에서 볼 수 있어야 한다 — 서버 로그에는 "FCM 이 받았다"까지만 남는다.
+       */
+      deliveredAt: e.delivered_at,
     });
   }
 
