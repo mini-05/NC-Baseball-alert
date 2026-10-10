@@ -77,6 +77,10 @@ const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
 const VIBRATE_KEYS = Object.keys(DEFAULT_VIBRATE);
 
 let teamCode = 'NC';
+// 서버 설정(teamCode). 순위표 강조에만 필요해서 다른 요청은 이걸 기다리지 않는다.
+const configReady = api('/api/config')
+  .then((cfg) => { teamCode = cfg.teamCode || 'NC'; })
+  .catch(() => { /* 실패하면 기본값으로 */ });
 let subscription = null; // 현재 기기의 PushSubscription
 
 /*
@@ -652,7 +656,9 @@ async function loadHistory() {
 
 async function loadStandings() {
   try {
-    renderStandings(await api('/api/standings'));
+    const data = await api('/api/standings');
+    await configReady; // 우리 팀 행 강조에 teamCode 가 필요하다
+    renderStandings(data);
   } catch {
     /* 순위는 실패해도 넘어간다. */
   }
@@ -1167,15 +1173,7 @@ async function initPush() {
 }
 
 (async function main() {
-  try {
-    const cfg = await api('/api/config');
-    teamCode = cfg.teamCode || 'NC';
-  } catch {
-    /* 실패하면 기본값으로 */
-  }
-
-  await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
-
+  // 알림 준비는 데이터 로딩과 상관없어서 같이 시작한다.
   // 진동 설정은 로컬 값이라 구독과 상관없이 불러온다.
   applyVibrateSettings().catch((err) => console.error('vibrate settings load failed', err));
 
@@ -1183,6 +1181,8 @@ async function initPush() {
     setPushUi('error', `알림을 준비하지 못했어요: ${err.message}`);
     console.error('initPush failed', err);
   });
+
+  await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
 
   /*
    * 자동 갱신
