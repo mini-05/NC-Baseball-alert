@@ -301,14 +301,15 @@ main {
 
 /* ─────────── 경기 기록 ─────────── */
 
-.day-title {
+.day-title,
+.month-title {
   font-family: var(--font-display);
   font-size: 22px;
   font-weight: 500;
   letter-spacing: -0.015em;
   color: var(--ink);
-  margin: var(--s-xl) 0 var(--s-sm);
 }
+.day-title { margin: var(--s-xl) 0 var(--s-sm); }
 #history .day-title:first-child { margin-top: 0; }
 
 .game-meta {
@@ -544,7 +545,8 @@ main {
 .thead .tleft { font-size: 12px; }
 
 /* 줄바꿈 금지. 칸이 모자라면 두 줄로 접히는 것보다 넘치는 게 바로 눈에 띈다. */
-.trec {
+.trec,
+.h2h-rec {
   font-size: 13px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -563,7 +565,8 @@ main {
 .thead .tstreak { font-size: 12px; color: var(--muted-soft); }
 
 .tpct,
-.tgb {
+.tgb,
+.h2h-pct {
   font-size: 13.5px;
   color: var(--body);
   text-align: right;
@@ -582,12 +585,6 @@ main {
 }
 .h2h-row + .h2h-row { border-top: 1px solid var(--hairline-soft); }
 .h2h-opp { font-size: 15px; color: var(--body); }
-.h2h-rec {
-  font-size: 13px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
 
 /*
  * 전적 숫자 칸. 최소 두 자리 폭이라 "10승"과 "9승"이 줄이 맞는다.
@@ -597,14 +594,6 @@ main {
   display: inline-block;
   min-width: 2ch;
   text-align: right;
-}
-
-/* 승률. 순위표 .tpct 와 같은 표기. */
-.h2h-pct {
-  font-size: 13.5px;
-  color: var(--body);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 
 /* 진출 구간 라벨 (한국시리즈 진출 / 와일드카드 결정전 진출 …) */
@@ -658,14 +647,7 @@ main {
 .sched-summary b { color: var(--ink); font-weight: 600; }
 .sched-summary b.hl { color: var(--primary-active); }
 
-.month-title {
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.015em;
-  color: var(--ink);
-  margin: var(--s-lg) 0 var(--s-xs);
-}
+.month-title { margin: var(--s-lg) 0 var(--s-xs); }
 #schedule-list .month-title:first-of-type { margin-top: var(--s-xs); }
 
 /* 리스트 / 달력 전환. 둘 다 그려 두고 하나만 보인다. */
@@ -721,14 +703,16 @@ main {
 }
 .btn-chip:active { background: var(--surface-card); }
 
-.view-switch {
+.view-switch,
+.theme-switch {
   display: flex;
   background: var(--surface-soft);
   border-radius: var(--r-pill);
   padding: 2px;
 }
 
-.view-btn {
+.view-btn,
+.theme-btn {
   appearance: none;
   border: 0;
   background: none;
@@ -740,33 +724,13 @@ main {
   border-radius: var(--r-pill);
   cursor: pointer;
 }
-.view-btn.is-active { background: var(--canvas); color: var(--ink); }
-
-/* 테마 전환. 구조는 view-switch 와 같다. */
-.theme-row { flex-direction: column; align-items: flex-start; gap: var(--s-sm); }
-
-.theme-switch {
-  display: flex;
-  align-self: stretch;
-  background: var(--surface-soft);
-  border-radius: var(--r-pill);
-  padding: 2px;
-}
-
-.theme-btn {
-  flex: 1;
-  appearance: none;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--muted);
-  padding: 7px 0;
-  border-radius: var(--r-pill);
-  cursor: pointer;
-}
+.view-btn.is-active,
 .theme-btn.is-active { background: var(--canvas); color: var(--ink); }
+
+/* 테마 전환. 공통 스타일은 view-switch 와 같이 쓰고 다른 점만. */
+.theme-row { flex-direction: column; align-items: flex-start; gap: var(--s-sm); }
+.theme-switch { align-self: stretch; }
+.theme-btn { flex: 1; padding: 7px 0; }
 
 /* ── 달력 ── */
 
