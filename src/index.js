@@ -1,7 +1,7 @@
 /**
  * Worker 진입점.
- *  - scheduled(): 경기 시간대에만 상태를 확인하고 변화가 있으면 푸시를 보낸다.
- *  - fetch():     PWA 정적 파일 + /api/*
+ *  - scheduled(): 매분 크론. 경기 시간대면 상태를 보고 바뀐 게 있으면 푸시를 보낸다.
+ *  - fetch():     PWA 정적 파일과 /api/*
  */
 
 import {
@@ -26,65 +26,55 @@ import {
   TEST_COOLDOWN_SEC, MAX_SUBSCRIPTIONS,
 } from './security.js';
 
-/** 팀당 정규시즌 경기 수. 포스트시즌 진출 가능성 계산에 쓴다. */
+/** 팀당 정규시즌 경기 수. 잔여 경기·진출 가능성 계산용. */
 const REGULAR_SEASON_GAMES = 144;
 
 /* ============================ 크론: 상태 감시 ============================ */
 
 /**
- * 한 번 깨어날 때 몇 번 볼지, 그 사이 간격은 얼마인지.
+ * 크론 한 번에 몇 번 폴링할지와 그 간격.
  *
- * 크론의 최소 간격은 1분이라 득점 알림이 최대 60초까지 밀린다. 그보다 촘촘히
- * 보려고 크론을 더 자주 부를 수는 없으니, 대신 한 번 깨어난 김에 나눠서 본다.
- * 2회 × 30초면 지연이 절반으로 줄어든다.
+ * 크론은 1분이 최소라 그대로면 득점 알림이 최대 60초 늦는다. 한 번 깨어났을 때
+ * 30초 간격으로 2번 보면 절반으로 준다.
  *
- * 무료 플랜의 크론 CPU 한도는 10ms 지만 대기는 CPU 를 쓰지 않아 걸리지 않고,
- * 총 30초는 스케줄드 워커의 15분 실행 한도 안에 넉넉히 들어간다. 횟수를 더
- * 늘리려면 CPU 한도부터 확인해야 한다 — 폴링 한 번마다 CPU 도 그만큼 더 쓴다.
+ * 무료 플랜 크론 CPU 한도는 10ms 인데 대기 시간은 CPU 로 안 친다. 횟수를 늘리면
+ * 폴링마다 CPU 를 더 쓰니 그 한도부터 확인할 것. subrequest 예산도 이 값에 묶여
+ * 있다(security.js MAX_SUBSCRIPTIONS).
  */
 export const POLLS_PER_TICK = 2;
 
 const POLL_GAP_MS = 30 * 1000;
 
 /**
- * 전광판(record API)이 총점(schedule API)을 아직 못 따라왔을 때 다시 부르기
- * 전에 기다리는 시간. 곧바로 다시 부르면 같은 뒤처진 값이 돌아올 뿐이라
- * 재조회의 의미가 없다 — 네이버 쪽이 반영할 틈을 준다.
- *
- * 득점이 난 틱에서만, 그것도 합이 어긋난 경우에만 타므로 총 대기에 거의
- * 영향이 없다. 폴링 간격(30초)보다 훨씬 짧게 잡아 다음 폴링을 밀지 않는다.
+ * 전광판(record API)이 총점(schedule API)보다 늦을 때 다시 부르기 전 대기 시간.
+ * 바로 다시 부르면 같은 값이 온다.
+ * 득점 틱에서 합이 안 맞을 때만 기다리고, 폴링 간격(30초)보다 한참 짧다.
  */
 const BOARD_RETRY_MS = 2 * 1000;
 
 /**
- * 배달 확인이 이만큼 지나도 안 오면 다시 보낸다.
+ * 배달 확인이 이 시간 안에 안 오면 다시 보낸다.
  *
- * 확인이 늦게 오는 일이 있다 — 2026-09-02 에 2분 53초 걸린 사례가 있었다.
- * 다만 그 지연은 단말이 느려서가 아니다. 확인은 늘 *다음* 푸시가 도착한 2~3초
- * 뒤에 왔다(2026-09 기록 전수). 워커가 잠들어 있는 동안 /api/delivered 가 밀려
- * 있다가 다음 푸시가 워커를 깨울 때 함께 나가는 것이다. 즉 기다린다고 오지 않는다.
+ * 확인이 몇 분씩 늦은 적이 있는데(2026-09-02, 2분 53초) 확인해 보니 늘 다음
+ * 푸시가 온 2~3초 뒤에 도착했다. 서비스 워커가 잠들어 있으면 /api/delivered 가
+ * 밀려 있다가 다음 푸시 때 같이 나간다. 그러니 오래 기다린다고 오지 않는다.
  *
- * 그래서 창을 5분에서 90초로 줄인다. 헛다리 재발송이 늘지만 대가가 없다 —
- * sendPush 가 Topic 을 붙이므로 원본이 아직 FCM 에 쌓여 있으면 재발송이 그것을
- * 교체하고, 이미 단말에 떴으면 sw.js 가 알림함을 보고 넘긴다. 어느 쪽이든 한 번만
- * 울린다. 재발송은 이벤트당 한 번(markResent)이라 무한히 늘지도 않는다.
+ * 괜히 다시 보내도 문제는 없다. 원본이 FCM 에 남아 있으면 Topic 이 같아서 교체되고,
+ * 이미 떠 있으면 sw.js 가 같은 id 를 보고 건너뛴다. 재발송은 이벤트당 한 번이다.
  *
- * 90초인 이유: 득점 알림이 1분 30초 늦으면 이미 다음 타자가 나온다. 그보다
- * 짧게 잡으면 FCM 이 정상 전달 중인 것까지 앞질러 재발송하게 된다.
+ * 90초보다 짧으면 정상 전달 중인 것까지 다시 보내게 되고, 길면 득점 알림으로서
+ * 의미가 없어진다.
  */
 const RESEND_AFTER_MS = 90 * 1000;
 
-/**
- * 이보다 오래된 이벤트는 포기한다. 경기가 한참 지난 뒤 뒤늦게 뜨는 알림은
- * 놓친 것을 알리는 값보다 혼란이 크다.
- */
+/** 이보다 오래된 이벤트는 재발송하지 않는다. 한참 지나서 뜨면 헷갈리기만 한다. */
 const RESEND_GIVE_UP_MS = 30 * 60 * 1000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * 오늘 경기 계획을 보고 감시가 필요한 시간인지 판단한다.
- * 비시즌이나 경기 없는 날에는 여기서 끝나므로 일정 API 호출이 하루 1회로 줄어든다.
+ * 크론 한 번 분량. 오늘 계획을 보고 감시 시간이 아니면 바로 끝낸다.
+ * 경기 없는 날은 계획 조회(하루 1번) 말고는 외부 호출이 없다.
  */
 async function tick(env) {
   const kst = kstNow();
@@ -95,33 +85,22 @@ async function tick(env) {
   const watching = pollWindowGames(plan);
   if (watching.length === 0) return { skipped: 'outside-window' };
 
-  /*
-   * 배달 확인이 안 온 알림을 먼저 챙긴다. 아래 all-finished 판단보다 앞서야
-   * 한다 — 놓치는 알림 중에는 종료 알림이 있고, 그 뒤 구간이 바로 감시를
-   * 접는 구간이다. 뒤에 두면 정작 필요한 때 못 돈다.
-   */
+  // 재발송은 아래 all-finished 판단보다 먼저 한다. 놓친 알림 중에 종료 알림이
+  // 있으면 바로 그 뒤가 감시를 접는 구간이라, 뒤에 두면 재발송이 안 돈다.
   const resent = await resendUndelivered(env)
     .catch((err) => { console.error('resend failed', err); return 0; });
 
-  /*
-   * 시간 창 안이라도 감시 대상이 모두 끝났으면 더 볼 이유가 없다. 종료 직후
-   * 바로 끊지 않고 FINISH_COOLDOWN_MIN 만큼 더 지켜본다 — 이 확인은 경기
-   * 시간대에만 도므로(위 두 return 이 먼저 걸러 낸다) 평소에는 부담이 없다.
-   *
-   * 아래 대기·폴링보다 먼저 판단해야 한다. 경기 없는 날에도 30초씩 붙잡고
-   * 있으면 하루 1400여 번의 헛된 대기가 생긴다.
-   */
+  // 시간대 안이어도 경기가 다 끝났고 FINISH_COOLDOWN_MIN 이 지났으면 그만 본다.
+  // 폴링(30초 대기 포함)보다 먼저 판단해야 헛대기가 없다.
   const cutoff = new Date(Date.now() - FINISH_COOLDOWN_MIN * 60 * 1000).toISOString();
   if (await allSettledBefore(env.DB, watching.map((g) => g.gameId), cutoff)) {
     return { skipped: 'all-finished', resent };
   }
 
-  // 개막일은 폴링에만 필요하다. 위 return 들보다 뒤에서 구해 경기 없는 틱마다
-  // 캐시를 읽지 않게 하고, 한 번 구한 값을 아래 poll() 들이 함께 쓴다.
+  // 개막일은 폴링에만 쓴다. 감시 안 하는 틱에서 캐시를 읽지 않게 여기서 구한다.
   const opener = await resolveSeasonOpener(env, kst.year);
 
-  // 앞선 폴링이 실패해도 남은 폴링은 그대로 진행한다. 한 번의 조회 실패가
-  // 이번 분 전체를 날리면 1분에 한 번 보던 때보다 오히려 나빠진다.
+  // 한 번 실패해도 다음 폴링은 그대로 한다.
   const runs = [];
   for (let i = 0; i < POLLS_PER_TICK; i++) {
     if (i > 0) await sleep(POLL_GAP_MS);
@@ -136,12 +115,9 @@ async function tick(env) {
 }
 
 /**
- * 이 전광판으로 득점 이닝을 되짚을 수 있는가 — 양 팀 모두 이닝별 합이 총점과
- * 맞아야 한다. 전광판을 못 받았으면(null) 당연히 못 쓴다.
- *
- * detect.js scoringInning 이 실제로 쓰는 것은 점수를 낸 쪽 하나뿐이지만,
- * 여기서는 양쪽을 다 본다 — 어느 쪽이 냈는지 판단하는 로직을 이 자리에
- * 한 번 더 두지 않으려는 것이고, 어긋난 김에 같이 받아 두면 손해가 없다.
+ * 전광판으로 득점 이닝을 알 수 있는지. 양 팀 이닝 합이 둘 다 총점과 맞아야 한다.
+ * scoringInning 은 득점한 쪽만 보지만, 어느 쪽인지 여기서 또 판단하기 싫어서
+ * 양쪽을 다 본다.
  */
 export function boardCoversScore(board, game) {
   return !!board
@@ -149,13 +125,12 @@ export function boardCoversScore(board, game) {
     && inningSumMatches(board.away?.innings, game.awayScore);
 }
 
-/** opener 를 생략하면(예: /api/admin/poll 에서 tick() 없이 직접 호출) 직접 구한다. */
+/** 한 번 폴링. opener 가 없으면(/api/admin/poll) 여기서 구한다. */
 async function poll(env, opener) {
   const kst = kstNow();
   opener ??= await resolveSeasonOpener(env, kst.year);
 
-  // 자정을 넘겨 끝나는 경기가 있어 어제~오늘을 함께 본다.
-  // 시범경기·올스타전·지난 시즌 경기는 알림 대상이 아니므로 여기서 걸러 낸다.
+  // 자정 넘어 끝나는 경기 때문에 어제~오늘을 본다. 시범경기·올스타전·지난 시즌은 뺀다.
   const games = filterCurrentSeason(
     filterTeam(await fetchGames(kstDateOffset(-1), kst.date), env.TEAM_CODE),
     kst.year,
@@ -165,8 +140,7 @@ async function poll(env, opener) {
 
   const prevStates = await loadStates(env.DB, games.map((g) => g.gameId));
 
-  // 전광판은 경기 전에는 존재하지 않으니 그 경우만 조회를 건너뛴다.
-  // 단일 팀만 폴링하므로 한 틱에 많아야 한두 건이라 병렬로 불러도 부담이 없다.
+  // 경기 전에는 전광판이 없으니 건너뛴다. 한 팀만 보니까 많아야 한두 건이다.
   const scoreboards = new Map(
     await Promise.all(
       games
@@ -186,17 +160,9 @@ async function poll(env, opener) {
       && (game.homeScore !== prev.homeScore || game.awayScore !== prev.awayScore);
 
     /*
-     * 득점이 난 틱인데 전광판을 쓸 수 없으면(아예 못 받았거나, 이닝 합이 아직
-     * 새 총점을 못 따라왔거나) 잠깐 뒤 한 번만 다시 불러본다.
-     *
-     * 왜 이 틱에서 끝을 봐야 하나 — 그냥 넘어가면 detect.js 가 득점 이닝을
-     * 못 밝힌 채로 알림이 나가고, 그 이벤트는 dedup_key 로 묶여 있어 다음
-     * 틱에 다시 보낼 기회가 없다(detect.js `${gameId}:score:${점수}`).
-     * 즉 여기서 놓친 이닝은 영영 안 붙는다.
-     *
-     * 재조회해도 여전히 안 맞으면 방금 받은 값을 그대로 쓴다 — 이닝이 빠질
-     * 뿐이고, 합이 안 맞는 전광판으로 이닝을 고르는 일은 scoringInning 이
-     * 막는다. 틀린 이닝을 단언하느니 생략하는 편이 낫다.
+     * 득점 틱인데 전광판을 못 쓰면(못 받았거나 합이 안 맞음) 잠깐 뒤 한 번 더 부른다.
+     * 이 득점 알림은 dedup_key 때문에 다시 못 보내서, 지금 이닝을 못 붙이면 끝이다.
+     * 다시 불러도 안 맞으면 이닝 없이 보낸다(scoringInning 이 null 을 준다).
      */
     if (scored && game.phase === 'live' && !boardCoversScore(board, game)) {
       await sleep(BOARD_RETRY_MS);
@@ -204,24 +170,14 @@ async function poll(env, opener) {
     }
 
     /*
-     * 9회 이후 진행 중인 경기만 문자중계로 종료를 앞당겨 확인한다.
+     * 9회 이후 진행 중이면 문자중계로 종료를 먼저 확인한다(kbo.js fetchRelayFinish).
+     * schedule API 는 ENDED 가 2분쯤 늦다.
      *
-     * schedule API 의 statusCode 는 마지막 아웃 뒤 2분쯤 지나서야 ENDED 로
-     * 바뀐다(2026-08-29 실측: 마지막 투구 21:22:09 → ENDED 21:24:17). 문자중계에는
-     * 그 아웃이 기록되는 즉시 종료 블록이 붙으므로 그 2분을 앞당길 수 있다.
+     * 점수가 schedule API 와 다르면 안 쓴다. 틀린 최종 점수로 종료 알림이 나가면
+     * 되돌릴 수 없다.
      *
-     * 점수가 어긋나면 쓰지 않는다 — 두 API 의 시점이 갈렸다는 뜻이라, 그 상태로
-     * 종료를 알리면 틀린 최종 점수를 단언하게 된다. 그 경우 다음 폴링(30초)이나
-     * ENDED 를 기다리는 편이 낫다. 잘못 보낸 종료 알림은 dedup_key 때문에
-     * 되돌릴 수 없다(detect.js `${gameId}:end`).
-     *
-     * 응답이 커서(이닝 하나 분량) 이 게이트 없이 매 폴링마다 부르면 안 된다.
-     *
-     * 이번 틱에 점수가 났으면(scored) 종료를 앞당기지 않고 다음 폴링에 맡긴다.
-     * 끝내기 득점이 그렇다 — 여기서 phase 를 result 로 바꿔 버리면 detect.js
-     * 의 득점 감지가 live 상태만 보므로(detect.js `cur.phase === 'live'`)
-     * "끝내기" 득점 알림이 통째로 사라지고 종료 알림만 남는다. 30초 뒤 다음
-     * 폴링에서 종료를 잡아도 schedule API 의 ENDED(2분 지연)보다 훨씬 빠르다.
+     * 이번 틱에 득점이 있었으면(끝내기) 다음 폴링으로 넘긴다. 여기서 result 로
+     * 바꾸면 detect.js 가 live 일 때만 득점을 보기 때문에 끝내기 득점 알림이 빠진다.
      */
     if (!scored && game.phase === 'live' && inningOf(game.statusInfo) >= 9) {
       const finish = await fetchRelayFinish(game.gameId);
@@ -232,19 +188,16 @@ async function poll(env, opener) {
       }
     }
 
-    // 스냅샷은 이벤트 발생 여부와 무관하게 항상 최신으로 맞춘다.
+    // 이벤트가 없어도 스냅샷은 항상 갱신.
     writes.push(upsertStateStmt(env.DB, game, board ? JSON.stringify(board) : null));
-    // 디버깅용 원본 상태 로그 — 언제 네이버가 상태를 바꿨는지 나중에 되짚기 위함.
+    // 디버깅용 원본 상태 로그.
     writes.push(insertPollLogStmt(env.DB, game));
 
-    // 이번 틱에 전광판을 못 가져왔으면(board null) 홈런 목록은 직전 값을
-    // 그대로 이어받는다 — 저장 쪽의 COALESCE(위 upsertStateStmt)와 같은 이유로,
-    // 일시적 조회 실패가 "홈런 기록이 사라졌다"로 잘못 읽히지 않게 한다.
+    // 전광판을 못 받았으면 홈런 목록은 이전 값을 쓴다. 조회 한 번 실패로 홈런
+    // 기록이 없어진 걸로 처리되지 않게(저장 쪽 COALESCE 와 같은 이유).
     game.hr = board?.hr ?? prev?.hr ?? [];
 
-    // 득점 이닝을 되짚는 데 쓴다(detect.js scoringInning). 못 가져왔으면 null —
-    // 그 경우 이닝 없이 알린다. 여기서는 hr 처럼 직전 값을 잇지 않는다:
-    // 옛 전광판으로 이닝을 고르면 틀린 이닝을 단언하게 된다.
+    // 득점 이닝 계산용. hr 과 달리 이전 값을 쓰지 않는다(예전 전광판이면 이닝이 틀림).
     game.board = board ?? null;
 
     for (const ev of detectEvents(prev, game, env.TEAM_CODE)) {
@@ -258,7 +211,7 @@ async function poll(env, opener) {
   let ended = false;
 
   for (const { game, ev } of pending) {
-    // dedup_key 충돌이면(null) 이미 발송한 이벤트이므로 건너뛴다.
+    // null 이면 이미 보낸 이벤트.
     const eventId = await insertEvent(env.DB, game, ev);
     if (!eventId) continue;
 
@@ -267,7 +220,7 @@ async function poll(env, opener) {
     fired++;
   }
 
-  // 경기가 끝났으면 순위와 지난 일정의 결과가 함께 바뀐다. 두 캐시를 비운다.
+  // 경기가 끝나면 순위와 일정 결과가 바뀌니 두 캐시를 만료시킨다.
   if (ended) {
     await invalidateStandings(env, kst.year);
     await invalidateSchedule(env, kst.year);
@@ -279,15 +232,11 @@ async function poll(env, opener) {
 /**
  * 배달 확인이 안 온 알림을 한 번 더 보낸다.
  *
- * 서버는 FCM 이 받았다는 것까지만 알 수 있어, 그 뒤 단말에 안 뜨는 유실을
- * 스스로 알아채지 못한다(2026-08-30·09-01·09-02·09-09 각 1건 확인). sw.js 가
- * 보내오는 배달 확인이 창 안에 안 오면 못 받은 것으로 보고 다시 보낸다.
+ * 서버는 FCM 이 받은 데까지만 알고, 기기에 안 뜬 건 모른다(2026-08-30·09-01·
+ * 09-02·09-09 에 한 건씩 있었음). sw.js 가 보내는 배달 확인이 없으면 다시 보낸다.
  *
- * 다만 그 확인 신호 자체가 완전하지 않다 — 화면에는 떴는데 확인만 실패한
- * 경우가 있었다(2026-09-02 id 74). 그래서 여기서는 "안 받았을 수 있다"까지만
- * 판단하고, 실제로 다시 띄울지는 단말이 정한다(sw.js 가 payload.resend 를 보고
- * 알림함에 같은 tag 가 남아 있는지 확인한다). 서버가 단정하면 멀쩡히 본 알림이
- * 두 번 울린다.
+ * 확인 신호도 가끔 빠진다(떴는데 확인만 실패, 2026-09-02 id 74). 그래서 실제로
+ * 띄울지는 기기가 정한다. sw.js 가 알림함에 같은 id 가 있으면 건너뛴다.
  */
 async function resendUndelivered(env) {
   const now = Date.now();
@@ -297,17 +246,14 @@ async function resendUndelivered(env) {
   });
 
   for (const ev of pending) {
-    /*
-     * 보내기 전에 먼저 표시한다. 발송이 실패해도 다시 시도하지 않는다 —
-     * 재발송은 이벤트당 한 번이고, 실패를 되풀이하면 창이 닫힐 때까지 매 틱
-     * 같은 발송이 반복된다. 한 번 놓친 알림보다 그쪽이 나쁘다.
-     */
+    // 보내기 전에 표시부터 한다. 발송이 실패해도 다시 안 한다. 실패할 때마다
+    // 재시도하면 창이 닫힐 때까지 매 틱 같은 걸 보내게 된다.
     await markResent(env.DB, ev.id);
     await broadcast(
       env,
       {
         ...ev,
-        // 알림함에 재발송 시각이 아니라 원래 감지 시각이 찍히게 한다.
+        // 알림함에 재발송 시각 말고 원래 감지 시각이 찍히게.
         ts: Date.parse(ev.createdAt) || Date.now(),
       },
       ev.gameId,
@@ -323,18 +269,14 @@ async function resendUndelivered(env) {
 }
 
 /**
- * 이 이벤트를 받기로 한 구독자에게만 발송하고, 폐기된 구독은 정리한다.
- * 종류·시리즈 범위·홈경기 여부를 모두 만족하는 구독만 대상이 된다.
+ * 이벤트를 받을 구독자(종류·시리즈·홈경기 설정 확인)에게 보내고,
+ * 없어진 구독(404/410)은 지운다.
  */
 async function broadcast(env, ev, gameId, eventId, resend = false) {
   const subs = await subscribersFor(env.DB, ev.kind, ev.scope, ev.isHome);
   if (subs.length === 0) {
-    /*
-     * 조용히 끝내면 "보낼 사람이 없다" 와 "보냈는데 안 떴다" 가 구별되지 않는다.
-     * 구독은 멀쩡한데 설정 때문에 걸러지는 경우가 여기로 빠지는데, 그 상태에서는
-     * 서버·푸시 경로를 아무리 들여다봐도 정상으로 보인다. kind·scope·isHome 을
-     * 함께 남겨 어느 설정이 걸렀는지 바로 짚게 한다.
-     */
+    // 로그가 없으면 "받을 사람이 없음"과 "보냈는데 안 뜸"을 구분할 수 없다.
+    // 어떤 설정에 걸렸는지 보이게 kind·scope·isHome 을 같이 남긴다.
     console.log('broadcast skipped: 수신 대상 0명', ev.kind, ev.scope, `isHome=${ev.isHome}`, gameId);
     return;
   }
@@ -346,36 +288,24 @@ async function broadcast(env, ev, gameId, eventId, resend = false) {
     isHome: ev.isHome,
     title: ev.title,
     body: ev.body,
-    // sw.js 가 두 곳에 쓴다. 알림 tag(같은 이벤트를 다시 보내도 같은 tag 라
-    // 제자리 갱신될 뿐 두 번 뜨지 않는다)와 /api/delivered 배달 확인.
-    // 재발송을 붙일 때 이 id 가 중복 표시를 막는 유일한 장치다.
+    // sw.js 에서 같은 이벤트인지 확인(재발송 중복 방지)하고 /api/delivered 로
+    // 배달 확인을 보낼 때 쓴다. 테스트 알림에는 없다.
     id: eventId,
-    // 위 id 가 없는 payload(테스트 알림)를 위한 tag 재료. 없으면 어제 경기의
-    // 같은 종류 알림을 덮어써 새 알림이 안 뜬 것처럼 보인다.
+    // 알림 tag(nc-{gameId})와 FCM Topic 에 쓴다. 경기마다 알림 하나로 묶인다.
     gameId,
     /*
-     * 알림함에 찍히는 시각(sw.js 의 notification timestamp).
-     *
-     * 재발송은 원래 감지 시각을 그대로 싣는다 — Date.now() 를 쓰면 5분 뒤
-     * 재발송 시각이 찍혀, 제때 감지한 알림이 그만큼 늦은 것처럼 보인다.
-     * 2026-09-17 실측: 감지 19:28:34 → 재발송 19:33:59 → 알림함 "오후 7:33".
-     * 경쟁 앱과 1분 차이였는데 6분 뒤처진 것으로 읽혔다.
+     * 알림함에 찍히는 시각(sw.js notification timestamp).
+     * 재발송은 원래 감지 시각을 넣는다. 재발송 시각을 쓰면 늦게 감지한 것처럼
+     * 보인다(2026-09-17: 감지 19:28:34, 알림함에는 "오후 7:33").
      */
     ts: ev.ts ?? Date.now(),
   };
 
-  // 재발송임을 알려 sw.js 가 이미 떠 있는 알림인지 먼저 확인하게 한다.
-  // 처음 보내는 알림에는 넣지 않는다 — 그쪽은 확인할 것이 없다.
+  // 재발송 표시. 지금 sw.js 는 이 값과 상관없이 모든 푸시에서 알림함을 확인한다.
   if (resend) payload.resend = true;
 
-  /*
-   * 2026-08-30 종료 알림 미표시 건 조사용 — 서버가 FCM 에 전달을 확인한 시각과
-   * 사용자가 실제로 알림을 본 시각을 대조하려면, 지금까지는 poll_log/events
-   * (DB 시각)와 Observability 의 `fetch OK` 줄(발송 시각)을 시:분 단위로 눈대중
-   * 대조해야 했다 — 한 틱에 fetch 가 여러 번 찍혀 어느 줄이 이 발송인지 특정이
-   * 안 됐다. kind·gameId·endpoint 로 걸러 찾을 수 있게 로그에 남긴다.
-   * endpoint 는 끝 12자만 남긴다 — 식별에 충분하고 전체를 로그에 남기지 않는다.
-   */
+  // 발송 결과를 kind·gameId·endpoint 로 찾을 수 있게 로그에 남긴다.
+  // endpoint 는 끝 12자만(구분은 되고 전체는 안 남게).
   const sentAt = Date.now();
   const results = await Promise.allSettled(subs.map((s) => sendPush(s, payload, env)));
 
@@ -407,10 +337,7 @@ const json = (data, status = 200) =>
     },
   });
 
-/**
- * endpoint 를 검증해 통과하면 null, 실패하면 바로 반환할 오류 Response 를 준다.
- * 네 개의 API 핸들러가 같은 "검증 후 400 응답" 모양을 반복하고 있어 한곳으로 모았다.
- */
+/** endpoint 가 괜찮으면 null, 아니면 바로 돌려줄 400 응답. */
 function endpointOrError(endpoint, env, { warn = false } = {}) {
   const check = validateEndpoint(endpoint, env.EXTRA_PUSH_HOSTS ?? '');
   if (check.ok) return null;
@@ -419,7 +346,7 @@ function endpointOrError(endpoint, env, { warn = false } = {}) {
   return json({ error: check.reason }, 400);
 }
 
-/** 요청 본문에서 검증된 endpoint 와 그 구독 레코드를 꺼낸다. */
+/** 요청 본문의 endpoint 를 검증하고 등록된 구독을 찾는다. 실패하면 { error }. */
 async function requireSubscription(request, env) {
   const parsed = await readJson(request);
   if (!parsed.ok) return { error: json({ error: parsed.reason }, 400) };
@@ -460,26 +387,22 @@ async function handleApi(request, env, url) {
     });
   }
 
-  /**
-   * 이번 시즌 전체 일정. 홈경기 여부와 지난 경기의 결과를 함께 내려
-   * 앱에서 홈경기를 강조하고 지난 일정에 스코어를 붙일 수 있게 한다.
-   */
+  /** 이번 시즌 전체 일정(홈/원정, 지난 경기 결과 포함)과 상대전적. */
   if (path === '/api/schedule' && method === 'GET') {
     const { year, date } = kstNow();
     const games = await loadSchedule(env, year);
-    // 상대전적은 이 일정에서 세면 되므로 따로 조회하지 않는다(kbo.js headToHead).
+    // 상대전적은 일정에서 센다(kbo.js headToHead). 추가 조회 없음.
     return json({ today: date, games, headToHead: headToHead(games) });
   }
 
-  /** 순위와 포스트시즌 진출 상황. 비시즌이면 standings 가 null 이다. */
+  /** 순위와 포스트시즌 진출 상황. 데이터가 없으면 standings 가 null. */
   if (path === '/api/standings' && method === 'GET') {
     const { year, date } = kstNow();
     const standings = await loadStandings(env, year);
     if (!standings) return json({ standings: null, outlook: null });
 
-    // 팀별 잔여 경기와 "오늘 경기가 순위에 들어갔는지"를 붙여 내려준다.
-    // 캐시된 순위 자체는 건드리지 않고 응답에서만 덧붙인다 — 잔여 경기 수는
-    // 시즌 상수(여기)에 달려 있고, 오늘 상태는 순위보다 빨리 바뀌기 때문이다.
+    // 잔여 경기와 오늘 경기 상태는 응답에서만 붙인다. 오늘 상태는 순위보다 자주
+    // 바뀌어서 순위 캐시에 넣지 않는다.
     const todayStatus = await loadTodayStatus(env, date, year);
 
     return json({
@@ -509,17 +432,11 @@ async function handleApi(request, env, url) {
     const keyCheck = validateKeys(keys?.p256dh, keys?.auth);
     if (!keyCheck.ok) return json({ error: keyCheck.reason }, 400);
 
-    /*
-     * 이미 있는 구독의 갱신은 자리를 새로 만들 필요가 없다.
-     *
-     * 새 endpoint 면 상한만큼 자리를 비우고 받는다 — 거절하지 않는다. 거절하면
-     * 엔드포인트가 만료된 기기가 다시 등록하지 못해 영영 알림이 끊긴다
-     * (db.js makeRoomForSubscription 주석 참고). 2026-09-20 에 상한을 200 에서
-     * 8 로 내리면서 실제로 그 길이 열렸다.
-     */
+    // 새 endpoint 면 상한을 넘지 않게 오래된 구독을 지우고 받는다. 거절하면 안 된다
+    // (db.js makeRoomForSubscription 참고). 기존 구독 갱신은 그냥 저장.
     if (!(await getSubscription(env.DB, endpoint))) {
       const evicted = await makeRoomForSubscription(env.DB, MAX_SUBSCRIPTIONS);
-      // endpoint 는 끝 12자만 남긴다 — 식별에 충분하고 전체를 로그에 남기지 않는다.
+      // endpoint 는 끝 12자만 로그에 남긴다.
       if (evicted.length > 0) {
         console.log('evicted for new subscription', evicted.map((e) => e.slice(-12)).join(','));
       }
@@ -536,7 +453,7 @@ async function handleApi(request, env, url) {
     const epError = endpointOrError(parsed.data.endpoint, env);
     if (epError) return epError;
 
-    // 없는 구독을 지워도 성공으로 답한다. 존재 여부를 알려 줄 이유가 없다.
+    // 없는 구독이어도 성공으로 답한다. 있는지 없는지 알려 줄 필요 없음.
     await deleteSubscription(env.DB, parsed.data.endpoint);
     return json({ ok: true });
   }
@@ -556,7 +473,7 @@ async function handleApi(request, env, url) {
     const req = await requireSubscription(request, env);
     if (req.error) return req.error;
 
-    // 알려진 키의 불린 값만 통과시킨다.
+    // 아는 키의 boolean 값만 받는다.
     const patch = {};
     for (const name of [...KINDS, ...SCOPES, 'homeOnly']) {
       if (typeof req.body[name] === 'boolean') patch[name] = req.body[name];
@@ -571,10 +488,8 @@ async function handleApi(request, env, url) {
 
   /*
    * ── 배달 확인 ──
-   * sw.js 가 알림을 실제로 띄운 뒤 부른다. 서버는 FCM 에 넘긴 것까지만 알 수
-   * 있어(broadcast 의 fetch OK), 그 뒤 단말에 뜨지 않는 유실을 이 신호 없이는
-   * 재지 못한다. 등록된 구독만 받는다(requireSubscription) — 아무나 남의
-   * 이벤트를 "봤다"로 만들지 못하게.
+   * sw.js 가 알림을 띄운 뒤 부른다. 이게 없으면 기기에 안 뜬 알림을 알 수 없다.
+   * 아무나 표시하지 못하게 등록된 구독만 받는다.
    */
   if (path === '/api/delivered' && method === 'POST') {
     const req = await requireSubscription(request, env);
@@ -595,7 +510,7 @@ async function handleApi(request, env, url) {
     const req = await requireSubscription(request, env);
     if (req.error) return req.error;
 
-    // 같은 구독이 짧은 간격으로 반복 발송하지 못하게 막는다.
+    // 연타 방지.
     const last = req.sub.last_test_at ? Date.parse(req.sub.last_test_at) : 0;
     const waited = (Date.now() - last) / 1000;
     if (waited < TEST_COOLDOWN_SEC) {
@@ -604,8 +519,7 @@ async function handleApi(request, env, url) {
 
     await touchTestSent(env.DB, req.endpoint);
 
-    // 이 엔드포인트는 설정을 점검하는 용도다. 실패 원인을 감추면 진단이 불가능하므로
-    // 여기서만은 예외 메시지를 그대로 돌려준다. (VAPID 키 설정 오류 등)
+    // 설정 점검용이라 여기서만 에러 메시지를 그대로 돌려준다(VAPID 키 오류 등).
     try {
       const res = await sendPush(
         req.sub,
@@ -627,7 +541,7 @@ async function handleApi(request, env, url) {
   }
 
   /* ── 관리자 전용 ── */
-  // 외부 API 호출을 유발하므로 공개하지 않는다. ADMIN_TOKEN 시크릿이 필요하다.
+  // 외부 API 를 부르니까 공개하지 않는다. ADMIN_TOKEN 필요.
 
   if (path === '/api/admin/poll' && method === 'POST') {
     if (!isAdmin(request, env)) return json({ error: '권한이 없습니다.' }, 401);
@@ -642,7 +556,7 @@ async function handleApi(request, env, url) {
     return json({ ok: true, plan: await loadDailyPlan(env, date) });
   }
 
-  /** 이번 시즌이 아닌 경기 기록을 DB에서 지운다. 필터 도입 전에 쌓인 행 정리용. */
+  /** 이번 시즌이 아닌 경기 기록 삭제. */
   if (path === '/api/admin/prune' && method === 'POST') {
     if (!isAdmin(request, env)) return json({ error: '권한이 없습니다.' }, 401);
 
@@ -656,17 +570,19 @@ async function handleApi(request, env, url) {
 /* ============================ 정적 파일 ============================ */
 
 /**
- * PWA 응답에 보안 헤더를 붙인다.
- * CSP 는 인라인 스크립트를 막아 XSS 가 성립할 여지를 한 겹 더 줄인다.
- * (앱의 CSS/JS 는 모두 별도 파일이므로 인라인 허용이 필요 없다.)
+ * 정적 파일 응답에 붙이는 보안 헤더. CSP 로 인라인 스크립트를 막는다
+ * (앱 CSS/JS 는 전부 별도 파일이라 인라인이 필요 없다).
+ *
+ * 주의: wrangler.toml 에 run_worker_first 가 없어서, 파일이 있는 경로는 워커를
+ * 안 거치고 바로 응답될 수 있다. 그 경우 이 헤더가 안 붙는다.
  */
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  // 웹폰트 출처만 허용한다.
-  //   Google Fonts — Cormorant Garamond · Inter · Noto Serif KR
-  //   jsdelivr     — Pretendard (본문 한글)
-  // Tossface 는 SVG 심볼로 인라인돼 있어 외부 출처가 필요 없다.
+  // 외부는 웹폰트만 허용.
+  //   Google Fonts: Cormorant Garamond, Inter, Noto Serif KR
+  //   jsdelivr:     Pretendard(본문 한글)
+  // Tossface 는 index.html 에 SVG 로 들어 있어서 필요 없다.
   "style-src 'self' https://fonts.googleapis.com https://cdn.jsdelivr.net",
   "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net",
   "img-src 'self' data:",
@@ -693,7 +609,7 @@ export default {
       try {
         return await handleApi(request, env, url);
       } catch (err) {
-        // 내부 오류 메시지를 그대로 노출하지 않는다. 상세는 로그로만 남긴다.
+        // 내부 에러 내용은 응답에 넣지 않고 로그로만 남긴다.
         console.error('api error', url.pathname, err);
         return json({ error: '서버 오류가 발생했습니다.' }, 500);
       }
@@ -705,12 +621,8 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
-        /*
-         * 결과를 한 줄 남긴다. 조기 종료 세 경로(no-games-today·outside-window·
-         * all-finished)가 모두 무음이라, 로그만 봐서는 "건너뛰는 중"과 "크론이
-         * 아예 안 도는 중"을 구별할 수 없었다. 2026-09 에 알림이 일주일 안 왔을
-         * 때 그 둘을 못 가려 원인 찾기가 늦어졌다. 1분에 한 줄이면 값싸다.
-         */
+        // 틱마다 결과 한 줄. 이게 없으면 "건너뛰는 중"과 "크론이 안 도는 중"을
+        // 로그로 구분할 수 없다(2026-09 알림 끊겼을 때 이것 때문에 늦게 찾음).
         const result = await tick(env).catch((err) => {
           console.error('tick failed', err);
           return { error: err.message };

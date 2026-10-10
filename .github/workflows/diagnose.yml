@@ -1,19 +1,14 @@
 name: Diagnose push
 
-# 수동 실행 전용. 알림이 안 올 때 밖에서 워커 상태를 보는 진단 도구다.
+# 수동 실행용 진단. 알림이 안 올 때 워커 상태를 본다.
+# 개발 환경에서는 workers.dev 접속이 막혀 있어서(403 CONNECT) Actions 에서 돌린다.
 #
-# 왜 필요한가 — 개발 환경 프록시가 workers.dev 로 나가는 길을 게이트웨이
-# 정책으로 막는다(403 CONNECT). Actions 러너는 닿는다.
+# 읽기만 한다.
+#   1. 공개 API(/api/history, /api/schedule, /api/standings): 감지·배달 지연·순위
+#   2. (선택) wrangler tail 로 워커 로그
 #
-# 보기만 한다. 하는 일은 둘뿐이다.
-#   1. 공개 API(/api/history·/api/schedule) 조회 — 이벤트가 감지되고 있는지
-#   2. (선택) wrangler tail 로 워커 로그 보기
-#
-# 알림을 실제로 보내는 기능은 뺐다. 저장소에 상시 놓인 "전 기기에 푸시 발송"
-# 버튼은 진단 한 번의 값어치보다 위험이 크다 — 저장소에 쓰기 권한이 생기는
-# 사람은 누구든 누를 수 있다. 다시 필요하면 그때 만든다.
-#
-# D1 도 구독 표도 건드리지 않는다. 읽는 것은 공개 GET 두 개와 워커 로그뿐이다.
+# 푸시 발송 기능은 일부러 안 넣었다. 저장소 쓰기 권한만 있으면 누구나 전 기기에
+# 알림을 보낼 수 있게 되기 때문이다. D1·구독 테이블도 건드리지 않는다.
 on:
   workflow_dispatch:
     inputs:
@@ -43,8 +38,8 @@ jobs:
           node-version: 22
       - run: npm ci --ignore-scripts
 
-      # 알림이 안 오는 원인은 크게 둘이다 — 감지가 안 됐거나, 감지는 됐는데
-      # 발송이 막혔거나. events 에 행이 있으면 감지는 된 것이다. 둘을 여기서 가른다.
+      # 감지가 안 된 건지, 감지는 됐는데 발송이 안 된 건지 여기서 나눈다.
+      # 이벤트가 있으면 감지는 된 것.
       - name: 감지 상태 보기 (공개 API)
         run: |
           set -uo pipefail
@@ -66,13 +61,11 @@ jobs:
                            else "  <- 이벤트 0건" end))
               end' hist.json
 
-          # 감지 시각과 단말이 "띄웠다"고 알려온 시각의 차이 = 실제 배달 지연.
-          # 서버 로그는 "FCM 이 받았다"까지만 알려줘서, 득점 때 안 오고 종료 때
-          # 몰려 오는 증상은 이 값으로만 잡힌다. 미배달이면 유실이다.
+          # 감지 시각과 기기가 띄운 시각의 차이 = 배달 지연. 서버 로그로는 FCM 이
+          # 받은 것까지만 보여서 이걸로 본다. 미배달은 끝내 안 뜬 것.
           echo
           echo "── 이벤트별 배달 지연 (감지 → 단말 표시) ──"
-          # 시각에 소수점 초가 붙는다(2026-10-01T09:31:16.355Z). fromdateiso8601 은
-          # 그 형식을 못 읽고 통째로 죽는다 — 떼고 넘긴다.
+          # 시각에 소수점 초가 있다(…16.355Z). fromdateiso8601 이 못 읽어서 뗀다.
           jq -r --arg from "$FROM" '
             def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
             .games
@@ -95,8 +88,7 @@ jobs:
                    end)
               end' hist.json
 
-          # 순위와 팀별 잔여 경기. 시즌 막판에 "우리가 몇 위로 끝나는가",
-          # 비시즌에 "검증할 경기가 남았는가"를 여기서 본다.
+          # 순위와 팀별 잔여 경기. 남은 경기가 있는지(검증할 경기가 있는지)도 여기서 본다.
           echo
           echo "── 순위 (잔여 경기 포함) ──"
           curl -sS "$BASE/api/standings" > rank.json
@@ -116,7 +108,7 @@ jobs:
             | "일정 \(length)건",
               (.[] | "  \(.gameDate) \(.oppName) 결과=\(.result // "미정")")' sched.json
 
-      # 크론은 1분마다 돈다. 매 틱의 결과가 'tick {...}' 한 줄로 찍힌다.
+      # 틱마다 'tick {...}' 한 줄이 찍힌다.
       - name: 워커 로그 지켜보기
         if: ${{ inputs.tail }}
         env:
@@ -125,10 +117,8 @@ jobs:
         run: |
           set -uo pipefail
           echo "=== ${{ inputs.watch_seconds }}초 동안 워커 로그를 지켜본다 ==="
-          # timeout 으로는 안 끝난다. npx 를 죽여도 자식 wrangler 가 살아남아
-          # 단계의 stdout 을 붙잡고 있어서, 러너가 고아 프로세스를 정리할 때까지
-          # 멈춰 있는다(2026-09-27 실측, -s KILL 로도 마찬가지). 직접 띄우고
-          # 이름으로 확실히 죽인다.
+          # timeout 으로는 안 끝난다. npx 를 죽여도 자식 wrangler 가 남아서 step 이
+          # 멈춘다(2026-09-27, -s KILL 도 같음). 직접 띄우고 이름으로 죽인다.
           npx wrangler tail nc-baseball-alert --format pretty > tail.log 2>&1 &
           sleep "${{ inputs.watch_seconds }}"
           pkill -9 -f 'wrangler tail' || true

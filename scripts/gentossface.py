@@ -1,7 +1,7 @@
 """Tossface SVG 아이콘에서 인라인 스프라이트를 만든다.
 
 토스페이스 이모지 폰트 전체는 12MB, 필요한 서브셋만 골라도 4MB에 달한다.
-같은 저작물의 SVG 판을 쓰면 아이콘 5개가 8KB 안쪽으로 끝나므로 SVG 쪽을 택했다.
+SVG 판을 쓰면 아이콘 5개가 8KB 안쪽이라 SVG 를 쓴다(실점 삼각형은 index.html 에 직접 그림).
 
     python scripts/gentossface.py <tossface 저장소 경로> [출력파일]
 
@@ -57,7 +57,7 @@ def main():
         total += len(body)
         parts.append(f'  <!-- {note} -->\n  <symbol id="tf-{name}" viewBox="0 0 40 40">{body}</symbol>')
 
-    # Windows 콘솔 기본 인코딩(cp949)으로는 한글 주석을 쓸 수 없어 파일로 직접 쓴다.
+    # Windows 콘솔(cp949)로는 한글이 깨져서 파일로 바로 쓴다.
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).parent / "tossface-sprite.svg"
     out.write_text("\n".join(parts) + "\n", encoding="utf-8")
 

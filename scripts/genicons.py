@@ -1,7 +1,7 @@
 """앱 아이콘 PNG를 생성한다.
 
 Pillow 같은 외부 패키지 없이 zlib + struct 만으로 PNG를 직접 인코딩한다.
-아이콘은 네이비 배경 위에 골드 야구공(빨간 실밥)을 올린 단순한 도형이라
+아이콘은 네이비 배경 위에 크림색 야구공(골드 테두리·실밥)을 올린 단순한 도형이라
 폰트 렌더링이 필요 없다.
 
     python scripts/genicons.py
@@ -15,12 +15,12 @@ from pathlib import Path
 OUT_DIR = Path(__file__).resolve().parent.parent / "public"
 
 # NC 다이노스 공식 색(ncdinos.com 에서 확인) + Claude 시스템의 크림.
-NAVY = (7, 29, 61)      # #071d3d NC 네이비 — 배경
-GOLD = (199, 160, 121)  # #c7a079 NC 골드 — 공 테두리
-CREAM = (250, 249, 245) # #faf9f5 크림 — 공 몸통
+NAVY = (7, 29, 61)      # #071d3d NC 네이비. 배경
+GOLD = (199, 160, 121)  # #c7a079 NC 골드. 공 테두리
+CREAM = (250, 249, 245) # #faf9f5 크림. 공 몸통
 SEAM = GOLD  # 실밥도 같은 골드
 
-# 안티에일리어싱용 슈퍼샘플링 배율. 4면 육안으로 계단현상이 보이지 않는다.
+# 안티에일리어싱용 슈퍼샘플링 배율. 4면 계단 현상이 안 보인다.
 SS = 4
 
 

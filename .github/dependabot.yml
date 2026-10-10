@@ -1,7 +1,7 @@
 version: 2
 
-# SHA 로 고정한 action 은 스스로 갱신되지 않아, 보안 패치가 나와도 옛 코드가 계속 돈다.
-# 고정과 갱신은 짝이어야 한다 — 여기서 매주 PR 로 올려 준다.
+# SHA 로 고정한 action 은 저절로 안 올라가서 보안 패치가 나와도 그대로다.
+# 매주 업데이트 PR 을 올리게 한다.
 updates:
   - package-ecosystem: github-actions
     directory: /

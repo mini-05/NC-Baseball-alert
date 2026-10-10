@@ -3,9 +3,8 @@
  *
  *   node scripts/selftest.mjs
  *
- * 푸시 암호화(RFC 8291)는 실제 브라우저 없이는 확인이 어려우므로,
- * 여기서 브라우저 역할(수신자 키쌍 보유)을 직접 맡아 복호화까지 해 본다.
- * 복호문이 원문과 일치하면 구현이 맞다는 뜻이다.
+ * 푸시 암호화(RFC 8291)는 브라우저 없이 확인하기 어려워서, 여기서 수신자 키쌍을
+ * 만들어 직접 복호화해 본다. 원문과 같으면 구현이 맞다.
  */
 
 import fs from 'node:fs';
@@ -86,7 +85,7 @@ async function testEncryption() {
   const decoded = new TextDecoder().decode(plain.slice(0, -1));
   check('복호문이 원문과 일치', decoded === original);
 
-  // 같은 평문이라도 매번 다른 암호문이어야 한다 (salt·임시키가 매번 새로 생성되므로).
+  // 같은 평문이어도 암호문은 매번 달라야 한다(salt·임시키가 매번 새로 생김).
   const again = await encryptPayload(original, bytesToB64url(uaPublicRaw), bytesToB64url(authSecret));
   check('같은 평문도 매번 다른 암호문', bytesToB64url(again) !== bytesToB64url(body));
 }
@@ -116,9 +115,9 @@ async function testVapid() {
   );
   check('JWT 서명이 공개키로 검증됨', ok);
 
-  // ── 설정 실수를 발송 전에 잡아내는지 ──
-  // 실제로 겪은 사고: 공개키와 개인키가 서로 다른 genkeys 실행에서 나와
-  // "DataError: Invalid EC key in JSON Web Key" 로만 터져 원인 파악이 어려웠다.
+  // ── 키 설정 실수를 발송 전에 잡는지 ──
+  // 예전에 공개키·개인키를 다른 genkeys 실행에서 가져와서 "Invalid EC key" 만
+  // 나오고 원인을 찾기 어려웠던 적이 있다.
   const other = await crypto.subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'],
   );
@@ -143,7 +142,7 @@ async function testVapid() {
   const truncated = await failsWith(publicKey, jwk.d.slice(0, 20));
   check('잘린 개인키를 잡아냄', /32바이트가 아닙니다/.test(truncated ?? ''), truncated);
 
-  // 앞뒤 공백·따옴표가 붙어도 정상 동작해야 한다 (콘솔 붙여넣기 사고 방지)
+  // 앞뒤 공백·따옴표가 붙어 있어도 돼야 한다(붙여넣기 실수).
   const padded = await makeVapidHeader(endpoint, ` "${publicKey}" `, `\n ${jwk.d} \n`, 'mailto:t@e.com');
   check('공백·따옴표가 붙어도 통과', padded.startsWith('vapid t='));
 }
@@ -151,13 +150,10 @@ async function testVapid() {
 /* ══ 2-b. 발송 묶음(Topic) ══ */
 
 /**
- * Topic 의 범위는 경기 하나다. sw.js 의 tag 와 같은 범위여야 서버가 보내는 것과
- * 단말이 보여 주는 것이 어긋나지 않는다.
- *
- * 처음에는 이벤트마다 다른 값을 썼는데, FCM 이 단말당 서로 다른 collapse key 를
- * 네 개까지만 들고 있어서 한 경기(이벤트 10여 개)면 제한을 몇 배로 넘겼다.
- * 2026-10-10 에 뒤쪽 4건이 끝내 안 왔다. 그래서 여기서는 "한 경기의 모든
- * 이벤트가 같은 Topic 인가" 와 "서로 다른 키가 몇 개나 생기는가" 를 본다.
+ * Topic 은 경기 단위(sw.js tag 와 같은 범위).
+ * FCM 은 기기당 collapse key 를 4개까지만 갖는다. 이벤트 단위로 하면 한 경기에서
+ * 이 한도를 넘는다(2026-10-10 뒤쪽 4건 미배달). 한 경기의 이벤트가 전부 같은
+ * Topic 인지, 키가 몇 개 생기는지 본다.
  */
 async function testTopic() {
   const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
@@ -179,7 +175,7 @@ async function testTopic() {
   const GAME = '20261010HHNC02026';
   const OTHER = '20261011HHNC02026';
   try {
-    // 2026-10-10 한화전과 같은 모양 — 한 경기에 이벤트 14건.
+    // 2026-10-10 한화전처럼 한 경기에 이벤트 14건.
     for (let i = 1; i <= 14; i++) {
       await sendPush(sub, { kind: 'score', id: i, gameId: GAME, ts: i * 1000 }, env);
     }
@@ -200,17 +196,13 @@ async function testTopic() {
   check('다른 경기는 다른 Topic', sent[15].Topic === `g${OTHER}`, sent[15].Topic);
   check('테스트 알림에는 Topic 이 없다', sent[16].Topic === undefined, String(sent[16].Topic));
 
-  /*
-   * 핵심 검사. FCM 은 단말당 서로 다른 collapse key 를 4개까지만 들고 있고,
-   * 넘기면 어느 것을 버릴지 정해지지 않는다. 한 경기가 키 하나를 넘게 쓰면
-   * 이 줄이 깨진다 — 2026-10-10 의 재발을 막는 것이 이 검사의 목적이다.
-   */
+  // 한 경기가 키를 하나보다 많이 쓰면 여기서 실패한다(FCM 4개 한도).
   const FCM_COLLAPSE_KEY_LIMIT = 4;
   const distinct = new Set(sent.map((h) => h.Topic).filter(Boolean)).size;
   check(`경기 둘을 보내도 서로 다른 Topic 이 ${FCM_COLLAPSE_KEY_LIMIT}개를 안 넘는다 (${distinct}개)`,
     distinct <= FCM_COLLAPSE_KEY_LIMIT, `${distinct}개`);
 
-  // RFC 8030 §5.4 — 32자 이내, URL-safe base64 알파벳만.
+  // RFC 8030 §5.4: 32자 이내, URL-safe base64 문자만.
   check('Topic 이 RFC 8030 제한을 지킨다',
     sent.every((h) => h.Topic === undefined || (h.Topic.length <= 32 && /^[A-Za-z0-9_-]+$/.test(h.Topic))));
 }
@@ -256,7 +248,7 @@ function testSeasonFilter() {
 
   check('정규시즌 경기는 통과', keep([mk({})]).length === 1);
 
-  // 시범경기: 형식은 정규시즌과 같고 개막일 이전이라는 점만 다르다
+  // 시범경기: 정규시즌과 형식이 같고 날짜만 개막일 전
   const exhibition = mk({ gameId: '20260315WONC02026', gameDate: '2026-03-15' });
   check('시범경기 제외', keep([exhibition]).length === 0);
 
@@ -270,7 +262,7 @@ function testSeasonFilter() {
   });
   check('올스타전 제외', keep([allstar]).length === 0);
 
-  // 접두사만 바뀌어도 팀 코드로 한 번 더 걸린다 (이중 방어)
+  // 접두사가 바뀌어도 팀 코드로 걸린다
   const oddAllstar = mk({ gameId: '12340711WEEA02026', homeTeamCode: 'EA', awayTeamCode: 'WE' });
   check('올스타 접두사가 바뀌어도 팀 코드로 제외', keep([oddAllstar]).length === 0);
 
@@ -283,7 +275,7 @@ function testSeasonFilter() {
   const thisPost = mk({ gameId: '77771026NCLG02026', gameDate: '2026-10-26' });
   check('올해 포스트시즌은 통과', keep([thisPost]).length === 1);
 
-  // 개막일을 못 구했으면 시범경기 판별을 포기한다 (빠뜨리는 것보다 낫다)
+  // 개막일을 모르면 시범경기를 거르지 않는다
   check('개막일 없으면 3월 경기도 통과', filterCurrentSeason([exhibition], 2026, null).length === 1);
   check('개막일 없어도 지난 시즌은 제외', filterCurrentSeason([lastSeason], 2026, null).length === 0);
   check('개막일 없어도 올스타전은 제외', filterCurrentSeason([allstar], 2026, null).length === 0);
@@ -342,16 +334,14 @@ function testDetect() {
   check('정규시즌 scope', scored[0]?.scope === 'regular');
 
   /*
-   * 상대 득점 — 문구는 "실점"이 아니라 "득점"으로 알리고, 기록에는 concede 로
-   * 남긴다. 화면의 "실점" 라벨은 이 recordKind 가 정하므로(app.js KIND_LABEL)
-   * 아래 문구를 바꿔도 기록 화면은 흔들리지 않아야 한다.
+   * 상대 득점: 알림 문구는 "○○ n점 득점", 기록에는 concede.
+   * 기록 탭의 "실점" 라벨은 recordKind 로 정해진다(app.js KIND_LABEL).
    */
   const conceded = detectEvents(live(1, 0), live(1, 2), T)[0];
   check('상대 득점 문구', conceded?.title === '삼성 2점 득점', conceded?.title);
   check('상대 득점은 기록에 concede 로', conceded?.recordKind === 'concede', conceded?.recordKind);
 
-  // 발송용 kind 는 score 그대로여야 한다. concede 로 보내면 KIND_COLUMN 에
-  // 없는 값이라 subscribersFor 가 빈 배열을 돌려줘 알림이 아예 안 나간다.
+  // 발송용 kind 는 score 여야 한다. concede 면 수신자가 0명이 된다.
   check('상대 득점도 발송은 score 로', conceded?.kind === 'score', conceded?.kind);
 
   // 우리 팀 득점·양 팀 득점은 기록도 score 다.
@@ -363,23 +353,19 @@ function testDetect() {
   check('양 팀 득점 문구', bothScored?.title === '양 팀 득점', bothScored?.title);
   check('양 팀 득점은 기록도 score', bothScored?.recordKind === 'score', bothScored?.recordKind);
 
-  /*
-   * 점수가 내려가는 경우 — 네이버가 기록을 정정하거나 일시적으로 옛 값·0:0 을
-   * 돌려줄 때다. 변화만 보면(!== 0) "삼성 0점 득점", "삼성 -2점 득점" 같은
-   * 알림이 만들어지고, dedup_key 때문에 되돌릴 수도 없다.
-   */
+  // 점수가 내려가는 경우(네이버 정정, 잠깐 예전 값·0:0). 알림이 나가면 안 된다
+  // ("삼성 -2점 득점" 같은 게 실제로 나간 적 있음).
   check('홈 점수 하향은 알리지 않는다', detectEvents(live(3, 0), live(2, 0), T).length === 0,
     JSON.stringify(detectEvents(live(3, 0), live(2, 0), T).map((e) => e.title)));
   check('원정 점수 하향도 알리지 않는다', detectEvents(live(2, 5), live(2, 3), T).length === 0);
   check('일시적으로 0:0 이 와도 알리지 않는다', detectEvents(live(3, 2), live(0, 0), T).length === 0);
 
-  // 우리가 득점하면서 상대 점수가 정정돼 내려간 경우. oppGained === 0 으로 묶으면
-  // 우리 득점인데 "삼성 -1점 득점" 이 나간다 — 역전 순간에 정반대로 알리는 셈이다.
+  // 우리가 득점하면서 상대 점수가 정정돼 내려간 경우. 우리 득점으로 나가야 한다.
   const comeback = detectEvents(live(2, 3), live(3, 2), T)[0];
   check('우리 득점 + 상대 하향이면 우리 득점으로 알린다',
     comeback?.title === 'NC 1점 득점!' && comeback?.recordKind === 'score', comeback?.title);
 
-  // 반대 방향 — 상대가 득점하면서 우리 점수가 내려간 경우.
+  // 반대로 상대가 득점하면서 우리 점수가 내려간 경우.
   const oppUp = detectEvents(live(3, 1), live(2, 3), T)[0];
   check('상대 득점 + 우리 하향이면 상대 득점으로 알린다',
     oppUp?.title === '삼성 2점 득점' && oppUp?.recordKind === 'concede', oppUp?.title);
@@ -388,8 +374,7 @@ function testDetect() {
   const startEv = detectEvents(g(), g({ statusCode: 'STARTED', statusInfo: '1회초' }), T)[0];
   check('시작 이벤트는 recordKind 가 kind 와 같다', startEv?.recordKind === startEv?.kind);
 
-  // ── 득점 이닝 — 전광판이 총점과 맞아떨어질 때만 말한다 ──
-  // (statusInfo 는 폴링 순간의 이닝이라 쓰지 않는다. detect.js scoringInning 참고)
+  // ── 득점 이닝: 전광판 합이 총점과 맞을 때만 붙인다 (detect.js scoringInning) ──
   const withBoard = (h, a, board) => Object.assign(live(h, a), { board });
   const side = (innings) => ({ innings, r: 0, h: 0, e: 0, b: 0 });
   const bodyOf = (prev, cur) => detectEvents(prev, cur, T)[0]?.body;
@@ -423,8 +408,7 @@ function testDetect() {
   const lost = detectEvents(live(2, 3), g({ statusCode: 'RESULT', homeTeamScore: 2, awayTeamScore: 7 }), T);
   check('종료 전이에서는 득점 알림 없음', kinds(lost) === 'end', kinds(lost));
 
-  // ENDED — RESULT 확정 전 최대 10여 분 거치는 상태(실측, poll_log). 이걸
-  // 놓치면 그 10분 동안 종료 알림이 밀린다. RESULT 와 동일하게 취급해야 한다.
+  // ENDED: RESULT 전에 최대 10분쯤 거치는 상태(poll_log). result 로 봐야 종료 알림이 안 밀린다.
   const endedStatus = detectEvents(live(5, 3), g({ statusCode: 'ENDED', homeTeamScore: 5, awayTeamScore: 3 }), T);
   check('ENDED 도 종료로 감지', kinds(endedStatus) === 'end', kinds(endedStatus));
   check('ENDED → RESULT 전이는 중복 아님(같은 스냅샷이면 재알림 없음)',
@@ -434,9 +418,8 @@ function testDetect() {
       T,
     ).length === 0);
 
-  // READY — BEFORE 와 STARTED 사이에 최대 53분 거치는 상태(실측, poll_log).
-  // statusInfo 가 "경기전"이고 점수도 0:0 으로 고정돼 있었다. live 로 처리하면
-  // 실제 플레이볼보다 최대 53분 이른 "경기 시작" 알림이 나간다.
+  // READY: BEFORE 와 STARTED 사이에 최대 53분 거치는 상태(poll_log). live 로 보면
+  // 시작 알림이 그만큼 일찍 나간다.
   const beforeToReady = detectEvents(g(), g({ statusCode: 'READY' }), T);
   check('READY 는 아직 경기 전 — 시작 알림 없음', beforeToReady.length === 0, kinds(beforeToReady));
 
@@ -447,7 +430,7 @@ function testDetect() {
   );
   check('READY → STARTED 전이에서 시작 알림', kinds(readyToStarted) === 'start', kinds(readyToStarted));
 
-  // 원정 경기: 대상 팀이 away 여도 관점이 뒤집히지 않아야 한다.
+  // 원정 경기에서도 우리 팀 기준이 맞아야 한다.
   const away = (h, a) => g({
     homeTeamCode: 'SS', homeTeamName: '삼성', awayTeamCode: 'NC', awayTeamName: 'NC',
     statusCode: 'STARTED', homeTeamScore: h, awayTeamScore: a,
@@ -456,7 +439,7 @@ function testDetect() {
   const p = perspective(away(0, 1), T);
   check('원정 경기 관점', !p.isHome && p.oppName === '삼성' && p.teamScore === 1);
 
-  // ── 홈/원정 표시 — "홈경기만 받기" 설정이 이 값으로 걸러진다 ──
+  // ── 홈/원정 표시("홈경기만 받기" 필터용) ──
   check('홈경기 이벤트는 isHome true', detectEvents(live(1, 0), live(2, 0), T)[0]?.isHome === true);
   check('원정경기 이벤트는 isHome false', detectEvents(away(0, 0), away(0, 1), T)[0]?.isHome === false);
 
@@ -477,8 +460,8 @@ function testDetect() {
   );
   check('포스트시즌 득점 제목', ksScore[0]?.title === '[한국시리즈] NC 1점 득점!', ksScore[0]?.title);
 
-  // ── 홈런 표시 — index.js 가 poll() 에서 game.hr 을 채워 넘기는 것을 흉내낸다.
-  // hr 은 "오스틴33호(8회3점 손주환)" 같은 원문 문자열 목록이지 개수가 아니다.
+  // ── 홈런 표시. index.js poll() 이 game.hr 을 채우는 걸 흉내 낸다.
+  // hr 은 "오스틴33호(8회3점 손주환)" 같은 문자열 목록이다.
   const withHr = (game, hr) => Object.assign(game, { hr });
   const HR1 = '오스틴33호(8회3점 손주환)';
   const HR2 = '박건우5호(3회1점 김진수)';
@@ -489,7 +472,7 @@ function testDetect() {
   const noHrScored = detectEvents(withHr(live(1, 0), [HR1]), withHr(live(2, 0), [HR1]), T);
   check('목록이 그대로면(새 홈런 없음) 표시 없음', !noHrScored[0]?.body.includes(HR1), noHrScored[0]?.body);
 
-  // 전광판 조회 실패로 hr 목록이 직전 값을 그대로 이어받은 경우 — 새 홈런이 아니다.
+  // 전광판 조회 실패로 hr 이 이전 값 그대로인 경우. 새 홈런이 아니다.
   const carriedOver = detectEvents(withHr(live(1, 0), [HR1]), withHr(live(1, 1), [HR1]), T);
   check('hr 목록이 안 늘면 실점이어도 표시 없음', !carriedOver[0]?.body.includes(HR1), carriedOver[0]?.body);
 
@@ -546,10 +529,7 @@ function testOutlook() {
   check('cutoff 없으면 null', postseasonOutlook({ ...standings, cutoff: null }, 'NC', 144) === null);
   check('없는 팀이면 null', postseasonOutlook(standings, 'XX', 144) === null);
 
-  /*
-   * 바로 아래 순위와의 승차(chaser). 표의 승차 칸은 1위 기준이라 이웃끼리의
-   * 거리가 안 드러나서 따로 계산한다.
-   */
+  // 바로 아래 순위와의 승차(chaser).
   check('목록 마지막이면 쫓아오는 팀 없음', o.chaser === null, JSON.stringify(o.chaser));
 
   const withBelow = structuredClone(standings);
@@ -562,10 +542,7 @@ function testOutlook() {
   // 둘 다 1위 기준 승차라 빼면 이웃 간 거리가 된다: 17.5 - 14.5
   check('아래와의 승차 = 3', oBelow.chaser?.gap === 3, String(oBelow.chaser?.gap));
 
-  /*
-   * 공동 순위. rank + 1 로 찾으면(8위가 둘이면 다음은 10위) 빈손이 되므로
-   * 정렬된 목록의 다음 팀을 쓴다. 승차 0 은 "바로 뒤에 붙어 있다"는 뜻이다.
-   */
+  // 공동 순위. rank + 1 로는 못 찾으니(공동 8위면 다음은 10위) 목록의 다음 팀을 쓴다.
   const tied = structuredClone(standings);
   tied.teams.push(
     { code: 'LT', name: '롯데', rank: 8, games: 105, wins: 48, draws: 2, losses: 55, pct: 0.466, gb: 14.5 },
@@ -595,22 +572,16 @@ function testHeadToHead() {
 
   // KBO 공식대로 무승부는 승률에서 뺀다: 2/(2+1)
   check('승률은 무승부 제외', Math.abs(find('삼성').pct - 2 / 3) < 1e-9, String(find('삼성').pct));
-  // 강한 상대부터: 삼성 .667 > KIA 1.000? → KIA 가 먼저다
+  // 승률 높은 순: KIA 1.000 이 삼성 .667 보다 먼저
   check('승률 높은 상대부터 정렬', rows[0].opp === 'KIA' && rows.at(-1).opp === 'LG',
     rows.map((r) => r.opp).join(','));
 
-  /*
-   * 포스트시즌은 빼고 센다. 16경기 표본에 5경기짜리 시리즈가 섞이면 조용히
-   * 오염되고, 숫자만 봐서는 알아채기 어렵다.
-   */
+  // 포스트시즌 경기는 세지 않는다.
   const mixed = headToHead([g('두산', 'win'), g('두산', 'win', 'semi_playoff'), g('두산', 'lose', 'korean_series')]);
   check('포스트시즌은 상대전적에서 제외', mixed[0].wins === 1 && mixed[0].losses === 0,
     JSON.stringify(mixed[0]));
 
-  /*
-   * 승부가 하나도 안 난 상대. 승/(승+패) 가 0 으로 나누게 되므로 null 이어야
-   * 한다 — 그대로 계산하면 화면에 NaN 이 찍힌다.
-   */
+  // 승패가 하나도 없는 상대는 pct null(0 으로 나누면 NaN).
   const allDraw = headToHead([g('키움', 'draw'), g('키움', 'draw')]);
   check('승도 패도 없으면 승률 null (0 나눗셈 방지)',
     allDraw[0].pct === null && allDraw[0].draws === 2, JSON.stringify(allDraw[0]));
@@ -636,7 +607,7 @@ function testWindow() {
   check('경기 없는 날 → 감시 안 함', !isPollWindow({ games: [] }, start));
   check('시각을 못 읽으면 안전하게 감시', isPollWindow({ games: [{ startAt: 'broken' }] }, start));
 
-  // 시간 창 안에 든 경기만 골라야 한다 — 감시 종료 판단의 대상이 되는 목록이다.
+  // 시간대 안에 있는 경기만 골라야 한다(종료 판단 대상).
   const two = {
     games: [
       { gameId: 'TODAY', startAt: '2026-08-22T18:30:00' },
@@ -684,7 +655,7 @@ async function testSettled() {
 }
 
 /**
- * cache 테이블만 지원하는 최소 D1 흉내.
+ * cache 테이블만 흉내 내는 D1.
  *
  * @param rows 미리 들어 있는 캐시 행. { 'schedule:2026': { value, expires_at } }
  *   value 는 문자열(JSON), expires_at 은 ISO 문자열이다. 비우면 캐시 미스가 되어
@@ -723,10 +694,10 @@ async function testScheduleResilience() {
   const expired = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
   try {
-    // 네이버 API가 완전히 죽어 fetch 자체가 예외를 던지는 상황을 흉내낸다.
+    // 네이버가 완전히 안 돼서 fetch 가 예외를 던지는 상황.
     globalThis.fetch = async () => { throw new Error('naver down'); };
 
-    // 남아 있는 캐시조차 없으면(첫 배포 직후 등) 빈 목록으로 물러난다.
+    // 남은 캐시도 없으면(첫 배포 직후 등) 빈 목록.
     const games = await loadSchedule({ DB: fakeCacheDb(), TEAM_CODE: 'NC' }, 2026);
     check(
       '일정 조회 실패 + 캐시 없음 → 빈 목록',
@@ -734,7 +705,7 @@ async function testScheduleResilience() {
       JSON.stringify(games),
     );
 
-    // 만료된 캐시가 남아 있으면 그것으로 되돌아간다 — 이번 변경의 핵심.
+    // 만료된 캐시가 있으면 그걸 준다.
     const lastGood = [{ gameId: '20260822SSNC02026', gameDate: '2026-08-22', oppName: '삼성' }];
     const staleDb = fakeCacheDb({
       'schedule:2026': { value: JSON.stringify(lastGood), expires_at: expired },
@@ -746,7 +717,7 @@ async function testScheduleResilience() {
       JSON.stringify(fallback),
     );
 
-    // 정상 조회에는 조회 시각이 붙는다 — 화면의 "○○ 기준" 표시가 이 값을 쓴다.
+    // 정상 조회면 조회 시각(fetchedAt)이 붙는다. 화면의 "○○ 기준" 표시용.
     globalThis.fetch = async () => ({
       ok: true,
       json: async () => ({
@@ -765,11 +736,8 @@ async function testScheduleResilience() {
     const at = Date.parse(fresh?.fetchedAt ?? '');
     check('정상 조회한 순위에 fetchedAt 부착', at >= before && at <= Date.now(), fresh?.fetchedAt);
 
-    /*
-     * 연속 기록(순위 탭의 '연속' 칸)은 네이버의 continuousGameResult 를 그대로
-     * 실어 보낸다. 이 매핑이 끊기면 화면에서는 칸만 비고 아무 오류도 안 난다 —
-     * 비공식 API라 필드명이 바뀔 수 있어 여기서 고정해 둔다.
-     */
+    // 연속 기록은 continuousGameResult 를 그대로 쓴다. 필드명이 바뀌면 칸만 비고
+    // 에러는 안 나서 여기서 확인한다.
     check('연속 기록을 순위에 실어 보낸다', fresh?.teams?.[0]?.streak === '3승', fresh?.teams?.[0]?.streak);
 
     globalThis.fetch = async () => { throw new Error('naver down'); };
@@ -786,17 +754,15 @@ async function testScheduleResilience() {
       JSON.stringify(standFallback),
     );
 
-    // 만료된 값을 평상시 경로가 집어 오면 안 된다 — getCache 는 여전히 미스여야 한다.
+    // 평소 경로(getCache)는 만료된 값을 읽으면 안 된다.
     const plain = await getCache(
       fakeCacheDb({ 'schedule:2026': { value: '[1,2,3]', expires_at: expired } }),
       'schedule:2026',
     );
     check('만료된 캐시는 평상시 getCache 로는 안 읽힘', plain === null, JSON.stringify(plain));
 
-    /*
-     * 경기 종료 직후 무효화한 값도 폴백 재료로 남아야 한다. 무효화를 null 덮어쓰기로
-     * 하면 그 직후 네이버 장애 때 일정이 통째로 빈 목록이 된다.
-     */
+    // 경기 종료 때 만료시킨 값도 폴백으로 쓸 수 있어야 한다. null 로 덮어쓰면
+    // 그 직후 네이버가 안 될 때 일정이 빈 목록이 된다.
     const { db: realDb } = sqliteD1();
     await putCache(realDb, 'schedule:2026', lastGood, 60 * 60 * 1000);
     await invalidateSchedule({ DB: realDb }, 2026);
@@ -812,8 +778,8 @@ async function testScheduleResilience() {
 /**
  * 개막일을 못 정한 결과도 캐시되는지.
  *
- * resolveSeasonOpener 는 감시 중인 틱마다 불리므로, 개막 전(순위표 경기 수 0)이나
- * 조회 실패를 캐시하지 않으면 그때마다 외부 호출이 나간다 — 이 검사가 그 회귀를 막는다.
+ * resolveSeasonOpener 는 자주 불려서, 개막 전(경기 수 0)이나 조회 실패를 캐시하지
+ * 않으면 그때마다 외부 호출이 나간다.
  */
 async function testOpenerCaching() {
   const originalFetch = globalThis.fetch;
@@ -843,7 +809,7 @@ async function testOpenerCaching() {
     for (let i = 0; i < 5; i++) await resolveSeasonOpener(env2, 2027);
     check('조회 실패 5틱 → 외부 호출 1회', fetches === 1, `${fetches}회`);
 
-    // 못 정한 결과는 짧게만 캐시된다 — 개막하면 곧 다시 물어봐야 한다.
+    // 못 정한 결과는 짧게 캐시한다. 개막하면 금방 다시 확인해야 하니까.
     const db3 = fakeCacheDb();
     await resolveSeasonOpener({ DB: db3, TEAM_CODE: 'NC' }, 2027);
     const row = await db3.prepare('SELECT value, expires_at FROM cache WHERE key = ?').bind('opener:2027').first();
@@ -854,7 +820,7 @@ async function testOpenerCaching() {
   }
 }
 
-/** 날짜별 캐시 청소가 지울 대상과 남길 대상을 올바르게 고르는지. */
+/** 날짜별 캐시 정리가 지울 것과 남길 것을 맞게 고르는지. */
 async function testCachePrune() {
   const db = fakeCacheDb();
   await pruneDatedCache(db, '2026-08-19');
@@ -864,10 +830,7 @@ async function testCachePrune() {
   check('today: 범위로 지움', ranges.includes('today: ~ today:2026-08-19'), ranges.join(' / '));
   check('지우는 대상은 이 둘뿐', db.deletes.length === 2, String(db.deletes.length));
 
-  /*
-   * 범위 비교가 연도별 키를 건드리지 않는지 문자열로 직접 확인한다.
-   * 키가 기본 키라 SQLite 도 같은 사전순 비교를 쓴다.
-   */
+  // 범위 비교가 연도별 키를 안 건드리는지 문자열 비교로 확인(SQLite 도 같은 순서).
   const inRange = (key, prefix) => key >= `${prefix}:` && key < `${prefix}:2026-08-19`;
   check('지난 plan 은 범위 안', inRange('plan:2026-08-01', 'plan'));
   check('오늘 plan 은 범위 밖', !inRange('plan:2026-08-25', 'plan'));
@@ -880,7 +843,7 @@ async function testCachePrune() {
 /* ══ 7. 보안 검증 ══ */
 
 function testSecurity() {
-  // SSRF 방어: 서버가 이 URL 로 직접 POST 하므로 임의 호스트를 받으면 안 된다.
+  // SSRF: 서버가 이 URL 로 POST 하니까 아무 호스트나 받으면 안 된다.
   check('FCM 허용', validateEndpoint('https://fcm.googleapis.com/fcm/send/x').ok);
   check('Apple 허용', validateEndpoint('https://web.push.apple.com/abc').ok);
   check('Mozilla 허용', validateEndpoint('https://updates.push.services.mozilla.com/wpush/v2/x').ok);
@@ -894,7 +857,7 @@ function testSecurity() {
   check('빈 값 거부', !validateEndpoint('').ok && !validateEndpoint(undefined).ok);
   check('과도하게 긴 값 거부', !validateEndpoint('https://fcm.googleapis.com/' + 'a'.repeat(2000)).ok);
 
-  // 접미사 검사가 도메인 경계를 지키는지 (evil-notify.windows.com.attacker.com 류)
+  // 접미사 검사가 도메인 경계를 지키는지(evil-notify.windows.com.attacker.com 같은 것)
   check('접미사 우회 거부', !validateEndpoint('https://notify.windows.com.evil.com/x').ok);
 
   check('EXTRA_PUSH_HOSTS 로 추가 허용', validateEndpoint('https://push.example.org/x', 'push.example.org').ok);
@@ -917,15 +880,13 @@ function testSecurity() {
 }
 
 /**
- * 본문 크기 상한 검사가 문자 수가 아니라 실제 바이트 수로 걸리는지.
- *
- * Content-Length 헤더 없이 오는 요청은 declared 검사를 피해 text.length 검사만
- * 남는다. UTF-8 에서 한글은 3바이트라, text.length 로 재면 같은 4096자라도
- * ASCII 는 4KB, 한글은 최대 12KB 까지 통과해 상한이 사실상 무력화된다.
+ * 본문 크기 제한이 문자 수가 아니라 바이트 수 기준인지.
+ * Content-Length 가 없으면 본문을 읽어서 재는데, 한글은 3바이트라 문자 수로 재면
+ * 4096자 제한에 12KB 까지 통과한다.
  */
 async function testReadJsonByteLimit() {
   const req = (text) => ({
-    headers: { get: () => null }, // Content-Length 없음 — text.text() 검사만 남는 경로
+    headers: { get: () => null }, // Content-Length 없음. 본문을 읽어서 재는 경로
     text: async () => text,
   });
 
@@ -948,10 +909,9 @@ async function testReadJsonByteLimit() {
 /* ══ 7-c. 구독 상한이 subrequest 예산 안인지 ══ */
 
 /**
- * broadcast 는 구독 수만큼 fetch 를 한꺼번에 날린다. 무료 플랜의 호출당 상한
- * (50)을 넘으면 51번째부터 조용히 실패하므로, 상한을 늘리거나 POLLS_PER_TICK 을
- * 올릴 때 이 부등식이 먼저 깨지게 둔다. 실제로 터진 뒤에 알면 늦다 —
- * allSettled 가 실패를 삼켜 틱은 성공으로 끝난다.
+ * broadcast 는 구독 수만큼 fetch 를 보낸다. 호출당 50개를 넘으면 51번째부터
+ * 실패하는데 allSettled 라 티가 안 난다. 구독 상한이나 POLLS_PER_TICK 을 올리면
+ * 여기서 먼저 걸리게 한다.
  */
 function testSubrequestBudget() {
   const N = MAX_SUBSCRIPTIONS;
@@ -961,7 +921,7 @@ function testSubrequestBudget() {
   check(`최악의 틱이 subrequest 예산 안에 든다 (${worst} ≤ ${SUBREQUEST_BUDGET})`,
     worst <= SUBREQUEST_BUDGET, `구독 ${N}, 폴링 ${POLLS_PER_TICK}회`);
 
-  // 상한이 예산에 맞춰 정해졌다는 뜻 — 하나만 더 받아도 넘어야 한다.
+  // 상한이 예산에 딱 맞게 정해졌는지(하나 더 받으면 넘어야 함).
   const oneMore = (N + 1) + POLLS_PER_TICK * (2 + 2 * (N + 1));
   check('상한이 예산에 비해 지나치게 낮지 않다',
     oneMore > SUBREQUEST_BUDGET - POLLS_PER_TICK * 2,
@@ -972,12 +932,11 @@ function testSubrequestBudget() {
 /* ══ 7-d. 상한에 찼을 때 그 기기에 알림이 가는가 ══ */
 
 /**
- * 2026-09-20 에 상한을 200 → 8 로 내리면서 등록 거절(429)이 생겼는데, 그 길로
- * 기기가 영영 잠겼다. 9월 27일에 실제로 알림이 끊겨서 찾았다.
+ * 2026-09-20 상한을 200 → 8 로 내린 뒤 상한에서 등록을 거절(429)하게 돼 있었고,
+ * 9/24~27 알림이 끊긴 원인이 이거였다.
  *
- * 여기서 확인할 것은 행 개수가 아니라 *알림이 가느냐* 다. 표가 아무리 단정해도
- * subscribersFor 가 그 기기를 안 돌려주면 발송 대상에서 빠지고, 그것이 사용자가
- * 겪는 증상이다. 그래서 실제 스키마(schema.sql)로 subscribersFor 까지 돌린다.
+ * 행 개수가 아니라 그 기기가 실제로 발송 대상(subscribersFor)에 들어가는지 본다.
+ * 실제 스키마(schema.sql)로 돌린다.
  */
 async function testSubscriptionEviction() {
   const { sqlite, db } = sqliteD1();
@@ -998,12 +957,11 @@ async function testSubscriptionEviction() {
     (await subscribersFor(db, 'score', 'regular', false)).some((r) => r.endpoint === endpoint);
 
   /*
-   * 실제로 겪은 사고를 그대로 재현한다.
-   *   1. 표가 상한까지 차 있다.
-   *   2. 쓰던 기기의 엔드포인트가 만료돼 410 이 오고 행이 지워진다.
-   *   3. 앱을 열어 새 엔드포인트로 다시 등록한다.
-   *   4. 그 기기에 알림이 가야 한다.
-   * 옛 코드는 3에서 429 로 막아 4가 영영 안 됐다.
+   * 그때 상황 재현:
+   *   1. 구독이 상한까지 차 있다
+   *   2. 기기 엔드포인트가 만료돼 410, 행 삭제
+   *   3. 앱이 새 엔드포인트로 다시 등록
+   *   4. 그 기기에 알림이 가야 한다 (예전 코드는 3에서 429 로 막혔다)
    */
   seed(8);
   await deleteSubscription(db, 'ep3');                      // 410 으로 지워짐
@@ -1017,9 +975,7 @@ async function testSubscriptionEviction() {
     await willBeNotified('ep3-rotated'));
   check('표는 여전히 상한 이하', rows().length <= 8, `${rows().length}건`);
 
-  // 자리 비우기가 어떤 시작 개수에서도 수렴하는지. LIMIT 안의 부질의와
-  // RETURNING 은 눈으로 못 본다. 12건은 상한을 내리기 전에 쌓인 표다 —
-  // 한 행씩 지우면 영원히 안 줄어든다.
+  // 몇 개에서 시작하든 상한 밑으로 줄어드는지. 12건은 상한을 내리기 전에 쌓인 경우.
   for (const [startCount, max] of [[12, 8], [8, 8], [7, 8], [0, 8], [1, 1]]) {
     seed(startCount);
     await makeRoomForSubscription(db, max);
@@ -1030,22 +986,20 @@ async function testSubscriptionEviction() {
       after.join(','));
   }
 
-  // 밀려나는 것은 가장 오래 갱신 안 된 행이어야 한다 — 죽은 엔드포인트가 거기 모인다.
+  // 지워지는 건 가장 오래 갱신 안 된 행이어야 한다(대개 죽은 엔드포인트).
   seed(8);
   const evicted = await makeRoomForSubscription(db, 8);
   check('가장 오래된 행부터 밀어낸다', evicted.length === 1 && evicted[0] === 'ep0', evicted.join(','));
 
-  // 밀려난 기기는 발송 대상에서도 빠져야 한다 — 표에서만 지우고 발송이 남으면
-  // 예산 계산이 무너진다.
+  // 지워진 기기는 발송 대상에서도 빠져야 한다(안 그러면 예산 계산이 틀어짐).
   check('밀려난 기기는 발송 대상에서도 빠진다', !(await willBeNotified('ep0')));
 }
 
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
 
 /**
- * D1 을 흉내 내는 최소 스텁. 실행된 SQL 과 바인딩을 기록하고,
- * subscriptions 테이블을 자바스크립트에서 직접 필터링해 결과를 돌려준다.
- * 이렇게 하면 실제 DB 없이도 "어떤 구독이 대상이 되는가"를 검증할 수 있다.
+ * D1 스텁. 실행한 SQL·바인딩을 기록하고, WHERE 절을 정규식으로 읽어
+ * subscriptions 를 JS 로 거른다.
  */
 function fakeDb(rows) {
   const calls = [];
@@ -1056,7 +1010,7 @@ function fakeDb(rows) {
       return {
         bind: () => this,
         all: async () => {
-          // WHERE 절을 해석해 스텁 데이터에 적용한다.
+          // WHERE 절을 읽어서 적용.
           const needsKind = /on_(\w+) = 1/.exec(sql)?.[1];
           const needsScope = /on_(regular|postseason) = 1/.exec(sql)?.[1];
           const homeOnlyExcluded = sql.includes('home_only = 0');
@@ -1097,14 +1051,14 @@ async function testHomeOnly() {
   await subscribersFor(dbAway, 'start', 'regular', false);
   check('원정 쿼리에는 home_only = 0 조건 포함', dbAway.calls[0].includes('home_only = 0'));
 
-  // 알 수 없는 종류·범위는 조회 자체를 하지 않는다.
+  // 모르는 kind·scope 면 조회하지 않는다.
   check('모르는 종류는 빈 배열', (await subscribersFor(fakeDb(rows), 'nope', 'regular', true)).length === 0);
   check('모르는 범위는 빈 배열', (await subscribersFor(fakeDb(rows), 'start', 'nope', true)).length === 0);
 }
 
 /* ══ 9. 전광판 조회 ══ */
 
-/** 네이버 record 응답을 흉내 낸다. 실제 2026-08-22 SS@NC 경기 응답을 그대로 옮겨 왔다. */
+/** 네이버 record 응답. 2026-08-22 SS@NC 실제 응답에서 가져왔다. */
 function fakeRecordResponse(scoreBoard, etcRecords) {
   return {
     ok: true,
@@ -1129,9 +1083,8 @@ async function testScoreboard() {
     check('전광판 파싱 — 원정 R', sb.away.r === 8);
     check('etcRecords 없으면 홈런 빈 목록', Array.isArray(sb.hr) && sb.hr.length === 0, JSON.stringify(sb.hr));
 
-    // 실제 2026-08-25 NC@LG 10회말 응답에서 그대로 옮겨 왔다(오스틴 8회 3점 홈런).
-    // etcRecords 는 홈런 외에 결승타·실책·도루 같은 다른 기록도 섞여 온다 —
-    // how 로만 걸러야 하고, result 는 재가공 없이 원문 그대로 뽑아야 한다.
+    // 2026-08-25 NC@LG 10회말 실제 응답(오스틴 8회 3점 홈런). etcRecords 에는
+    // 결승타·실책·도루도 섞여 있어서 how 로 거르고 result 는 그대로 쓴다.
     globalThis.fetch = async () => fakeRecordResponse(
       { rheb: { away: { r: 4, b: 6, e: 0, h: 10 }, home: { r: 5, b: 5, e: 1, h: 11 } },
         inn: { away: [0], home: [0] } },
@@ -1144,12 +1097,11 @@ async function testScoreboard() {
     const withHr = await fetchScoreboard('20260825NCLG02026');
     check('etcRecords 에서 홈런만 원문 그대로', JSON.stringify(withHr.hr) === '["오스틴33호(8회3점 손주환)"]', JSON.stringify(withHr.hr));
 
-    // 경기 전에는 recordData 자체가 null — 정상이며 오류가 아니다.
+    // 경기 전에는 recordData 가 null(정상).
     globalThis.fetch = async () => fakeRecordResponse(null);
     check('경기 전 → null', (await fetchScoreboard('20260825NCLG02026')) === null);
 
-    // HTTP 오류나 예상과 다른 응답 형태도 예외를 던지지 않고 null 로 흡수한다
-    // (전광판은 부가 정보라 이것 때문에 폴링 전체가 실패하면 안 된다).
+    // HTTP 오류나 이상한 응답도 예외 없이 null(전광판 때문에 폴링이 실패하면 안 됨).
     globalThis.fetch = async () => ({ ok: false, json: async () => ({}) });
     check('HTTP 오류 → null', (await fetchScoreboard('x')) === null);
 
@@ -1162,15 +1114,13 @@ async function testScoreboard() {
     globalThis.fetch = originalFetch;
   }
 
-  // 이닝 합 검증 — detect.js scoringInning 이 이닝을 말해도 되는지 이 함수로
-  // 판단한다(record API 가 schedule API 보다 늦게 응답해 합이 어긋나는 경우 대비).
+  // 이닝 합 검증. record API 가 schedule API 보다 늦어서 합이 안 맞는 경우 대비.
   check('이닝 합이 총점과 일치', inningSumMatches([1, 0, 2, 0], 3));
   check('이닝 합이 총점과 불일치(record API 지연)', !inningSumMatches([1, 0, 1, 0], 3));
   check('빈 배열은 불일치', !inningSumMatches([], 0));
   check('배열이 아니면 불일치', !inningSumMatches(undefined, 0));
 
-  // index.js 가 "전광판을 다시 부를지" 판단하는 기준. 한쪽만 어긋나도 못 쓴다 —
-  // 어긋났다는 건 두 API 시점이 갈렸다는 뜻이라 반대쪽도 믿을 근거가 없다.
+  // index.js 가 전광판을 다시 부를지 정하는 기준. 한쪽만 안 맞아도 못 쓴다.
   const sb2 = (home, away) => ({ home: { innings: home }, away: { innings: away } });
   const sc = (h, a) => ({ homeScore: h, awayScore: a });
 
@@ -1189,8 +1139,8 @@ async function testScoreboard() {
 /* ══ 11-b. 문자중계 종료 감지 ══ */
 
 /**
- * 실제 relay 응답(2026-08-29 NC-한화)에서 판정에 쓰는 부분만 남긴 모양.
- * 종료 블록은 type 99 + "=====" 구분선으로 붙고, 투구·타격 결과는 다른 type 이다.
+ * 2026-08-29 NC-한화 relay 응답에서 판정에 필요한 부분만 남긴 것.
+ * 종료 블록은 type 99 + "=====" 구분선이고 투구·타격은 다른 type 이다.
  */
 function fakeRelayResponse({ ended, homeScore = 4, awayScore = 11 }) {
   const playing = [
@@ -1231,8 +1181,7 @@ async function testRelayFinish() {
     globalThis.fetch = async () => fakeRelayResponse({ ended: false });
     check('진행 중이면 null', (await fetchRelayFinish('x')) === null);
 
-    // 종료 판정을 문자열이 아니라 type 으로 하는지 — 타격 결과에 "====" 가 섞여도
-    // 종료로 읽으면 안 된다.
+    // 문자열만이 아니라 type 도 보는지. 타격 결과에 "====" 가 있어도 종료가 아니다.
     globalThis.fetch = async () => ({
       ok: true,
       json: async () => ({
@@ -1262,9 +1211,8 @@ async function testRelayFinish() {
 /* ══ 12. 서비스 워커 진동 설정 ══ */
 
 /**
- * public/sw.js 를 고치지 않고 그대로 실행해 검증한다. 서비스워커 전용
- * 전역(self·indexedDB)만 최소한으로 흉내 내므로, 여기서 통과하면 실제 배포되는
- * 코드가 통과한 것이다 — 로직을 여기에 다시 옮겨 적으면 그때부터 둘이 갈라진다.
+ * public/sw.js 파일을 그대로 실행해서 검증한다. self·indexedDB 같은 서비스 워커
+ * 전역만 흉내 낸다(로직을 여기 복사하면 실제 코드와 달라질 수 있어서).
  *
  * @param {'ok'|'blocked'|'error'} idbMode IndexedDB open 이 어떻게 끝나는지
  */
@@ -1298,10 +1246,7 @@ function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}, fetchMode 
     self: {
       addEventListener: (type, fn) => { listeners[type] = fn; },
       registration: {
-        /*
-         * 같은 tag 는 알림함에서 덮어쓴다 — 실제 동작을 그대로 흉내 낸다.
-         * 밀어 넣기만 하면 "최신 하나만 남는가"를 검증할 수 없다.
-         */
+        // 같은 tag 면 덮어쓴다(실제 동작과 같게).
         showNotification: (title, opts) => {
           const at = notifications.findIndex((n) => n.opts.tag === opts.tag);
           const entry = { title, opts };
@@ -1309,11 +1254,8 @@ function loadServiceWorker(store, idbMode = 'ok', onClose = () => {}, fetchMode 
           else notifications.push(entry);
           return Promise.resolve();
         },
-        /*
-         * 알림함 흉내. 실제 getNotifications 는 Notification 객체를 주고 옵션이
-         * 속성으로 올라와 있다(n.data·n.timestamp). sw.js 가 n.data 를 읽으므로
-         * 같은 모양으로 돌려준다 — {opts} 로만 주면 검사가 늘 통과해 버린다.
-         */
+        // 실제 getNotifications 처럼 n.data·n.timestamp 가 속성으로 있어야 한다.
+        // ({opts} 형태로 주면 sw.js 검사가 항상 통과해 버린다)
         getNotifications: async ({ tag }) => notifications
           .filter((n) => n.opts.tag === tag)
           .map((n) => ({ ...n.opts, title: n.title })),
@@ -1359,7 +1301,7 @@ async function testServiceWorkerVibrate() {
     }
   }
 
-  // 설정을 못 읽는 경우들 — 어느 쪽이든 알림 자체는 반드시 떠야 한다.
+  // 설정을 못 읽어도 알림은 떠야 한다.
   store.clear();
   {
     const { push, notifications } = loadServiceWorker(store);
@@ -1368,7 +1310,7 @@ async function testServiceWorkerVibrate() {
       JSON.stringify(notifications[0]?.opts.vibrate) === JSON.stringify(PATTERN.score));
   }
   {
-    // onblocked 갈래가 비어 있으면 Promise 가 영영 안 끝나 알림이 아예 안 뜬다.
+    // onblocked 를 처리 안 하면 Promise 가 안 끝나서 알림이 안 뜬다.
     const { push, notifications } = loadServiceWorker(store, 'blocked');
     const raced = await Promise.race([
       push({ kind: 'score', title: 't', body: 'b', ts: Date.now() }).then(() => 'DONE'),
@@ -1383,28 +1325,22 @@ async function testServiceWorkerVibrate() {
     check('IDB 열기 실패여도 알림은 뜬다', notifications.length === 1);
   }
 
-  // 연결을 안 닫으면 나중에 스키마 버전을 올릴 때 upgrade 가 막힌다.
+  // 연결을 안 닫으면 나중에 DB 버전을 올릴 때 막힌다.
   store.set('vibrate', { score: true });
   let closes = 0;
   const { push } = loadServiceWorker(store, 'ok', () => { closes++; });
   await push({ kind: 'score', title: 't', body: 'b', ts: Date.now() });
   check('푸시 처리 후 IDB 연결을 닫는다', closes === 1, `close() ${closes}회`);
 
-  /*
-   * tag 가 같으면 새 알림이 뜨지 않고 기존 알림을 제자리에서 덮어쓴다.
-   * tag 의 범위는 경기 하나다 — 한 경기의 알림은 알림함에 항상 하나만 남는다.
-   */
+  // tag 는 경기 단위. 한 경기 알림은 알림함에 하나만 남는다.
   const tagOf = async (payload) => {
     const { push, notifications } = loadServiceWorker(store);
     await push({ title: 't', body: 'b', ts: Date.now(), ...payload });
     return notifications[0]?.opts.tag;
   };
 
-  /*
-   * 경기까지는 갈라야 한다. 2026-08-30 실측: 종료 알림이 서버에서 정상
-   * 발송됐는데(fetch OK ×2, 오류 없음) 단말에 안 뜬 건이 있었다. 종류만으로
-   * tag 를 만들어 어제 경기의 종료 알림을 덮어썼기 때문이다.
-   */
+  // 경기가 다르면 tag 도 달라야 한다. 2026-08-30 에 종류로만 tag 를 만들어서
+  // 어제 경기 종료 알림을 덮어쓴 적이 있다.
   const endA = await tagOf({ kind: 'end', gameId: '20260829NCHH02026' });
   const endB = await tagOf({ kind: 'end', gameId: '20260830NCHH02026' });
   check('경기가 다르면 tag 도 다르다', endA !== endB, `${endA} vs ${endB}`);
@@ -1412,11 +1348,7 @@ async function testServiceWorkerVibrate() {
   const startB = await tagOf({ kind: 'start', gameId: '20260830NCHH02026' });
   check('같은 경기면 종류가 달라도 같은 tag (최신 하나만 남긴다)', endB === startB, `${endB} vs ${startB}`);
 
-  /*
-   * 여기가 이번 변경의 요점이다. 득점이 여러 번 나도 알림함에는 하나만,
-   * 그것도 가장 최근 것이 남아야 한다. 종전에는 득점마다 tag 가 달라 다섯 번
-   * 득점하면 알림이 다섯 개 쌓였다.
-   */
+  // 득점이 여러 번 나도 알림함에는 가장 최근 것 하나만.
   {
     const { push, notifications } = loadServiceWorker(store);
     const game = '20260830NCHH02026';
@@ -1430,10 +1362,7 @@ async function testServiceWorkerVibrate() {
       notifications[0]?.title === '5회 득점', notifications[0]?.title);
   }
 
-  /*
-   * 도즈에서 깨어날 때 밀린 푸시가 한꺼번에 오는데 순서가 보장되지 않는다.
-   * 옛 알림이 나중에 도착해도 최신 자리를 뺏으면 안 된다 — 점수가 거꾸로 간다.
-   */
+  // 밀린 푸시가 순서 없이 와도 예전 알림이 최신 알림을 덮으면 안 된다.
   {
     const { push, notifications } = loadServiceWorker(store);
     const game = '20260830NCHH02026';
@@ -1444,10 +1373,7 @@ async function testServiceWorkerVibrate() {
       `${notifications.length}건 / ${notifications[0]?.title}`);
   }
 
-  /*
-   * tag 를 공유하게 되면서 "같은 tag 가 있으면 건너뛴다" 로는 안 된다 —
-   * 그러면 새 득점이 직전 알림에 막혀 영영 안 뜬다. 같은 *이벤트*일 때만 넘긴다.
-   */
+  // 같은 tag 라고 건너뛰면 새 득점이 안 뜬다. 같은 이벤트(id)일 때만 건너뛴다.
   {
     const { push, notifications, acks } = loadServiceWorker(store);
     const game = '20260830NCHH02026';
@@ -1469,7 +1395,7 @@ async function testServiceWorkerVibrate() {
   check('gameId 없는 알림은 종류로 묶인다', t1 === 'nc-test', t1);
   check('그 tag 는 경기 알림과 겹치지 않는다', t1 !== endB, `${t1} vs ${endB}`);
 
-  // ── 배달 확인 — 알림을 띄운 뒤 서버에 id 를 알린다 ──
+  // ── 배달 확인: 알림을 띄운 뒤 서버에 id 를 보낸다 ──
   {
     const { push, acks } = loadServiceWorker(store);
     await push({ kind: 'score', id: 66, title: 't', body: 'b', ts: 1 });
@@ -1485,8 +1411,7 @@ async function testServiceWorkerVibrate() {
       acks.length === 0 && notifications.length === 1);
   }
   {
-    // 확인 요청이 실패해도 알림은 이미 떠 있다. 여기서 waitUntil 이 거부되면
-    // 브라우저가 대체 알림을 띄우거나 SW 를 문제로 볼 수 있다 — 삼켜야 한다.
+    // 배달 확인 요청이 실패해도 예외가 밖으로 나오면 안 된다(waitUntil 실패 방지).
     const { push, notifications } = loadServiceWorker(store, 'ok', () => {}, 'fail');
     const outcome = await push({ kind: 'end', id: 69, title: 't', body: 'b', ts: 1 })
       .then(() => 'RESOLVED', () => 'REJECTED');
@@ -1496,8 +1421,8 @@ async function testServiceWorkerVibrate() {
 
   /*
    * ── 재발송 ──
-   * 서버의 "확인이 안 왔다"는 판단은 틀릴 수 있다(2026-09-02: 화면에는 떴는데
-   * 확인만 실패). 그래서 다시 띄울지는 단말이 알림함을 보고 정한다.
+   * 서버 쪽 "확인이 안 왔다"는 틀릴 수 있다(2026-09-02, 떴는데 확인만 실패).
+   * 다시 띄울지는 기기가 알림함을 보고 정한다.
    */
   {
     const { push, notifications, acks } = loadServiceWorker(store);
@@ -1512,18 +1437,13 @@ async function testServiceWorkerVibrate() {
       JSON.stringify(acks.map((a) => a.body.id)));
   }
   {
-    // 알림함에 없으면(못 받았거나 사용자가 지웠거나) 재발송은 정상적으로 뜬다.
-    // 이게 이 기능의 목적이다 — 놓친 알림을 살리는 것.
+    // 알림함에 없으면(못 받았거나 지웠거나) 재발송은 뜬다.
     const { push, notifications } = loadServiceWorker(store);
     await push({ kind: 'end', id: 76, title: 't', body: 'b', ts: 1, resend: true });
     check('알림함에 없으면 재발송은 정상적으로 뜬다', notifications.length === 1,
       `${notifications.length}건`);
 
-    /*
-     * 그때 찍히는 시각은 서버가 payload 에 넣어 준 ts 그대로여야 한다.
-     * 여기서 Date.now() 로 덮으면 5분 전에 감지한 알림이 방금 일어난 일처럼
-     * 보인다 — 2026-09-17 에 실제로 그렇게 읽혔다(감지 19:28, 알림함 7:33).
-     */
+    // 시각은 payload 의 ts 그대로(2026-09-17: 감지 19:28 인데 알림함에 7:33 으로 찍혔음).
     const detectedAt = Date.parse('2026-09-17T10:28:34.334Z');
     await push({ kind: 'score', id: 77, title: 't', body: 'b', ts: detectedAt, resend: true });
     check('재발송 알림은 서버가 준 감지 시각으로 찍힌다',
@@ -1531,10 +1451,7 @@ async function testServiceWorkerVibrate() {
       String(notifications.at(-1).opts.timestamp));
   }
   {
-    /*
-     * 다른 이벤트가 떠 있다고 해서 이 이벤트를 받은 것은 아니다. tag 가 같아도
-     * 묻히면 안 된다 — 알림함에는 하나만 남되 그 하나가 새 이벤트여야 한다.
-     */
+    // 같은 tag 에 다른 이벤트가 떠 있으면 새 이벤트로 바뀌어야 한다.
     const { push, notifications } = loadServiceWorker(store);
     await push({ kind: 'score', id: 80, title: '먼저', body: 'b', ts: 1 });
     await push({ kind: 'score', id: 81, title: '나중', body: 'b', ts: 2, resend: true });
@@ -1543,11 +1460,7 @@ async function testServiceWorkerVibrate() {
       `${notifications.length}건 / ${notifications[0]?.title}`);
   }
   {
-    /*
-     * FCM 이 첫 푸시를 물고 있다가 재발송보다 늦게 흘리는 경우.
-     * 알림함 검사를 재발송에만 걸면 이 원래 푸시가 같은 tag 로 다시 울린다
-     * (renotify: true). 방향과 무관하게 막혀야 한다.
-     */
+    // 원본 푸시가 재발송보다 늦게 오는 경우도 다시 울리면 안 된다(renotify: true 라서).
     const { push, notifications, acks } = loadServiceWorker(store);
     await push({ kind: 'score', id: 90, title: 't', body: 'b', ts: 1, resend: true });
     await push({ kind: 'score', id: 90, title: 't', body: 'b', ts: 1 });
@@ -1558,11 +1471,11 @@ async function testServiceWorkerVibrate() {
   }
 }
 
-/* ══ 6-c. 배달 확인 — events.delivered_at ══ */
+/* ══ 6-c. 배달 확인(events.delivered_at) ══ */
 
 /**
- * INSERT/UPDATE 의 결과(meta.changes, last_row_id)만 흉내 내는 최소 D1.
- * 실행된 SQL 과 인자를 남겨 조건절이 의도대로인지도 본다.
+ * INSERT/UPDATE 결과(meta.changes, last_row_id)만 흉내 내는 D1.
+ * 실행한 SQL·인자를 남겨서 조건절도 확인한다.
  */
 function fakeWriteDb(meta) {
   const calls = [];
@@ -1579,12 +1492,12 @@ async function testDelivered() {
   const game = { gameId: 'G', gameDate: '2026-09-01', homeScore: 3, awayScore: 1 };
   const ev = { kind: 'score', series: 'regular', dedupKey: 'G:score:3-1', title: 't', body: 'b' };
 
-  // 새로 들어간 행의 id 를 돌려줘야 payload 에 실을 수 있다.
+  // 새 행 id 를 돌려줘야 payload 에 넣을 수 있다.
   const inserted = fakeWriteDb({ changes: 1, last_row_id: 66 });
   check('insertEvent 는 새 행의 id 를 돌려준다', (await insertEvent(inserted, game, ev)) === 66);
 
-  // OR IGNORE 로 건너뛰면 last_row_id 에 직전 값이 남아 있어도 null 이어야 한다 —
-  // 호출부가 이 값으로 "발송할지"를 정하므로 stale id 가 새면 중복 발송된다.
+  // OR IGNORE 로 건너뛰었으면 last_row_id 에 이전 값이 있어도 null 이어야 한다
+  // (아니면 중복 발송).
   const ignored = fakeWriteDb({ changes: 0, last_row_id: 66 });
   check('dedup 충돌이면 stale last_row_id 를 무시하고 null', (await insertEvent(ignored, game, ev)) === null);
 
@@ -1616,29 +1529,19 @@ async function testDelivered() {
     rows[0].id === 75 && rows[0].isHome === true && rows[0].gameId === '20260902HTNC02026',
     JSON.stringify(rows[0]));
 
-  // 실점(concede)이 발송 종류(score)로 돌아오지 않으면 subscribersFor 가 빈
-  // 배열을 줘 실점만 조용히 재발송되지 않는다.
+  // concede 가 score 로 안 바뀌면 실점만 재발송이 안 된다.
   check('재발송 대상은 발송 모양(kind·scope)으로 준다',
     rows[0].kind === 'score' && rows[0].scope === 'regular', JSON.stringify(rows[0]));
 
   const away = await listUndelivered(picked, 'LG', { olderThan: 'B', newerThan: 'A' });
   check('우리 팀이 홈이 아니면 isHome=false', away[0].isHome === false);
 
-  /*
-   * 재발송 알림의 시각은 재발송 시각이 아니라 원래 감지 시각이어야 한다.
-   *
-   * sw.js 가 이 값을 notification timestamp 로 써서 알림함에 찍는다. 재발송
-   * 시각을 쓰면 제때 감지한 알림이 5분 늦은 것처럼 보인다 — 2026-09-17 에
-   * 실제로 그렇게 읽혔다(감지 19:28:34, 알림함 "오후 7:33").
-   */
+  // 재발송 알림에는 원래 감지 시각이 찍혀야 한다(sw.js timestamp).
   check('재발송 대상은 원래 감지 시각을 함께 준다',
     rows[0].createdAt === '2026-09-17T10:28:34.334Z', rows[0].createdAt);
 
-  /*
-   * 조건절을 눈으로 확인한다. 하나라도 빠지면 조용히 어긋난다 —
-   * resent_at 을 빼면 매 틱 같은 알림이 다시 나가고, 창을 빼면 방금 보낸
-   * 알림까지 대상이 된다.
-   */
+  // 조건절 확인. resent_at 이 빠지면 매 틱 다시 보내고, 시간 조건이 빠지면
+  // 방금 보낸 알림까지 다시 보낸다.
   let q = '';
   await listUndelivered(
     { prepare: (sql) => { q = sql; return { bind() { return this; }, async all() { return { results: [] }; } }; } },
@@ -1649,9 +1552,8 @@ async function testDelivered() {
   check('아직 재발송 안 한 것만', /resent_at IS NULL/.test(q));
   check('창 밖은 제외', /created_at <= \?/.test(q) && /created_at >= \?/.test(q), q.replace(/\s+/g, ' '));
 
-  // SELECT 목록에서 빠지면 위 createdAt 이 undefined 가 되고, 호출부의
-  // `Date.parse(ev.createdAt) || Date.now()` 가 조용히 재발송 시각으로 되돌아간다.
-  // WHERE 절에도 e.created_at 이 있으므로 SELECT~FROM 사이만 본다.
+  // SELECT 에 created_at 이 없으면 재발송 시각이 찍힌다. WHERE 에도 있어서
+  // SELECT~FROM 사이만 본다.
   const selectList = /SELECT([^]*?)FROM/.exec(q)?.[1] ?? '';
   check('원래 감지 시각을 SELECT 목록에 넣는다',
     /e\.created_at/.test(selectList), selectList.replace(/\s+/g, ' ').trim());
@@ -1663,11 +1565,7 @@ async function testDelivered() {
       && resentDb.calls[0].args[1] === 75,
     resentDb.calls[0].sql);
 
-  /*
-   * events.kind 는 기록용 값이라 실점이 concede 로 남는다. 되돌리지 않고
-   * 발송하면 KIND_COLUMN 에 없어 subscribersFor 가 빈 배열을 주고, 실점
-   * 알림만 조용히 재발송되지 않는다.
-   */
+  // dispatchKindOf: 기록용 concede → 발송용 score.
   check('재발송 때 concede 는 score 로 되돌린다', dispatchKindOf('concede') === 'score');
   check('나머지 종류는 그대로', dispatchKindOf('end') === 'end' && dispatchKindOf('start') === 'start');
 }

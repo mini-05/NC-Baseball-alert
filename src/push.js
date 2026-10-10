@@ -1,9 +1,8 @@
 /**
  * Web Push 발송 (VAPID + aes128gcm).
  *
- * 외부 패키지(web-push 등)는 Node 전용 crypto 에 의존해 Workers 에서 그대로 쓸 수 없다.
- * 여기서는 WebCrypto 만으로 RFC 8292(VAPID), RFC 8291(페이로드 암호화),
- * RFC 8188(aes128gcm 인코딩)을 직접 구현한다.
+ * web-push 패키지는 Node crypto 를 써서 Workers 에서 못 쓴다. WebCrypto 로
+ * RFC 8292(VAPID), RFC 8291(페이로드 암호화), RFC 8188(aes128gcm)을 직접 구현했다.
  */
 
 import { B64URL } from './security.js';
@@ -26,7 +25,7 @@ export function b64urlToBytes(s) {
 export function bytesToB64url(buf) {
   const arr = new Uint8Array(buf);
   let bin = '';
-  // 인자 개수 한계를 피하려고 청크 단위로 문자열을 만든다.
+  // String.fromCharCode 인자 개수 제한 때문에 나눠서 만든다.
   const CHUNK = 0x8000;
   for (let i = 0; i < arr.length; i += CHUNK) {
     bin += String.fromCharCode(...arr.subarray(i, i + CHUNK));
@@ -60,7 +59,7 @@ async function hmacSha256(keyBytes, data) {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, data));
 }
 
-/** 출력이 32바이트 이하인 경우만 쓰므로 expand 는 1블록으로 충분하다. */
+/** 출력이 32바이트 이하일 때만 써서 expand 는 1블록만 한다. */
 async function hkdf(salt, ikm, info, length) {
   const prk = await hmacSha256(salt, ikm);
   const okm = await hmacSha256(prk, concat(info, new Uint8Array([1])));
@@ -69,18 +68,17 @@ async function hkdf(salt, ikm, info, length) {
 
 /* ---------- VAPID ---------- */
 
-// VAPID 키는 배포마다 고정이라, 한 번 import 한 CryptoKey 를 격리 인스턴스 생명 동안
-// 재사용한다. broadcast() 가 구독자 N명에게 보낼 때마다 같은 키를 다시 import 하는
-// crypto.subtle 호출(N회)을 1회로 줄인다.
+// VAPID 키는 배포 동안 안 바뀌니 import 한 CryptoKey 를 isolate 가 살아 있는 동안
+// 재사용한다. 구독자마다 다시 import 하지 않게.
 let cachedVapidKey = null; // { publicKeyB64, privateKeyB64, key }
 
 /**
- * base64url 로 저장된 VAPID 키쌍을 ECDSA 서명용 CryptoKey 로 되살린다.
- * 개인키(d)만으로는 JWK 를 구성할 수 없어 공개키에서 x, y 를 떼어 함께 넣는다.
+ * base64url VAPID 키쌍 → ECDSA 서명용 CryptoKey.
+ * JWK 에는 d 말고 x, y 도 필요해서 공개키에서 떼어 넣는다.
  */
 async function importVapidKey(publicKeyB64, privateKeyB64) {
-  // 키를 콘솔에서 붙여넣어 등록하다 보면 앞뒤 공백·줄바꿈이나 따옴표가 딸려 오기 쉽다.
-  // 그대로 두면 서명 단계에서야 알 수 없는 예외로 터지므로 여기서 정리한다.
+  // 시크릿을 붙여넣을 때 공백·줄바꿈·따옴표가 같이 들어가는 일이 많아서 정리한다.
+  // 안 그러면 서명할 때 알아보기 힘든 에러가 난다.
   const pubB64 = String(publicKeyB64 ?? '').trim().replace(/^["']|["']$/g, '');
   const privB64 = String(privateKeyB64 ?? '').trim().replace(/^["']|["']$/g, '');
 
@@ -98,7 +96,7 @@ async function importVapidKey(publicKeyB64, privateKeyB64) {
   if (!B64URL.test(privB64)) {
     throw new Error('VAPID_PRIVATE_KEY 가 base64url 형식이 아닙니다. genkeys 의 ② 값을 그대로 넣으세요.');
   }
-  // P-256 개인키는 32바이트 = base64url 43자. 값이 잘렸거나 공개키를 잘못 넣은 경우를 잡는다.
+  // P-256 개인키는 32바이트(base64url 43자). 잘렸거나 공개키를 넣은 경우를 잡는다.
   const privLen = b64urlToBytes(privB64).length;
   if (privLen !== 32) {
     throw new Error(
@@ -134,7 +132,7 @@ async function importVapidKey(publicKeyB64, privateKeyB64) {
     cachedVapidKey = { publicKeyB64: pubB64, privateKeyB64: privB64, key };
     return key;
   } catch (err) {
-    // 개인키와 공개키가 서로 다른 키쌍에서 나온 경우가 대표적이다.
+    // 주로 공개키·개인키가 서로 다른 키쌍일 때 난다.
     throw new Error(
       `VAPID 키 import 실패 — 공개키와 개인키가 같은 genkeys 실행에서 나온 값인지 확인하세요. (${err.message})`,
     );
@@ -174,7 +172,7 @@ export async function encryptPayload(plaintext, p256dhB64, authB64) {
 
   const uaPublicKey = await crypto.subtle.importKey('raw', uaPublicRaw, P256, true, []);
 
-  // 발신자 임시 키쌍. 메시지마다 새로 만든다.
+  // 발신자 임시 키쌍(메시지마다 새로).
   const asKeyPair = await crypto.subtle.generateKey(P256, true, ['deriveBits']);
   const asPublicRaw = new Uint8Array(
     await crypto.subtle.exportKey('raw', asKeyPair.publicKey),
@@ -196,7 +194,7 @@ export async function encryptPayload(plaintext, p256dhB64, authB64) {
   const cek = await hkdf(salt, ikm, utf8('Content-Encoding: aes128gcm\0'), 16);
   const nonce = await hkdf(salt, ikm, utf8('Content-Encoding: nonce\0'), 12);
 
-  // 평문 뒤에 패딩 구분자 0x02(마지막 레코드)를 붙인다.
+  // 평문 뒤에 패딩 구분자 0x02(마지막 레코드).
   const padded = concat(utf8(plaintext), new Uint8Array([0x02]));
 
   const aesKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, [
@@ -216,10 +214,10 @@ export async function encryptPayload(plaintext, p256dhB64, authB64) {
 /* ---------- 발송 ---------- */
 
 /**
- * 구독 하나에 푸시를 보낸다.
+ * 구독 하나에 푸시 발송.
  *
  * @returns {Promise<{ok: boolean, status: number, gone: boolean}>}
- *   gone === true 이면 구독이 만료·해지된 것이므로 호출자가 DB에서 지워야 한다.
+ *   gone 이면 만료·해지된 구독이라 호출부에서 DB 에서 지운다.
  */
 export async function sendPush(subscription, payloadObject, env) {
   const { endpoint, p256dh, auth } = subscription;
@@ -241,28 +239,22 @@ export async function sendPush(subscription, payloadObject, env) {
       TTL: '86400',
       Urgency: 'high',
       /*
-       * RFC 8030 §5.4 — 푸시 서비스가 아직 못 전한 같은 topic 의 메시지를 이것으로
-       * 교체한다. 범위는 경기 하나다. sw.js 의 tag 와 같은 범위이고, 같은 이유다 —
-       * 단말이 자는 동안 쌓인 득점 알림 중 의미 있는 것은 마지막 하나다.
+       * Topic(RFC 8030 §5.4): 아직 전달 안 된 같은 topic 메시지를 새 것으로 바꾼다.
+       * sw.js tag 와 같이 경기 단위로 묶는다. 기기가 잠들어 있는 동안 쌓인 알림은
+       * 마지막 것만 있으면 된다.
        *
-       * 처음에는 이벤트마다 다른 값(`e${eventId}`)을 썼는데 그게 틀렸다. FCM 은
-       * 단말당 서로 다른 collapse key 를 *네 개까지만* 들고 있고, 넘기면 어느 것을
-       * 버릴지 정해지지 않는다. 한 경기에 이벤트가 열 개 넘게 나므로 제한을 몇 배로
-       * 넘겼다. 2026-10-10 실측: 14개 이벤트 중 뒤쪽 4건이 끝내 도착하지 않았고,
-       * 그날 지연도 444·236·949초까지 튀었다. 경기 단위면 키가 하나라 안 넘는다.
+       * 이벤트 단위로 하면 안 된다. FCM 은 기기당 collapse key 를 4개까지만 갖고,
+       * 넘으면 아무거나 버린다. 2026-10-10 경기(이벤트 14개)에서 뒤쪽 4건이 끝내
+       * 안 왔다. 경기 단위면 키가 하나다.
        *
-       * 덤으로 도즈에서 깨어날 때 밀린 것이 한꺼번에 쏟아지지 않는다 — FCM 이
-       * 최신 하나만 들고 있다가 그것만 준다.
-       *
-       * 값 제한은 32자·URL-safe base64 알파벳이다. gameId 는 "20261010HHNC02026"
-       * 꼴이라 18자로 들어간다. 테스트 알림에는 gameId 가 없어 붙이지 않는다 —
-       * 묶을 짝이 없다.
+       * 값은 32자 이하 URL-safe base64 문자만 된다. "g" + gameId 가 18자.
+       * 테스트 알림은 gameId 가 없어서 안 붙인다.
        */
       ...(payloadObject.gameId ? { Topic: `g${payloadObject.gameId}` } : {}),
     },
     body,
   });
 
-  // 404/410 은 구독 폐기를 뜻하는 표준 응답이다.
+  // 404/410 = 구독 없어짐.
   return { ok: res.ok, status: res.status, gone: res.status === 404 || res.status === 410 };
 }

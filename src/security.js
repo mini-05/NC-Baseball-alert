@@ -1,9 +1,9 @@
 /**
  * 입력 검증과 접근 제어.
  *
- * 이 서비스에서 가장 위험한 지점은 /api/subscribe 다. 클라이언트가 준 endpoint 로
- * 서버가 직접 HTTP 요청을 보내기 때문에, 검증 없이 받으면 Worker 가 임의의 주소로
- * POST 를 날리는 도구(SSRF)가 된다. 그래서 알려진 푸시 서비스 호스트만 허용한다.
+ * 제일 위험한 곳은 /api/subscribe 다. 받은 endpoint 로 서버가 직접 POST 를 보내니까
+ * 검증 없이 받으면 아무 주소로나 요청을 보내게 된다(SSRF). 알려진 푸시 서비스
+ * 호스트만 허용한다.
  */
 
 /* ─────────────── 푸시 엔드포인트 허용 목록 ─────────────── */
@@ -15,7 +15,7 @@ const EXACT_HOSTS = new Set([
   'web.push.apple.com',        // Safari / iOS
 ]);
 
-/** 이 접미사로 끝나야 하는 호스트 (서브도메인이 동적으로 붙는 서비스) */
+/** 서브도메인이 바뀌는 서비스용 접미사 */
 const HOST_SUFFIXES = [
   '.push.services.mozilla.com', // Firefox
   '.notify.windows.com',        // Windows WNS
@@ -25,7 +25,7 @@ const HOST_SUFFIXES = [
 const MAX_ENDPOINT_LEN = 1024;
 
 /**
- * 푸시 엔드포인트를 검증한다.
+ * 푸시 엔드포인트 검증.
  * @param {string} endpoint
  * @param {string} [extraHosts] 쉼표로 구분한 추가 허용 호스트 (env.EXTRA_PUSH_HOSTS)
  * @returns {{ok: true} | {ok: false, reason: string}}
@@ -61,8 +61,8 @@ export function validateEndpoint(endpoint, extraHosts = '') {
     HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 
   if (!allowed) {
-    // 새 브라우저가 새 호스트를 쓰기 시작하면 여기서 걸린다.
-    // 로그를 보고 EXTRA_PUSH_HOSTS 에 추가하면 코드 수정 없이 풀 수 있다.
+    // 브라우저가 새 푸시 호스트를 쓰면 여기서 막힌다.
+    // EXTRA_PUSH_HOSTS 에 넣으면 코드 수정 없이 허용된다.
     return { ok: false, reason: `허용되지 않은 푸시 호스트입니다: ${host}` };
   }
 
@@ -73,14 +73,14 @@ export function validateEndpoint(endpoint, extraHosts = '') {
 
 export const B64URL = /^[A-Za-z0-9_-]+$/;
 
-/** base64url 문자열의 디코딩 후 바이트 수를 계산한다. (실제 디코딩 없이) */
+/** base64url 디코딩 후 바이트 수(실제로 디코딩하지 않고 계산). */
 function b64urlByteLength(s) {
   return Math.floor((s.length * 3) / 4);
 }
 
 /**
- * p256dh(65바이트 비압축 P-256 점)와 auth(16바이트 시크릿)를 검증한다.
- * 형식이 틀린 값을 그대로 저장하면 발송 시점에야 터지므로 입력에서 막는다.
+ * p256dh(65바이트 비압축 P-256 점), auth(16바이트) 검증.
+ * 잘못된 값을 저장하면 발송할 때 가서야 에러가 나니까 받을 때 막는다.
  */
 export function validateKeys(p256dh, auth) {
   if (typeof p256dh !== 'string' || !B64URL.test(p256dh)) {
@@ -100,12 +100,12 @@ export function validateKeys(p256dh, auth) {
 
 /* ─────────────── 요청 검증 ─────────────── */
 
-/** JSON 본문 크기 상한. 구독 정보는 1KB 를 넘지 않는다. */
+/** JSON 본문 크기 상한. 구독 정보는 1KB 안쪽이다. */
 const MAX_BODY_BYTES = 4096;
 
 /**
- * 요청 본문을 안전하게 JSON 으로 읽는다.
- * Content-Length 로 먼저 걸러 큰 본문을 메모리에 올리지 않는다.
+ * 요청 본문을 JSON 으로 읽는다. 크기 제한 있음.
+ * Content-Length 로 먼저 걸러서 큰 본문은 읽지 않는다.
  */
 export async function readJson(request) {
   const declared = Number(request.headers.get('Content-Length') ?? 0);
@@ -114,10 +114,8 @@ export async function readJson(request) {
   }
 
   const text = await request.text();
-  // text.length 는 문자 수라 한글처럼 UTF-8 로 3바이트인 문자가 섞이면 실제
-  // 바이트 수보다 최대 3배 작게 나온다 — Content-Length 헤더 없이(또는 거짓
-  // 값으로) 오는 요청은 위 검사를 피해 이 줄만 남으므로, 여기서는 실제
-  // 바이트 수로 다시 잰다.
+  // Content-Length 가 없거나 거짓인 요청은 여기서 다시 잰다. text.length 는 문자
+  // 수라 한글이 섞이면 바이트 수보다 작게 나와서 실제 바이트로 잰다.
   if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
     return { ok: false, reason: '요청 본문이 너무 큽니다.' };
   }
@@ -134,12 +132,11 @@ export async function readJson(request) {
 }
 
 /**
- * 상태를 바꾸는 요청은 같은 출처에서 와야 한다.
+ * 상태를 바꾸는 요청은 같은 출처에서만 받는다.
  *
- * Content-Type: application/json 은 프리플라이트를 유발하므로 브라우저發 CSRF 는
- * 이미 대부분 막히지만, Origin 을 명시적으로 확인해 의도를 코드에 남긴다.
- * Origin 헤더가 아예 없는 요청(curl 등)은 브라우저가 아니므로 통과시킨다 —
- * CSRF 는 피해자의 브라우저를 이용하는 공격이라 Origin 이 반드시 붙는다.
+ * application/json 이면 프리플라이트가 걸려서 CSRF 는 대부분 막히지만 Origin 도
+ * 직접 확인한다. Origin 이 없는 요청(curl 등)은 브라우저가 아니라서 통과시킨다.
+ * CSRF 는 브라우저를 통해서 오니 Origin 이 항상 붙는다.
  */
 export function checkOrigin(request, url) {
   const origin = request.headers.get('Origin');
@@ -148,8 +145,8 @@ export function checkOrigin(request, url) {
 }
 
 /**
- * 관리자 전용 엔드포인트 인증.
- * ADMIN_TOKEN 시크릿이 설정돼 있지 않으면 해당 기능을 잠근다(기본 거부).
+ * 관리자 엔드포인트 인증.
+ * ADMIN_TOKEN 시크릿이 없으면 항상 거부.
  */
 export function isAdmin(request, env) {
   const expected = env.ADMIN_TOKEN;
@@ -159,7 +156,7 @@ export function isAdmin(request, env) {
   return timingSafeEqual(got, expected);
 }
 
-/** 길이·내용 비교 시간을 입력에 무관하게 만든다. */
+/** 비교 시간이 입력에 따라 달라지지 않게 한다(타이밍 공격 방지). */
 function timingSafeEqual(a, b) {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -167,21 +164,20 @@ function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
-/** 테스트 알림 최소 간격(초). 같은 구독이 이보다 자주 보내지 못한다. */
+/** 테스트 알림 최소 간격(초). 구독마다 적용. */
 export const TEST_COOLDOWN_SEC = 30;
 
 /**
- * 무료 플랜이 워커 호출 하나에 허용하는 외부 요청(subrequest) 수.
- * 이 예산이 구독 수 상한을 정한다 — 아래 MAX_SUBSCRIPTIONS 참고.
+ * 무료 플랜의 워커 호출당 외부 요청(subrequest) 한도.
+ * 구독 수 상한이 이걸로 정해진다(아래 MAX_SUBSCRIPTIONS).
  */
 export const SUBREQUEST_BUDGET = 50;
 
 /**
- * 저장 가능한 최대 구독 수.
+ * 최대 구독 수.
  *
- * 이 값을 정하는 것은 저장 공간이 아니라 위 subrequest 예산이다. broadcast 가
- * 구독 수만큼 fetch 를 한꺼번에 날리기 때문이다(index.js `Promise.allSettled`).
- * 크론 한 번이 쓰는 최악의 예산은 N 을 구독 수라 할 때:
+ * 저장 공간이 아니라 subrequest 한도 때문에 정한 값이다. broadcast 가 구독 수만큼
+ * fetch 를 보낸다(index.js). 구독 수를 N 이라 하면 크론 한 번에 최악의 경우:
  *
  *   재발송 1건                                    N
  *   폴링 POLLS_PER_TICK(2)회, 회당
@@ -191,17 +187,13 @@ export const SUBREQUEST_BUDGET = 50;
  *
  *   = N + 2 × (2 + 2N) = 5N + 4 ≤ 50  →  N ≤ 9
  *
- * 동시에 진행되는 경기는 하나로 본다. 더블헤더도 순차라 한쪽이 끝난 뒤
- * 다른 쪽이 시작하므로, 이벤트가 나는 경기는 어느 순간에도 하나다.
+ * 동시에 진행되는 경기는 하나로 본다(더블헤더도 순서대로 열린다).
+ * 9 가 아니라 8 인 건 계산에 안 들어간 호출을 위한 여유. selftest [7-c] 가 확인한다.
  *
- * 9 가 아니라 8 로 두는 것은 위 계산에 안 잡힌 호출 하나를 위한 여유다.
- * 자체 검증이 이 부등식을 상수로 다시 계산해 지키는지 확인한다.
+ * 한도를 넘으면 51번째 fetch 부터 실패하는데 allSettled 라 틱은 성공으로 끝나고
+ * 뒤쪽 구독자만 알림을 못 받는다. 그래서 저장 단계에서 개수를 묶어 둔다
+ * (꽉 차면 거절하지 않고 가장 오래된 구독을 지운다. db.js makeRoomForSubscription).
  *
- * 넘기면 조용히 깨진다 — 51번째 fetch 부터 예외가 나는데 broadcast 의
- * allSettled 가 rejected 로 기록만 하고 틱은 성공으로 끝난다. 앞쪽 구독자는
- * 받고 뒤쪽은 못 받는데 서버는 다 보냈다고 여긴다. 그래서 문 앞에서 막는다.
- *
- * 이 천장을 올리려면 broadcast 를 여러 호출로 쪼개야 한다. 구독이 8을
- * 채우기 전에는 없는 문제라 지금은 상한만 정직하게 둔다.
+ * 상한을 올리려면 broadcast 를 여러 호출로 나눠야 한다. 구독이 8개 찰 때 할 일.
  */
 export const MAX_SUBSCRIPTIONS = 8;
