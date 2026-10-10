@@ -149,11 +149,16 @@ async function testVapid() {
   check('공백·따옴표가 붙어도 통과', padded.startsWith('vapid t='));
 }
 
-/* ══ 2-b. 재발송 묶음(Topic) ══ */
+/* ══ 2-b. 발송 묶음(Topic) ══ */
 
 /**
- * 원본과 재발송이 같은 Topic 으로 나가야 FCM 이 대기 중인 원본을 교체한다.
- * 값이 달라지면(예: Date.now() 를 섞으면) 교체가 안 돼 알림이 두 번 울린다.
+ * Topic 의 범위는 경기 하나다. sw.js 의 tag 와 같은 범위여야 서버가 보내는 것과
+ * 단말이 보여 주는 것이 어긋나지 않는다.
+ *
+ * 처음에는 이벤트마다 다른 값을 썼는데, FCM 이 단말당 서로 다른 collapse key 를
+ * 네 개까지만 들고 있어서 한 경기(이벤트 10여 개)면 제한을 몇 배로 넘겼다.
+ * 2026-10-10 에 뒤쪽 4건이 끝내 안 왔다. 그래서 여기서는 "한 경기의 모든
+ * 이벤트가 같은 Topic 인가" 와 "서로 다른 키가 몇 개나 생기는가" 를 본다.
  */
 async function testTopic() {
   const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
@@ -171,19 +176,40 @@ async function testTopic() {
   const sent = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => { sent.push(init.headers); return { ok: true, status: 201 }; };
+
+  const GAME = '20261010HHNC02026';
+  const OTHER = '20261011HHNC02026';
   try {
-    await sendPush(sub, { kind: 'score', id: 77, ts: 1000 }, env);
-    await sendPush(sub, { kind: 'score', id: 77, ts: 1000, resend: true }, env);
-    await sendPush(sub, { kind: 'score', id: 78, ts: 2000 }, env);
+    // 2026-10-10 한화전과 같은 모양 — 한 경기에 이벤트 14건.
+    for (let i = 1; i <= 14; i++) {
+      await sendPush(sub, { kind: 'score', id: i, gameId: GAME, ts: i * 1000 }, env);
+    }
+    // 재발송은 원본과 같은 경기다.
+    await sendPush(sub, { kind: 'score', id: 3, gameId: GAME, ts: 3000, resend: true }, env);
+    // 다른 경기.
+    await sendPush(sub, { kind: 'start', id: 99, gameId: OTHER, ts: 99000 }, env);
+    // 테스트 알림에는 gameId 가 없다.
     await sendPush(sub, { kind: 'test', title: '테스트 알림', ts: 3000 }, env);
   } finally {
     globalThis.fetch = originalFetch;
   }
 
-  check('원본과 재발송의 Topic 이 같다', sent[0].Topic === sent[1].Topic && sent[0].Topic === 'e77',
-    `${sent[0].Topic} / ${sent[1].Topic}`);
-  check('다른 이벤트는 다른 Topic', sent[2].Topic === 'e78', sent[2].Topic);
-  check('테스트 알림에는 Topic 이 없다', sent[3].Topic === undefined, String(sent[3].Topic));
+  const gameTopics = new Set(sent.slice(0, 15).map((h) => h.Topic));
+  check('한 경기의 모든 이벤트가 같은 Topic (재발송 포함)',
+    gameTopics.size === 1 && [...gameTopics][0] === `g${GAME}`, [...gameTopics].join(','));
+
+  check('다른 경기는 다른 Topic', sent[15].Topic === `g${OTHER}`, sent[15].Topic);
+  check('테스트 알림에는 Topic 이 없다', sent[16].Topic === undefined, String(sent[16].Topic));
+
+  /*
+   * 핵심 검사. FCM 은 단말당 서로 다른 collapse key 를 4개까지만 들고 있고,
+   * 넘기면 어느 것을 버릴지 정해지지 않는다. 한 경기가 키 하나를 넘게 쓰면
+   * 이 줄이 깨진다 — 2026-10-10 의 재발을 막는 것이 이 검사의 목적이다.
+   */
+  const FCM_COLLAPSE_KEY_LIMIT = 4;
+  const distinct = new Set(sent.map((h) => h.Topic).filter(Boolean)).size;
+  check(`경기 둘을 보내도 서로 다른 Topic 이 ${FCM_COLLAPSE_KEY_LIMIT}개를 안 넘는다 (${distinct}개)`,
+    distinct <= FCM_COLLAPSE_KEY_LIMIT, `${distinct}개`);
 
   // RFC 8030 §5.4 — 32자 이내, URL-safe base64 알파벳만.
   check('Topic 이 RFC 8030 제한을 지킨다',
