@@ -398,12 +398,16 @@ async function handleApi(request, env, url) {
   /** 순위와 포스트시즌 진출 상황. 데이터가 없으면 standings 가 null. */
   if (path === '/api/standings' && method === 'GET') {
     const { year, date } = kstNow();
-    const standings = await loadStandings(env, year);
+    // 둘은 서로 필요 없으니 같이 받는다. 비시즌에도 오늘 상태는 6시간 캐시라
+    // 같이 불러도 낭비가 거의 없다.
+    const [standings, todayStatus] = await Promise.all([
+      loadStandings(env, year),
+      loadTodayStatus(env, date, year),
+    ]);
     if (!standings) return json({ standings: null, outlook: null });
 
     // 잔여 경기와 오늘 경기 상태는 응답에서만 붙인다. 오늘 상태는 순위보다 자주
     // 바뀌어서 순위 캐시에 넣지 않는다.
-    const todayStatus = await loadTodayStatus(env, date, year);
 
     return json({
       standings: {
