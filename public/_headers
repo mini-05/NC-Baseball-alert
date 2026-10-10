@@ -1,0 +1,9 @@
+# 정적 파일 응답 헤더. 파일이 있는 경로는 워커를 거치지 않고 바로 나가서
+# (run_worker_first 기본값 false) 헤더는 워커가 아니라 여기서 붙인다.
+# CSP: 스크립트는 자기 출처만(인라인 금지). 외부는 웹폰트만
+#   Google Fonts(Cormorant Garamond, Inter, Noto Serif KR), jsdelivr(Pretendard).
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: same-origin
+  Permissions-Policy: geolocation=(), microphone=(), camera=()

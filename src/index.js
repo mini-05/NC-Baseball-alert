@@ -569,37 +569,7 @@ async function handleApi(request, env, url) {
 
 /* ============================ 정적 파일 ============================ */
 
-/**
- * 정적 파일 응답에 붙이는 보안 헤더. CSP 로 인라인 스크립트를 막는다
- * (앱 CSS/JS 는 전부 별도 파일이라 인라인이 필요 없다).
- *
- * 주의: wrangler.toml 에 run_worker_first 가 없어서, 파일이 있는 경로는 워커를
- * 안 거치고 바로 응답될 수 있다. 그 경우 이 헤더가 안 붙는다.
- */
-const CSP = [
-  "default-src 'self'",
-  "script-src 'self'",
-  // 외부는 웹폰트만 허용.
-  //   Google Fonts: Cormorant Garamond, Inter, Noto Serif KR
-  //   jsdelivr:     Pretendard(본문 한글)
-  // Tossface 는 index.html 에 SVG 로 들어 있어서 필요 없다.
-  "style-src 'self' https://fonts.googleapis.com https://cdn.jsdelivr.net",
-  "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net",
-  "img-src 'self' data:",
-  "connect-src 'self'",
-  "frame-ancestors 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-].join('; ');
-
-function withSecurityHeaders(res) {
-  const headers = new Headers(res.headers);
-  headers.set('Content-Security-Policy', CSP);
-  headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('Referrer-Policy', 'same-origin');
-  headers.set('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
-}
+// 정적 파일 보안 헤더(CSP 등)는 public/_headers 에 있다.
 
 export default {
   async fetch(request, env, ctx) {
@@ -615,7 +585,7 @@ export default {
       }
     }
 
-    return withSecurityHeaders(await env.ASSETS.fetch(request));
+    return env.ASSETS.fetch(request);
   },
 
   async scheduled(event, env, ctx) {

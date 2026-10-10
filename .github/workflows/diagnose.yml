@@ -89,6 +89,11 @@ jobs:
               end' hist.json
 
           # 순위와 팀별 잔여 경기. 남은 경기가 있는지(검증할 경기가 있는지)도 여기서 본다.
+          # 정적 파일 보안 헤더(public/_headers)가 실제로 붙는지.
+          echo
+          echo "── 보안 헤더 (/) ──"
+          curl -sSI "$BASE/" | grep -iE '^(content-security-policy|x-content-type-options|referrer-policy|permissions-policy):' || echo "  보안 헤더 없음"
+
           echo
           echo "── 순위 (잔여 경기 포함) ──"
           curl -sS "$BASE/api/standings" > rank.json
