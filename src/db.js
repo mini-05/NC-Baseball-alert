@@ -5,6 +5,9 @@ import { perspective, scopeOf } from './kbo.js';
 
 const nowIso = () => new Date().toISOString();
 
+/** 알림 설정 키 → subscriptions 컬럼. 설정 읽기·쓰기와 API 입력 검증이 모두 이것만 본다. */
+export const SETTING_COLUMN = { ...KIND_COLUMN, ...SCOPE_COLUMN, homeOnly: 'home_only' };
+
 /* ─────────────── 캐시 ─────────────── */
 
 /** 캐시 값. 없거나, allowExpired 가 아닌데 만료됐으면 null. */
@@ -453,35 +456,23 @@ export async function getSubscription(db, endpoint) {
 
 export async function getSettings(db, endpoint) {
   const row = await db
-    .prepare(
-      `SELECT on_start, on_cancel, on_score, on_end, on_regular, on_postseason, home_only
-       FROM subscriptions WHERE endpoint = ?`,
-    )
+    .prepare(`SELECT ${Object.values(SETTING_COLUMN)} FROM subscriptions WHERE endpoint = ?`)
     .bind(endpoint)
     .first();
 
   if (!row) return null;
-  return {
-    start: Boolean(row.on_start),
-    cancel: Boolean(row.on_cancel),
-    score: Boolean(row.on_score),
-    end: Boolean(row.on_end),
-    regular: Boolean(row.on_regular),
-    postseason: Boolean(row.on_postseason),
-    homeOnly: Boolean(row.home_only),
-  };
+  return Object.fromEntries(Object.entries(SETTING_COLUMN).map(([name, col]) => [name, Boolean(row[col])]));
 }
 
 /**
  * settings 에 들어 있는 항목만 갱신한다.
- * 컬럼명은 아래 고정 목록에서만 나오므로 입력값이 SQL 식별자로 들어갈 일은 없다.
+ * 컬럼명은 SETTING_COLUMN 에서만 나오므로 입력값이 SQL 식별자로 들어갈 일은 없다.
  */
 export async function updateSettings(db, endpoint, settings) {
-  const columns = { ...KIND_COLUMN, ...SCOPE_COLUMN, homeOnly: 'home_only' };
   const sets = [];
   const values = [];
 
-  for (const [name, column] of Object.entries(columns)) {
+  for (const [name, column] of Object.entries(SETTING_COLUMN)) {
     if (name in settings) {
       sets.push(`${column} = ?`);
       values.push(settings[name] ? 1 : 0);

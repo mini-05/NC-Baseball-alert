@@ -21,7 +21,7 @@ import { validateEndpoint, validateKeys, checkOrigin, readJson, MAX_SUBSCRIPTION
          SUBREQUEST_BUDGET } from '../src/security.js';
 import { subscribersFor, getCache, putCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
          listUndelivered, markResent, makeRoomForSubscription, saveSubscription,
-         deleteSubscription } from '../src/db.js';
+         deleteSubscription, getSettings, updateSettings, SETTING_COLUMN } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -970,6 +970,26 @@ async function testHomeOnly() {
   check('모르는 값이면 쿼리도 안 나간다', d.calls.length === 0, String(d.calls.length));
 }
 
+/** 알림 설정 읽기·쓰기가 SETTING_COLUMN 하나로 화면 스위치와 맞물리는지. */
+async function testSettings() {
+  // 화면의 설정 스위치(data-key)와 서버가 받는 키가 같아야 한다. 어긋나면 그 스위치는 저장이 안 된다.
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const uiKeys = [...html.matchAll(/data-key="(\w+)"/g)].map((m) => m[1]).sort().join();
+  check('화면 스위치 키 = 서버 설정 키', uiKeys === Object.keys(SETTING_COLUMN).sort().join(), uiKeys);
+
+  const { db, insert } = sqliteD1();
+  insert('subscriptions', { endpoint: 'e', p256dh: 'p', auth: 'a', created_at: 'x', updated_at: 'x' });
+  const all = await getSettings(db, 'e');
+  check('기본값: 알림 전부 켬, 홈경기만은 끔',
+    Object.entries(all).every(([k, v]) => v === (k !== 'homeOnly')), JSON.stringify(all));
+
+  await updateSettings(db, 'e', { score: false, homeOnly: true, bogus: true });
+  const after = await getSettings(db, 'e');
+  check('준 항목만 바뀐다', after.score === false && after.homeOnly === true && after.start === true, JSON.stringify(after));
+  check('모르는 키는 결과에 없다', !('bogus' in after));
+  check('없는 구독은 null', (await getSettings(db, 'none')) === null);
+}
+
 /* ══ 9. 전광판 조회 ══ */
 
 /** 네이버 record 응답. 2026-08-22 SS@NC 실제 응답에서 가져왔다. */
@@ -1546,6 +1566,7 @@ console.log('\n[7-b] 본문 크기 상한(바이트)'); await testReadJsonByteLi
 console.log('\n[7-c] 구독 상한 vs subrequest 예산'); testSubrequestBudget();
 console.log('\n[7-d] 상한 도달 시 알림 수신'); await testSubscriptionEviction();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
+console.log('\n[8-b] 알림 설정 읽기·쓰기');  await testSettings();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
 console.log('\n[10-b] 개막일 미확정 캐시');    await testOpenerCaching();

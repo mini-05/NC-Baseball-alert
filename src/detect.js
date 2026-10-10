@@ -9,8 +9,6 @@
 import { josa } from 'es-hangul';
 import { perspective, SERIES, scopeOf, inningSumMatches } from './kbo.js';
 
-export const KINDS = ['start', 'cancel', 'score', 'end'];
-
 /** 알림 종류 → subscriptions 테이블의 on/off 컬럼명 */
 export const KIND_COLUMN = {
   start: 'on_start',
@@ -30,7 +28,6 @@ export function dispatchKindOf(recordKind) {
 }
 
 /** 시리즈 범위 → subscriptions 테이블의 on/off 컬럼명 */
-export const SCOPES = ['regular', 'postseason'];
 export const SCOPE_COLUMN = {
   regular: 'on_regular',
   postseason: 'on_postseason',
@@ -95,9 +92,9 @@ export function detectEvents(prev, cur, teamCode) {
    * isHome: "홈경기만 받기" 필터용.
    *
    * kind       발송용. KIND_COLUMN 으로 구독 on/off 컬럼을 고르고 sw.js 진동
-   *            패턴도 이걸로 정한다. KINDS 밖의 값이면 수신자가 0명이 된다.
+   *            패턴도 이걸로 정한다. KIND_COLUMN 에 없는 값이면 수신자가 0명이 된다.
    * recordKind 기록용. events 에 저장되고 기록 탭 라벨·아이콘(app.js KIND_LABEL)이
-   *            이걸 본다. 발송에는 안 쓰여서 'concede' 처럼 KINDS 밖의 값도 된다.
+   *            이걸 본다. 발송에는 안 쓰여서 'concede' 처럼 KIND_COLUMN 에 없는 값도 된다.
    *
    * 기본은 둘이 같고, 실점만 kind=score / recordKind=concede 로 갈린다.
    */

@@ -8,7 +8,7 @@ import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
   fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, headToHead,
 } from './kbo.js';
-import { detectEvents, KINDS, SCOPES } from './detect.js';
+import { detectEvents } from './detect.js';
 import { sendPush } from './push.js';
 import {
   loadDailyPlan, pollWindowGames, loadStandings, loadSchedule, loadTodayStatus,
@@ -19,7 +19,7 @@ import {
   loadStates, upsertStateStmt, insertEvent, listHistory, insertPollLogStmt,
   saveSubscription, deleteSubscription, getSubscription, getSettings,
   updateSettings, subscribersFor, makeRoomForSubscription, touchTestSent, pruneOtherSeasons,
-  allSettledBefore, markDelivered, listUndelivered, markResent,
+  allSettledBefore, markDelivered, listUndelivered, markResent, SETTING_COLUMN,
 } from './db.js';
 import {
   validateEndpoint, validateKeys, readJson, checkOrigin, isAdmin,
@@ -475,7 +475,7 @@ async function handleApi(request, env, url) {
 
     // 아는 키의 boolean 값만 받는다.
     const patch = {};
-    for (const name of [...KINDS, ...SCOPES, 'homeOnly']) {
+    for (const name of Object.keys(SETTING_COLUMN)) {
       if (typeof req.body[name] === 'boolean') patch[name] = req.body[name];
     }
     if (Object.keys(patch).length === 0) {

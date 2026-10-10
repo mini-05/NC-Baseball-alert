@@ -91,7 +91,7 @@ export function seriesOf(gameId) {
 
 export const isPostseason = (series) => SERIES[series]?.post === true;
 
-/** 알림 설정의 시리즈 범위(SCOPES): regular | postseason */
+/** 알림 설정의 시리즈 범위(SCOPE_COLUMN 키): regular | postseason */
 export const scopeOf = (series) => (isPostseason(series) ? 'postseason' : 'regular');
 
 /**
