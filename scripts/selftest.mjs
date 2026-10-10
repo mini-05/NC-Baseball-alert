@@ -21,7 +21,7 @@ import { validateEndpoint, validateKeys, checkOrigin, readJson, MAX_SUBSCRIPTION
          SUBREQUEST_BUDGET } from '../src/security.js';
 import { subscribersFor, getCache, putCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
          listUndelivered, markResent, makeRoomForSubscription, saveSubscription,
-         deleteSubscription, getSettings, updateSettings, SETTING_COLUMN } from '../src/db.js';
+         deleteSubscription, getSettings, updateSettings, SETTING_COLUMN, listHistory } from '../src/db.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -990,6 +990,35 @@ async function testSettings() {
   check('없는 구독은 null', (await getSettings(db, 'none')) === null);
 }
 
+/** 기록 탭 데이터: 이번 시즌·최근 N일만, 최신순, 우리 팀 기준으로 내려오는지. */
+async function testHistory() {
+  const d = sqliteD1();
+  const game = (game_id, game_date, home_code, away_code, home_score, away_score, scoreboard = null) =>
+    d.insert('game_state', { game_id, game_date, start_at: `${game_date}T18:30:00`, home_code,
+      home_name: home_code, away_code, away_name: away_code, home_score, away_score,
+      phase: 'result', series: 'regular', status_code: 'RESULT', scoreboard, updated_at: 'x' });
+  const board = JSON.stringify({ home: { innings: [1] }, away: { innings: [0] } });
+  game('20260808LGNC02026', '2026-08-08', 'NC', 'LG', 5, 3, board); // 홈
+  game('20260809NCSS02026', '2026-08-09', 'SS', 'NC', 2, 4);        // 원정
+  game('20260810NCKT02026', '2026-08-10', 'KT', 'NC', 1, 0);
+  game('20250810NCKT02025', '2025-08-10', 'KT', 'NC', 9, 9);        // 지난 시즌
+  const ev = (game_id, kind, id) => d.insert('events', { game_id, game_date: `${game_id.slice(0, 4)}-${game_id.slice(4, 6)}-${game_id.slice(6, 8)}`, kind, dedup_key: `${game_id}${kind}`,
+    title: kind, body: 'b', created_at: `t${id}` });
+  ev('20260808LGNC02026', 'start', 1);
+  ev('20260808LGNC02026', 'end', 2);
+  ev('20250810NCKT02025', 'end', 3);
+
+  const rows = await listHistory(d.db, { limitDays: 2, seasonYear: 2026, teamCode: 'NC' });
+  check('최근 2일, 최신순, 지난 시즌 제외', rows.map((r) => r.gameDate).join() === '2026-08-10,2026-08-09', rows.map((r) => r.gameDate).join());
+  check('원정 경기도 우리 팀 기준 점수', rows[1].isHome === false && rows[1].teamScore === 4 && rows[1].oppScore === 2);
+
+  const all = await listHistory(d.db, { limitDays: 30, seasonYear: 2026, teamCode: 'NC' });
+  const home = all.find((r) => r.gameId === '20260808LGNC02026');
+  check('경기별 이벤트가 순서대로 붙는다', home.events.map((e) => e.kind).join() === 'start,end');
+  check('전광판도 우리 팀/상대로 바꿔 준다', home.scoreboard.team.innings[0] === 1 && home.scoreboard.opp.innings[0] === 0);
+  check('D1 왕복은 요청당 한 번', d.roundTrips.batch === 2, String(d.roundTrips.batch));
+}
+
 /* ══ 9. 전광판 조회 ══ */
 
 /** 네이버 record 응답. 2026-08-22 SS@NC 실제 응답에서 가져왔다. */
@@ -1512,6 +1541,7 @@ function sqliteD1() {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
   const calls = [];
+  const roundTrips = { batch: 0 };
   const db = {
     prepare(sql) {
       calls.push(sql);
@@ -1525,12 +1555,15 @@ function sqliteD1() {
           const r = st.run(...args);
           return { meta: { changes: r.changes, last_row_id: Number(r.lastInsertRowid) } };
         },
+        // batch 용. D1 처럼 SELECT 면 행을, 아니면 meta 를 준다.
+        exec: () => (/^\s*SELECT/i.test(sql) ? api.all() : api.run()),
       };
       return api;
     },
     async batch(stmts) {
+      roundTrips.batch++;
       const out = [];
-      for (const s of stmts) out.push(await s.run());
+      for (const s of stmts) out.push(await s.exec());
       return out;
     },
   };
@@ -1538,7 +1571,7 @@ function sqliteD1() {
     const cols = Object.keys(row);
     sqlite.prepare(`INSERT INTO ${table} (${cols}) VALUES (${cols.map(() => '?')})`).run(...Object.values(row));
   };
-  return { sqlite, db, calls, insert };
+  return { sqlite, db, calls, insert, roundTrips };
 }
 
 /** cache 행을 미리 넣은 D1. rows: { key: { value, expires_at } } */
@@ -1567,6 +1600,7 @@ console.log('\n[7-c] 구독 상한 vs subrequest 예산'); testSubrequestBudget(
 console.log('\n[7-d] 상한 도달 시 알림 수신'); await testSubscriptionEviction();
 console.log('\n[8] 홈경기 전용 알림 필터');  await testHomeOnly();
 console.log('\n[8-b] 알림 설정 읽기·쓰기');  await testSettings();
+console.log('\n[8-c] 기록 탭 데이터');  await testHistory();
 console.log('\n[9] 전광판 조회');            await testScoreboard();
 console.log('\n[10] 조회 장애 시 만료 캐시 폴백'); await testScheduleResilience();
 console.log('\n[10-b] 개막일 미확정 캐시');    await testOpenerCaching();

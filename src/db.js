@@ -310,22 +310,18 @@ export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } =
     ORDER BY game_date DESC LIMIT ?
   )`;
 
-  const games = await db
-    .prepare(
+  // 두 SELECT 를 batch 하나로 보내 D1 왕복을 한 번으로 줄인다.
+  const [games, events] = await db.batch([
+    db.prepare(
       `SELECT * FROM game_state
        WHERE ${seasonFilter} AND ${dateFilter}
        ORDER BY game_date DESC, start_at DESC`,
-    )
-    .bind(season, season, limitDays)
-    .all();
-
-  const events = await db
-    .prepare(
+    ).bind(season, season, limitDays),
+    db.prepare(
       `SELECT game_id, kind, series, title, body, created_at, delivered_at FROM events
        WHERE ${seasonFilter} AND ${dateFilter} ORDER BY id ASC`,
-    )
-    .bind(season, season, limitDays)
-    .all();
+    ).bind(season, season, limitDays),
+  ]);
 
   const byGame = new Map();
   for (const e of events.results ?? []) {
