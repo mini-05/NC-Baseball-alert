@@ -130,6 +130,16 @@ async function setVibrateSettings(settings) {
 
 /* ─────────── 공통 ─────────── */
 
+// 마지막으로 그린 응답. 자동 갱신 때 내용이 같으면 다시 그리지 않는다
+// (DOM 을 통째로 바꾸면 펼친 카드·스크롤이 흔들리고 배터리도 쓴다).
+const lastShown = {};
+function changed(key, data) {
+  const s = JSON.stringify(data);
+  if (lastShown[key] === s) return false;
+  lastShown[key] = s;
+  return true;
+}
+
 async function api(path, options) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -623,6 +633,7 @@ async function loadHistory() {
   try {
     const { games } = await api('/api/history?days=30');
     liveGame = games.some((g) => g.phase === 'live' && !g.cancelled);
+    if (!changed('history', games)) return;
     clear(box);
 
     if (!games.length) {
@@ -649,6 +660,7 @@ async function loadHistory() {
       );
     }
   } catch (err) {
+    delete lastShown.history;
     clear(box);
     box.append(el('p', { class: 'empty' }, '기록을 불러오지 못했어요.', el('br'), err.message));
   }
@@ -658,7 +670,9 @@ async function loadStandings() {
   try {
     const data = await api('/api/standings');
     await configReady; // 우리 팀 행 강조에 teamCode 가 필요하다
-    renderStandings(data);
+    if (changed('standings', data)) renderStandings(data);
+    // "○○ 기준" 문구는 시간이 지나면 바뀌니까(30분 넘으면 경고) 매번 갱신한다.
+    else $('#standings-updated').textContent = standingsStamp(data.standings);
   } catch {
     /* 순위는 실패해도 넘어간다. */
   }
@@ -948,7 +962,9 @@ async function loadSchedule() {
       : $('#schedule-list');
 
   try {
-    scheduleData = await api('/api/schedule');
+    const data = await api('/api/schedule');
+    if (!changed('schedule', data)) return;
+    scheduleData = data;
 
     // 상대전적은 일정이 비어도 그려야(스켈레톤 지우기) 해서 return 보다 먼저.
     renderHeadToHead(scheduleData.headToHead);
@@ -964,6 +980,7 @@ async function loadSchedule() {
     renderScheduleView();
     // 오늘로 스크롤은 여기서 안 한다. 패널이 숨어 있으면 안 먹어서 탭을 열 때 한다.
   } catch (err) {
+    delete lastShown.schedule;
     clear(box());
     box().append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
   }
