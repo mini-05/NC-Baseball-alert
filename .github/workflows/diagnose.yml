@@ -95,6 +95,20 @@ jobs:
                    end)
               end' hist.json
 
+          # 순위와 팀별 잔여 경기. 시즌 막판에 "우리가 몇 위로 끝나는가",
+          # 비시즌에 "검증할 경기가 남았는가"를 여기서 본다.
+          echo
+          echo "── 순위 (잔여 경기 포함) ──"
+          curl -sS "$BASE/api/standings" > rank.json
+          jq -r '
+            if .standings == null then "순위 자료 없음"
+            else (.standings.teams[]
+                  | "  \(.rank)위 \(.name | . + "    " | .[0:4]) "
+                  + "\(.wins)승 \(.draws)무 \(.losses)패  "
+                  + "승률 \((.wins / (if .wins + .losses == 0 then 1 else .wins + .losses end) * 1000 | round) / 1000)  "
+                  + "잔여 \(.remaining)")
+            end' rank.json
+
           echo
           echo "── 일정에 잡힌 최근 경기 ──"
           jq -r --arg from "$FROM" '
