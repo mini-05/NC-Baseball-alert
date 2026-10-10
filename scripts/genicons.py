@@ -18,15 +18,10 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "public"
 NAVY = (7, 29, 61)      # #071d3d NC 네이비 — 배경
 GOLD = (199, 160, 121)  # #c7a079 NC 골드 — 공 테두리
 CREAM = (250, 249, 245) # #faf9f5 크림 — 공 몸통
-SEAM = (199, 160, 121)  # NC 골드 — 실밥
+SEAM = GOLD  # 실밥도 같은 골드
 
 # 안티에일리어싱용 슈퍼샘플링 배율. 4면 육안으로 계단현상이 보이지 않는다.
 SS = 4
-
-
-def _blend(dst, src, alpha):
-    """알파 합성. alpha 는 0.0~1.0."""
-    return tuple(round(d + (s - d) * alpha) for d, s in zip(dst, src))
 
 
 def _write_png(path, width, height, pixels):

@@ -1,7 +1,7 @@
 /** D1 접근을 한곳에 모은다. 나머지 코드는 SQL 을 직접 쓰지 않는다. */
 
-import { KIND_COLUMN, SCOPE_COLUMN } from './detect.js';
-import { isPostseason, perspective } from './kbo.js';
+import { KIND_COLUMN, SCOPE_COLUMN, dispatchKindOf } from './detect.js';
+import { perspective, scopeOf } from './kbo.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -58,7 +58,15 @@ export async function pruneDatedCache(db, olderThan) {
   await db.batch([range('plan'), range('today')]);
 }
 
-/** ttlMs 가 0 이하이면 즉시 만료된 값으로 넣어 사실상 무효화한다. */
+/**
+ * 값은 남기고 만료만 시킨다. 다음 getCache 는 미스라 새로 조회하지만, 그 조회가
+ * 실패하면 getCacheStale 이 이 값으로 되돌아갈 수 있다 — null 로 덮어쓰면 폴백이
+ * 가장 필요한 순간(경기 종료 직후 무효화 + 네이버 장애)에 재료가 사라진다.
+ */
+export async function expireCache(db, key) {
+  await db.prepare('UPDATE cache SET expires_at = ? WHERE key = ?').bind(nowIso(), key).run();
+}
+
 export async function putCache(db, key, value, ttlMs) {
   const expires = new Date(Date.now() + ttlMs).toISOString();
   await db
@@ -270,9 +278,12 @@ export async function listUndelivered(db, teamCode, { olderThan, newerThan }) {
     .bind(olderThan, newerThan)
     .all();
 
+  // detectEvents 가 만든 이벤트와 같은 모양으로 돌려준다 — events.kind 는
+  // 기록용이라 실점이 concede 로 남아 있어 발송 종류로 되돌리고, scope 를 채운다.
   return (results ?? []).map((r) => ({
     id: r.id,
-    kind: r.kind,
+    kind: dispatchKindOf(r.kind),
+    scope: scopeOf(r.series),
     series: r.series,
     title: r.title,
     body: r.body,
@@ -392,9 +403,6 @@ export async function listHistory(db, { limitDays = 30, seasonYear, teamCode } =
       oppScore: p.oppScore,
       phase: r.phase,
       series: r.series,
-      // 시리즈 태그(한국시리즈·준PO 등)를 붙일지 여부를 서버가 명시적으로 정한다.
-      // 정규시즌 경기에는 태그가 붙지 않는다.
-      isPostseason: isPostseason(r.series),
       statusInfo: r.status_info,
       cancelled: Boolean(r.cancelled),
       scoreboard,

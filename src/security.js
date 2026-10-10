@@ -71,7 +71,7 @@ export function validateEndpoint(endpoint, extraHosts = '') {
 
 /* ─────────────── 키 검증 ─────────────── */
 
-const B64URL = /^[A-Za-z0-9_-]+$/;
+export const B64URL = /^[A-Za-z0-9_-]+$/;
 
 /** base64url 문자열의 디코딩 후 바이트 수를 계산한다. (실제 디코딩 없이) */
 function b64urlByteLength(s) {

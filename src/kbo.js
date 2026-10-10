@@ -29,10 +29,6 @@ export function kstNow(now = new Date()) {
   return {
     date: k.toISOString().slice(0, 10), // YYYY-MM-DD
     year: k.getUTCFullYear(),
-    month: k.getUTCMonth() + 1,
-    hour: k.getUTCHours(),
-    minute: k.getUTCMinutes(),
-    iso: k.toISOString().slice(0, 19), // 오프셋 없는 KST 로컬시각
   };
 }
 
@@ -51,14 +47,13 @@ export function kstIsoToEpoch(iso) {
 /* ─────────────────────────── 시리즈 ─────────────────────────── */
 
 export const SERIES = {
-  exhibition: { label: '시범경기', short: '시범', post: false, order: -2 },
-  allstar: { label: '올스타전', short: '올스타', post: false, order: -1 },
-  regular: { label: '정규시즌', short: '', post: false, order: 0 },
-  tiebreaker: { label: '순위결정전', short: '순위결정전', post: true, order: 1 },
-  wildcard: { label: '와일드카드 결정전', short: '와일드카드', post: true, order: 2 },
-  semi_playoff: { label: '준플레이오프', short: '준PO', post: true, order: 3 },
-  playoff: { label: '플레이오프', short: 'PO', post: true, order: 4 },
-  korean_series: { label: '한국시리즈', short: '한국시리즈', post: true, order: 5 },
+  allstar: { short: '올스타', post: false },
+  regular: { short: '', post: false },
+  tiebreaker: { short: '순위결정전', post: true },
+  wildcard: { short: '와일드카드', post: true },
+  semi_playoff: { short: '준PO', post: true },
+  playoff: { short: 'PO', post: true },
+  korean_series: { short: '한국시리즈', post: true },
 };
 
 /**
@@ -77,7 +72,7 @@ export const SERIES = {
  *   7777...      한국시리즈
  *
  * 시범경기는 접두사로 구분되지 않는다. 정규시즌과 형식이 완전히 같아서
- * 개막일 이전인지로 갈라야 한다. (season.js 의 resolveSeasonBounds 참고)
+ * 개막일 이전인지로 갈라야 한다. (season.js 의 resolveSeasonOpener 참고)
  *
  * 문서화된 규칙이 아니므로, 모르는 접두사는 정규시즌으로 간주해
  * "알림이 아예 안 오는" 최악을 피한다.
@@ -96,6 +91,9 @@ export function seriesOf(gameId) {
 }
 
 export const isPostseason = (series) => SERIES[series]?.post === true;
+
+/** 알림 설정의 시리즈 범위(SCOPES) — 정규시즌 / 포스트시즌. */
+export const scopeOf = (series) => (isPostseason(series) ? 'postseason' : 'regular');
 
 /**
  * gameId 끝 4자리는 시즌 연도다. (`20260822SSNC0` + `2026`)
@@ -281,12 +279,10 @@ export async function fetchStandings(year) {
     title: c.title,
     from: c.startRanking,
     to: c.endRanking,
-    color: c.color,
   }));
 
   return {
     year,
-    gameType: json.result.gameType ?? null,
     // 진출권 하한선. tiers 가 비어 있으면 판정을 포기한다(추측하지 않는다).
     cutoff: tiers.length ? Math.max(...tiers.map((t) => t.to)) : null,
     tiers,
@@ -419,9 +415,6 @@ export function headToHead(games) {
 
 /* ─────────────────────────── 전광판 ─────────────────────────── */
 
-const RECORD_URL = 'https://api-gw.sports.naver.com/schedule/games';
-const RELAY_URL = 'https://api-gw.sports.naver.com/schedule/games';
-
 /**
  * 경기 하나의 이닝별 점수(전광판)를 가져온다.
  *
@@ -435,7 +428,7 @@ const RELAY_URL = 'https://api-gw.sports.naver.com/schedule/games';
  */
 export async function fetchScoreboard(gameId) {
   try {
-    const res = await fetch(`${RECORD_URL}/${gameId}/record`, { headers: HEADERS });
+    const res = await fetch(`${SCHEDULE_URL}/${gameId}/record`, { headers: HEADERS });
     if (!res.ok) return null;
 
     const json = await res.json();
@@ -512,7 +505,7 @@ export function inningSumMatches(innings, score) {
  */
 export async function fetchRelayFinish(gameId) {
   try {
-    const res = await fetch(`${RELAY_URL}/${gameId}/relay`, { headers: HEADERS });
+    const res = await fetch(`${SCHEDULE_URL}/${gameId}/relay`, { headers: HEADERS });
     if (!res.ok) return null;
 
     const relay = (await res.json())?.result?.textRelayData;

@@ -21,6 +21,8 @@ applyTheme(localStorage.getItem(THEME_KEY));
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+/** 일정 탭에서 지금 켜진 뷰(list | calendar). */
+const scheduleView = () => $('.view-btn.is-active')?.dataset.view;
 
 /**
  * DOM 생성 헬퍼.
@@ -64,13 +66,14 @@ function icon(name) {
   return svg;
 }
 
-const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', concede: '실점', end: '종료', test: '테스트' };
-
 /*
  * 득점·실점은 서버가 events.kind 에 score / concede 로 구분해 저장한다
  * (src/db.js insertEvent). 제목 문구를 뒤져 짐작하지 않으므로 알림 문구가
  * 바뀌어도 여기가 흔들리지 않는다.
  */
+const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', concede: '실점', end: '종료' };
+
+// 포스트시즌 시리즈만 둔다 — 여기 없는 시리즈(정규시즌)에는 태그를 붙이지 않는다.
 const SERIES_SHORT = {
   tiebreaker: '순위결정전',
   wildcard: '와일드카드',
@@ -78,10 +81,11 @@ const SERIES_SHORT = {
   playoff: 'PO',
   korean_series: '한국시리즈',
 };
+const seriesTagOf = (series) =>
+  SERIES_SHORT[series] ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[series]) : null;
 
-const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
-const VIBRATE_KEYS = ['start', 'cancel', 'score', 'end'];
 const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
+const VIBRATE_KEYS = Object.keys(DEFAULT_VIBRATE);
 
 let teamCode = 'NC';
 let subscription = null; // 현재 기기의 PushSubscription
@@ -253,7 +257,7 @@ $$('.tab').forEach((tab) => {
     // 패널이 display:none 인 동안은 scrollIntoView 가 아무 효과가 없으므로,
     // 반드시 패널이 보이게 된 "이 시점"에 호출해야 한다.
     if (name === 'schedule' &&
-        document.querySelector('.view-btn.is-active')?.dataset.view === 'list') {
+        scheduleView() === 'list') {
       scrollListToToday();
     }
   });
@@ -301,12 +305,12 @@ activateTab(localStorage.getItem(TAB_KEY));
     // 가로로 충분히, 세로보다 뚜렷하게 움직인 경우만 스와이프로 본다.
     if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 1.5) return;
 
-    const activeTab = document.querySelector('.tab.is-active')?.dataset.tab;
+    const activeTab = $('.tab.is-active')?.dataset.tab;
     const i = TAB_ORDER.indexOf(activeTab);
     if (i < 0) return;
 
     const next = TAB_ORDER[dx < 0 ? i + 1 : i - 1]; // 왼쪽으로 밀면 다음 탭
-    if (next) document.querySelector(`.tab[data-tab="${next}"]`)?.click();
+    if (next) $(`.tab[data-tab="${next}"]`)?.click();
   }, { passive: true });
 }
 
@@ -360,7 +364,7 @@ function renderTable(standings) {
         el('span', { class: 'trank', text: String(t.rank) }),
         el('span', { class: 'tname' }, t.name, mark),
         el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
-        el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
+        el('span', { class: 'tpct', text: pctText(t.pct) }),
         el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
         // 연승은 초록, 연패는 빨강 — 경기 카드의 승/패 색(.verdict)과 같은 변수를 쓴다.
         el('span', {
@@ -486,12 +490,16 @@ function formatDay(dateStr) {
   return `${m}월 ${d}일 ${wd}요일`;
 }
 
+// 렌더마다 수백 번 불리므로 포매터를 한 번만 만든다.
+const CLOCK = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+
 /** ISO 시각(UTC)을 24시간제 HH:MM 로. 이벤트 기록 시각에 쓴다. */
 function clockOf(iso) {
-  return new Date(iso).toLocaleTimeString('ko-KR', {
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  });
+  return CLOCK.format(new Date(iso));
 }
+
+/** 승률 .xxx 표기. 순위표와 상대전적이 같은 모양이어야 한다. */
+const pctText = (pct) => pct.toFixed(3).replace(/^0/, '');
 
 /** 서버가 저장한 KST 로컬시각 문자열. 시간대 변환 없이 그대로 읽는다. */
 function formatStart(iso) {
@@ -529,12 +537,7 @@ function renderGame(g, defaultOpen) {
 
   const isLive = g.phase === 'live' && !g.cancelled;
 
-  // 시리즈 태그는 포스트시즌 경기에만 붙인다. 정규시즌 경기에는 표시하지 않는다.
-  // 판단 근거는 서버가 내려주는 isPostseason 이며, 라벨만 여기서 고른다.
-  const seriesTag =
-    g.isPostseason && SERIES_SHORT[g.series]
-      ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
-      : null;
+  const seriesTag = seriesTagOf(g.series);
 
   const team = (t, lost) =>
     el('div', { class: `team${t === mine ? ' mine' : ''}${lost ? ' lost' : ''}` },
@@ -787,7 +790,7 @@ function renderHeadToHead(rows) {
             n(r.wins), '승 ', n(r.draws), '무 ', n(r.losses), '패'),
           el('span', {
             class: 'h2h-pct',
-            text: r.pct === null ? '-' : r.pct.toFixed(3).replace(/^0/, ''),
+            text: r.pct === null ? '-' : pctText(r.pct),
           }),
         ),
       ),
@@ -823,10 +826,7 @@ function renderScheduleItem(g, today) {
   const isPast = g.gameDate < today;
   const isToday = g.gameDate === today;
 
-  const seriesTag =
-    SERIES_SHORT[g.series] && g.series !== 'regular'
-      ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
-      : null;
+  const seriesTag = seriesTagOf(g.series);
 
   // 지난 경기는 결과를, 예정 경기는 시각을 오른쪽에 둔다.
   const trailing = g.result
@@ -1001,7 +1001,7 @@ function renderCalendar(box, { games, today }) {
 function renderScheduleView() {
   if (!scheduleData) return;
 
-  const active = document.querySelector('.view-btn.is-active')?.dataset.view ?? 'list';
+  const active = scheduleView() ?? 'list';
   $('#schedule-list').classList.toggle('is-active', active === 'list');
   $('#schedule-calendar').classList.toggle('is-active', active === 'calendar');
   // 요약줄은 리스트 전용 정보라, 고정 영역에 상시 존재하는 대신 리스트일 때만 보여준다.
@@ -1045,7 +1045,7 @@ $('#schedule-calendar').addEventListener('click', (ev) => {
 
 $('#btn-today').addEventListener('click', () => {
   if (!scheduleData) return;
-  const active = document.querySelector('.view-btn.is-active')?.dataset.view;
+  const active = scheduleView();
 
   if (active === 'calendar') {
     calendarMonth = scheduleData.today.slice(0, 7);
@@ -1059,7 +1059,7 @@ async function loadSchedule() {
   // 비어 있거나 실패했을 때의 안내는 지금 켜져 있는 뷰에 띄운다.
   // 기본이 달력이라, 리스트에만 넣으면 아무것도 안 보이는 화면이 된다.
   const box = () =>
-    document.querySelector('.view-btn.is-active')?.dataset.view === 'calendar'
+    scheduleView() === 'calendar'
       ? $('#schedule-calendar')
       : $('#schedule-list');
 
@@ -1201,11 +1201,11 @@ $('#btn-test').addEventListener('click', async () => {
   }
 });
 
-$$('.sw input').forEach((input) => {
+// 진동 스위치(data-vibrate-key)는 서버 설정이 아니므로 [data-key] 로 한정한다.
+$$('.sw input[data-key]').forEach((input) => {
   input.addEventListener('change', async () => {
     if (!subscription) return;
     const key = input.dataset.key;
-    if (!SETTING_KEYS.includes(key)) return;
 
     try {
       await api('/api/settings', {

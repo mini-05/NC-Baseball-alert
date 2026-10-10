@@ -68,6 +68,7 @@ self.addEventListener('push', (event) => {
     const vibrateSettings = await getVibrateSettings();
     const vibrateOn = vibrateSettings[data.kind] ?? true;
 
+    const ts = data.ts ?? Date.now();
     const options = {
       body: data.body ?? '',
       icon: '/icon-192.png',
@@ -89,14 +90,14 @@ self.addEventListener('push', (event) => {
        */
       tag: `nc-${data.gameId ?? data.kind ?? 'info'}`,
       renotify: true,
-      timestamp: data.ts ?? Date.now(),
+      timestamp: ts,
       vibrate: vibrateOn ? (VIBRATE[data.kind] ?? [200]) : [],
       /*
        * id·ts 를 함께 싣는다. tag 를 경기 단위로 공유하게 됐으므로, 떠 있는
        * 알림이 "같은 이벤트인지" "더 새것인지"를 tag 로는 못 가린다. 아래 두
        * 검사가 이 값을 읽는다.
        */
-      data: { url: '/', id: data.id ?? null, ts: data.ts ?? Date.now() },
+      data: { url: '/', id: data.id ?? null, ts },
     };
 
     /*
@@ -130,7 +131,7 @@ self.addEventListener('push', (event) => {
      * 점수가 거꾸로 간다. 최신 하나만 남기는 것이 목적이므로 최신이 남아야 한다.
      */
     if (existing.some((n) => (n.data?.ts ?? 0) > options.timestamp)) {
-      if (data.id != null) await reportDelivered(data.id);
+      await reportDelivered(data.id);
       return;
     }
 
@@ -146,13 +147,14 @@ self.addEventListener('push', (event) => {
     // 알림이 실제로 떴다고 서버에 알린다. 서버는 FCM 에 넘긴 것까지만 알 수
     // 있어 이 신호가 없으면 단말에서 사라진 알림을 재지 못한다.
     // showNotification 이 끝난 뒤에만 부른다 — "띄웠다"는 뜻이니까.
-    // 실패해도 알림은 이미 떠 있으므로 삼킨다. id 가 없는 payload(테스트 알림)는
-    // 서버에 대응하는 행이 없어 보내지 않는다.
-    if (data.id != null) await reportDelivered(data.id);
+    // 실패해도 알림은 이미 떠 있으므로 삼킨다.
+    await reportDelivered(data.id);
   })());
 });
 
 async function reportDelivered(id) {
+  // id 가 없는 payload(테스트 알림)는 서버에 대응하는 행이 없어 보내지 않는다.
+  if (id == null) return;
   try {
     const sub = await self.registration.pushManager.getSubscription();
     if (!sub) return;

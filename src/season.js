@@ -10,9 +10,9 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, fetchStandings, perspective,
-  kstDateOffset, kstIsoToEpoch, seasonYearOf, TEAM_CODES,
+  kstDateOffset, kstIsoToEpoch,
 } from './kbo.js';
-import { getCache, getCacheStale, putCache, pruneDatedCache, prunePollLog } from './db.js';
+import { getCache, getCacheStale, putCache, expireCache, pruneDatedCache, prunePollLog } from './db.js';
 
 /** 경기 시작 몇 분 전부터 감시할지. 우천 취소는 보통 시작 1시간 안쪽에 공지된다. */
 const PRE_START_MIN = 90;
@@ -53,9 +53,9 @@ const POLL_LOG_KEEP_DAYS = 183;
  * 개막일을 못 정했을 때(개막 전이라 순위표에 경기가 없거나, 조회 실패) 다시
  * 물어보기까지의 간격.
  *
- * 이 경우도 캐시해야 한다 — tick() 이 매 틱 resolveSeasonOpener 를 먼저 부르므로,
- * 못 정한 결과를 안 남기면 해가 바뀐 1월부터 개막일까지 석 달 동안 1분마다
- * 네이버 순위 API 를 두드린다(하루 1,440회). 개막일은 하루 안에 바뀌지
+ * 이 경우도 캐시해야 한다 — 감시 중인 틱과 일정·계획 조회가 수시로
+ * resolveSeasonOpener 를 부르므로, 못 정한 결과를 안 남기면 개막 전 석 달 동안
+ * 그때마다 네이버 순위 API 를 두드린다. 개막일은 하루 안에 바뀌지
  * 않으니 이 정도면 충분히 자주 다시 본다.
  */
 const OPENER_RETRY_MS = 6 * HOUR;
@@ -89,15 +89,9 @@ export async function resolveSeasonOpener(env, year) {
       // 30일 캐시라 시즌당 몇 번만 실행된다.
       const all = await fetchGames(`${year}-01-01`, `${year}-12-31`);
 
-      const done = filterTeam(all, env.TEAM_CODE)
-        .filter(
-          (g) =>
-            seasonYearOf(g.gameId) === year &&
-            g.phase === 'result' &&
-            !g.cancelled &&
-            TEAM_CODES.has(g.homeCode) &&
-            TEAM_CODES.has(g.awayCode),
-        )
+      // 개막일을 구하는 중이라 opener 는 null — 시즌·구단 필터만 쓴다.
+      const done = filterCurrentSeason(filterTeam(all, env.TEAM_CODE), year, null)
+        .filter((g) => g.phase === 'result' && !g.cancelled)
         .sort((a, b) => (a.gameDate + a.gameId).localeCompare(b.gameDate + b.gameId));
 
       const skip = done.length - me.games;
@@ -181,21 +175,16 @@ export function pollWindowGames(plan, now = Date.now()) {
   });
 }
 
-/** 지금이 감시가 필요한 시간대인지. */
-export function isPollWindow(plan, now = Date.now()) {
-  return pollWindowGames(plan, now).length > 0;
-}
-
 /** 계획을 강제로 다시 만든다. (경기가 추가·변경됐을 때 쓰는 관리용) */
 export async function invalidatePlan(env, today) {
-  await putCache(env.DB, `plan:${today}`, null, -1);
+  await expireCache(env.DB, `plan:${today}`);
 }
 
 /**
  * 앞으로의 경기 일정을 가져온다. 하루 한 번만 실제 조회한다.
  *
  * 경기 결과가 아니라 "언제 어디서 누구와 붙는지"만 쓰므로 캐시를 길게 잡아도 된다.
- * 다만 우천 취소가 당일 반영되어야 하므로 오늘 경기는 포함해 6시간마다 갱신한다.
+ * 다만 우천 취소가 당일 반영되어야 하므로 오늘 경기는 포함해 30분마다 갱신한다.
  */
 export async function loadSchedule(env, year) {
   const key = `schedule:${year}`;
@@ -256,7 +245,7 @@ export async function loadSchedule(env, year) {
 
 /** 경기가 끝났을 때 호출한다. 지난 일정의 결과를 바로 반영하기 위함이다. */
 export async function invalidateSchedule(env, year) {
-  await putCache(env.DB, `schedule:${year}`, null, -1);
+  await expireCache(env.DB, `schedule:${year}`);
 }
 
 /**
@@ -290,7 +279,7 @@ export async function loadStandings(env, year) {
 
 /** 경기가 끝났을 때 호출한다. 다음 조회에서 최신 순위를 새로 받아 온다. */
 export async function invalidateStandings(env, year) {
-  await putCache(env.DB, `standings:${year}`, null, -1);
+  await expireCache(env.DB, `standings:${year}`);
 }
 
 /**

@@ -9,7 +9,7 @@
  */
 
 import { josa } from 'es-hangul';
-import { perspective, SERIES, isPostseason, inningSumMatches } from './kbo.js';
+import { perspective, SERIES, scopeOf, inningSumMatches } from './kbo.js';
 
 export const KINDS = ['start', 'cancel', 'score', 'end'];
 
@@ -37,13 +37,6 @@ export const SCOPES = ['regular', 'postseason'];
 export const SCOPE_COLUMN = {
   regular: 'on_regular',
   postseason: 'on_postseason',
-};
-
-export const KIND_LABEL = {
-  start: '경기 시작',
-  cancel: '경기 취소',
-  score: '득점',
-  end: '경기 종료',
 };
 
 /** 포스트시즌 경기는 제목 앞에 시리즈를 붙여 정규시즌과 구별되게 한다. */
@@ -102,7 +95,7 @@ export function detectEvents(prev, cur, teamCode) {
   const matchup = `${josa(p.oppName, '와/과')}의 ${p.isHome ? '홈' : '원정'} 경기`;
   const where = cur.stadium ? ` (${cur.stadium})` : '';
   const t = tag(cur.series);
-  const scope = isPostseason(cur.series) ? 'postseason' : 'regular';
+  const scope = scopeOf(cur.series);
 
   /*
    * isHome 은 "홈경기만 받기" 설정을 거르는 데 쓰인다.

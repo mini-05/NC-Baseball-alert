@@ -12,18 +12,17 @@ import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import vm from 'node:vm';
 import { encryptPayload, makeVapidHeader, b64urlToBytes, bytesToB64url, sendPush } from '../src/push.js';
-import { detectEvents } from '../src/detect.js';
+import { detectEvents, dispatchKindOf } from '../src/detect.js';
 import { normalizeGame, perspective, seriesOf, isPostseason, postseasonOutlook, kstIsoToEpoch,
          seasonYearOf, filterCurrentSeason, fetchScoreboard, fetchRelayFinish, inningOf, headToHead,
          inningSumMatches } from '../src/kbo.js';
-import { isPollWindow, pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener } from '../src/season.js';
+import { pollWindowGames, loadSchedule, loadStandings, resolveSeasonOpener, invalidateSchedule } from '../src/season.js';
 import { boardCoversScore, POLLS_PER_TICK } from '../src/index.js';
 import { validateEndpoint, validateKeys, checkOrigin, readJson, MAX_SUBSCRIPTIONS,
          SUBREQUEST_BUDGET } from '../src/security.js';
-import { subscribersFor, getCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
+import { subscribersFor, getCache, putCache, pruneDatedCache, allSettledBefore, insertEvent, markDelivered,
          listUndelivered, markResent, makeRoomForSubscription, saveSubscription,
          deleteSubscription } from '../src/db.js';
-import { dispatchKindOf } from '../src/detect.js';
 
 let failed = 0;
 function check(name, cond, detail = '') {
@@ -626,6 +625,7 @@ function testWindow() {
   check('KST 문자열 → epoch', start === Date.parse('2026-08-22T09:30:00Z'), String(start));
 
   const plan = { games: [{ gameId: 'G', startAt: '2026-08-22T18:30:00' }] };
+  const isPollWindow = (p, t) => pollWindowGames(p, t).length > 0;
   const MIN = 60000, HOUR = 3600000;
 
   check('경기 3시간 전 → 감시 안 함', !isPollWindow(plan, start - 3 * HOUR));
@@ -792,6 +792,18 @@ async function testScheduleResilience() {
       'schedule:2026',
     );
     check('만료된 캐시는 평상시 getCache 로는 안 읽힘', plain === null, JSON.stringify(plain));
+
+    /*
+     * 경기 종료 직후 무효화한 값도 폴백 재료로 남아야 한다. 무효화를 null 덮어쓰기로
+     * 하면 그 직후 네이버 장애 때 일정이 통째로 빈 목록이 된다.
+     */
+    const { db: realDb } = sqliteD1();
+    await putCache(realDb, 'schedule:2026', lastGood, 60 * 60 * 1000);
+    await invalidateSchedule({ DB: realDb }, 2026);
+    check('무효화하면 평상시 getCache 는 미스', (await getCache(realDb, 'schedule:2026')) === null);
+    const afterInvalidate = await loadSchedule({ DB: realDb, TEAM_CODE: 'NC' }, 2026);
+    check('무효화 직후 조회 실패 → 마지막 정상값',
+      JSON.stringify(afterInvalidate) === JSON.stringify(lastGood), JSON.stringify(afterInvalidate));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -800,8 +812,8 @@ async function testScheduleResilience() {
 /**
  * 개막일을 못 정한 결과도 캐시되는지.
  *
- * tick() 이 매 틱 resolveSeasonOpener 를 먼저 부르므로, 개막 전(순위표 경기 수 0)이나
- * 조회 실패를 캐시하지 않으면 1분마다 외부 호출이 나간다 — 이 검사가 그 회귀를 막는다.
+ * resolveSeasonOpener 는 감시 중인 틱마다 불리므로, 개막 전(순위표 경기 수 0)이나
+ * 조회 실패를 캐시하지 않으면 그때마다 외부 호출이 나간다 — 이 검사가 그 회귀를 막는다.
  */
 async function testOpenerCaching() {
   const originalFetch = globalThis.fetch;
@@ -968,22 +980,7 @@ function testSubrequestBudget() {
  * 겪는 증상이다. 그래서 실제 스키마(schema.sql)로 subscribersFor 까지 돌린다.
  */
 async function testSubscriptionEviction() {
-  const sqlite = new DatabaseSync(':memory:');
-  sqlite.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
-
-  const db = {
-    prepare(sql) {
-      const st = sqlite.prepare(sql);
-      let args = [];
-      const api = {
-        bind: (...a) => { args = a; return api; },
-        all: async () => ({ results: st.all(...args) }),
-        first: async () => st.get(...args) ?? null,
-        run: async () => st.run(...args),
-      };
-      return api;
-    },
-  };
+  const { sqlite, db } = sqliteD1();
 
   // 기본값(모든 알림 켜짐)으로 n 건을 채운다. updated_at 이 오래된 순으로 ep0..
   const seed = (n) => {
@@ -1619,6 +1616,11 @@ async function testDelivered() {
     rows[0].id === 75 && rows[0].isHome === true && rows[0].gameId === '20260902HTNC02026',
     JSON.stringify(rows[0]));
 
+  // 실점(concede)이 발송 종류(score)로 돌아오지 않으면 subscribersFor 가 빈
+  // 배열을 줘 실점만 조용히 재발송되지 않는다.
+  check('재발송 대상은 발송 모양(kind·scope)으로 준다',
+    rows[0].kind === 'score' && rows[0].scope === 'regular', JSON.stringify(rows[0]));
+
   const away = await listUndelivered(picked, 'LG', { olderThan: 'B', newerThan: 'A' });
   check('우리 팀이 홈이 아니면 isHome=false', away[0].isHome === false);
 
@@ -1668,6 +1670,26 @@ async function testDelivered() {
    */
   check('재발송 때 concede 는 score 로 되돌린다', dispatchKindOf('concede') === 'score');
   check('나머지 종류는 그대로', dispatchKindOf('end') === 'end' && dispatchKindOf('start') === 'start');
+}
+
+/** 실제 스키마(schema.sql)를 올린 메모리 SQLite 를 D1 모양으로 감싼다. */
+function sqliteD1() {
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+  const db = {
+    prepare(sql) {
+      const st = sqlite.prepare(sql);
+      let args = [];
+      const api = {
+        bind: (...a) => { args = a; return api; },
+        all: async () => ({ results: st.all(...args) }),
+        first: async () => st.get(...args) ?? null,
+        run: async () => st.run(...args),
+      };
+      return api;
+    },
+  };
+  return { sqlite, db };
 }
 
 /* ══ 실행 ══ */

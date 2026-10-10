@@ -6,9 +6,9 @@
 
 import {
   fetchGames, filterTeam, filterCurrentSeason, kstNow, kstDateOffset, postseasonOutlook,
-  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, isPostseason, headToHead,
+  fetchScoreboard, fetchRelayFinish, inningOf, inningSumMatches, headToHead,
 } from './kbo.js';
-import { detectEvents, dispatchKindOf, KINDS, SCOPES } from './detect.js';
+import { detectEvents, KINDS, SCOPES } from './detect.js';
 import { sendPush } from './push.js';
 import {
   loadDailyPlan, pollWindowGames, loadStandings, loadSchedule, loadTodayStatus,
@@ -88,10 +88,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function tick(env) {
   const kst = kstNow();
-  // loadDailyPlan 도 내부적으로 이 값을 쓰지만, 하루 계획이 캐시에 있으면
-  // 그쪽에서는 조회하지 않는다. 여기서 한 번 구해 poll() 에도 그대로 넘겨,
-  // 경기 시간대 동안 1분마다 반복되는 poll() 이 같은 값을 또 캐시 조회하지 않게 한다.
-  const opener = await resolveSeasonOpener(env, kst.year);
   const plan = await loadDailyPlan(env, kst.date);
 
   if (plan.games.length === 0) return { skipped: 'no-games-today' };
@@ -119,6 +115,10 @@ async function tick(env) {
   if (await allSettledBefore(env.DB, watching.map((g) => g.gameId), cutoff)) {
     return { skipped: 'all-finished', resent };
   }
+
+  // 개막일은 폴링에만 필요하다. 위 return 들보다 뒤에서 구해 경기 없는 틱마다
+  // 캐시를 읽지 않게 하고, 한 번 구한 값을 아래 poll() 들이 함께 쓴다.
+  const opener = await resolveSeasonOpener(env, kst.year);
 
   // 앞선 폴링이 실패해도 남은 폴링은 그대로 진행한다. 한 번의 조회 실패가
   // 이번 분 전체를 날리면 1분에 한 번 보던 때보다 오히려 나빠진다.
@@ -307,10 +307,6 @@ async function resendUndelivered(env) {
       env,
       {
         ...ev,
-        // events.kind 는 기록용이라 실점이 concede 로 남아 있다. 되돌리지 않으면
-        // subscribersFor 가 빈 배열을 줘 실점만 조용히 재발송되지 않는다.
-        kind: dispatchKindOf(ev.kind),
-        scope: isPostseason(ev.series) ? 'postseason' : 'regular',
         // 알림함에 재발송 시각이 아니라 원래 감지 시각이 찍히게 한다.
         ts: Date.parse(ev.createdAt) || Date.now(),
       },

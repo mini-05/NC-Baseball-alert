@@ -6,6 +6,8 @@
  * RFC 8188(aes128gcm 인코딩)을 직접 구현한다.
  */
 
+import { B64URL } from './security.js';
+
 const P256 = { name: 'ECDH', namedCurve: 'P-256' };
 const RECORD_SIZE = 4096;
 const JWT_TTL_SEC = 12 * 60 * 60; // VAPID 명세상 최대 24시간. 절반으로 여유를 둔다.
@@ -93,13 +95,14 @@ async function importVapidKey(publicKeyB64, privateKeyB64) {
   if (!privB64) {
     throw new Error('VAPID_PRIVATE_KEY 시크릿이 비어 있습니다. wrangler secret put 으로 등록하세요.');
   }
-  if (!/^[A-Za-z0-9_-]+$/.test(privB64)) {
+  if (!B64URL.test(privB64)) {
     throw new Error('VAPID_PRIVATE_KEY 가 base64url 형식이 아닙니다. genkeys 의 ② 값을 그대로 넣으세요.');
   }
   // P-256 개인키는 32바이트 = base64url 43자. 값이 잘렸거나 공개키를 잘못 넣은 경우를 잡는다.
-  if (b64urlToBytes(privB64).length !== 32) {
+  const privLen = b64urlToBytes(privB64).length;
+  if (privLen !== 32) {
     throw new Error(
-      `VAPID_PRIVATE_KEY 길이가 32바이트가 아닙니다 (${b64urlToBytes(privB64).length}바이트). ` +
+      `VAPID_PRIVATE_KEY 길이가 32바이트가 아닙니다 (${privLen}바이트). ` +
         '값이 잘렸거나 공개키를 잘못 등록했을 수 있습니다.',
     );
   }
