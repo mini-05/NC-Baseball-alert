@@ -621,30 +621,14 @@ function testWindow() {
 
 /* ══ 6-b. 경기가 끝난 뒤 감시를 접는 판단 ══ */
 
-/** events 테이블만 지원하는 최소 D1 흉내. end/cancel 행을 세어 돌려준다. */
-function fakeEventsDb(rows) {
-  return {
-    prepare: () => ({
-      bind(...ids) {
-        this.ids = ids;
-        return this;
-      },
-      first: async function () {
-        const hit = rows.filter((r) => this.ids.includes(r.game_id));
-        return {
-          done: new Set(hit.map((r) => r.game_id)).size,
-          last_at: hit.length ? hit.map((r) => r.created_at).sort().at(-1) : null,
-        };
-      },
-    }),
-  };
-}
-
 async function testSettled() {
-  const db = fakeEventsDb([
-    { game_id: 'A', created_at: '2026-08-22T13:00:00.000Z' },
-    { game_id: 'B', created_at: '2026-08-22T13:20:00.000Z' },
-  ]);
+  const { db, insert } = sqliteD1();
+  const ev = (game_id, kind, created_at) => insert('events', {
+    game_id, kind, created_at, game_date: '2026-08-22', dedup_key: `${game_id}:${kind}`, title: 't', body: 'b',
+  });
+  ev('A', 'end', '2026-08-22T13:00:00.000Z');
+  ev('B', 'cancel', '2026-08-22T13:20:00.000Z');
+  ev('C', 'start', '2026-08-22T12:00:00.000Z'); // 시작만 한 경기는 끝난 걸로 치면 안 된다
   const late = '2026-08-22T14:00:00.000Z'; // 두 경기 모두 끝나고 40분 지난 시점
   const soon = '2026-08-22T13:10:00.000Z'; // B 가 아직 안 끝난 시점
 
@@ -652,41 +636,6 @@ async function testSettled() {
   check('모두 끝나고 유예가 지나면 멈춘다', await allSettledBefore(db, ['A', 'B'], late));
   check('한 경기만 끝났으면 계속 본다', !(await allSettledBefore(db, ['A', 'B'], soon)));
   check('기록에 없는 경기가 섞이면 계속 본다', !(await allSettledBefore(db, ['A', 'C'], late)));
-}
-
-/**
- * cache 테이블만 흉내 내는 D1.
- *
- * @param rows 미리 들어 있는 캐시 행. { 'schedule:2026': { value, expires_at } }
- *   value 는 문자열(JSON), expires_at 은 ISO 문자열이다. 비우면 캐시 미스가 되어
- *   실제 조회 경로를 타게 된다.
- */
-function fakeCacheDb(rows = {}) {
-  const deletes = []; // pruneDatedCache 가 무엇을 지우려 했는지 확인용
-  return {
-    deletes,
-    prepare(sql) {
-      return {
-        _sql: sql,
-        _args: [],
-        bind(...args) { this._args = args; return this; },
-        async first() { return rows[this._args[0]] ?? null; },
-        async run() {
-          if (this._sql.startsWith('DELETE')) deletes.push(this._args);
-          // putCache 의 upsert. 저장된 값을 다음 first() 가 읽을 수 있게 남긴다.
-          if (this._sql.includes('INSERT INTO cache')) {
-            const [key, value, expires_at] = this._args;
-            rows[key] = { value, expires_at };
-          }
-          return {};
-        },
-      };
-    },
-    async batch(stmts) {
-      for (const s of stmts) await s.run();
-      return [];
-    },
-  };
 }
 
 async function testScheduleResilience() {
@@ -698,7 +647,7 @@ async function testScheduleResilience() {
     globalThis.fetch = async () => { throw new Error('naver down'); };
 
     // 남은 캐시도 없으면(첫 배포 직후 등) 빈 목록.
-    const games = await loadSchedule({ DB: fakeCacheDb(), TEAM_CODE: 'NC' }, 2026);
+    const games = await loadSchedule({ DB: cacheDb(), TEAM_CODE: 'NC' }, 2026);
     check(
       '일정 조회 실패 + 캐시 없음 → 빈 목록',
       Array.isArray(games) && games.length === 0,
@@ -707,7 +656,7 @@ async function testScheduleResilience() {
 
     // 만료된 캐시가 있으면 그걸 준다.
     const lastGood = [{ gameId: '20260822SSNC02026', gameDate: '2026-08-22', oppName: '삼성' }];
-    const staleDb = fakeCacheDb({
+    const staleDb = cacheDb({
       'schedule:2026': { value: JSON.stringify(lastGood), expires_at: expired },
     });
     const fallback = await loadSchedule({ DB: staleDb, TEAM_CODE: 'NC' }, 2026);
@@ -732,7 +681,7 @@ async function testScheduleResilience() {
       }),
     });
     const before = Date.now();
-    const fresh = await loadStandings({ DB: fakeCacheDb() }, 2026);
+    const fresh = await loadStandings({ DB: cacheDb() }, 2026);
     const at = Date.parse(fresh?.fetchedAt ?? '');
     check('정상 조회한 순위에 fetchedAt 부착', at >= before && at <= Date.now(), fresh?.fetchedAt);
 
@@ -744,7 +693,7 @@ async function testScheduleResilience() {
 
     // 순위도 같은 방식으로 되돌아간다.
     const lastStandings = { year: 2026, teams: [{ code: 'NC', rank: 8 }] };
-    const standDb = fakeCacheDb({
+    const standDb = cacheDb({
       'standings:2026': { value: JSON.stringify(lastStandings), expires_at: expired },
     });
     const standFallback = await loadStandings({ DB: standDb }, 2026);
@@ -756,7 +705,7 @@ async function testScheduleResilience() {
 
     // 평소 경로(getCache)는 만료된 값을 읽으면 안 된다.
     const plain = await getCache(
-      fakeCacheDb({ 'schedule:2026': { value: '[1,2,3]', expires_at: expired } }),
+      cacheDb({ 'schedule:2026': { value: '[1,2,3]', expires_at: expired } }),
       'schedule:2026',
     );
     check('만료된 캐시는 평상시 getCache 로는 안 읽힘', plain === null, JSON.stringify(plain));
@@ -798,19 +747,19 @@ async function testOpenerCaching() {
 
     // 개막 전: 순위표는 오지만 경기 수가 0
     globalThis.fetch = standingsWith(0);
-    const env = { DB: fakeCacheDb(), TEAM_CODE: 'NC' };
+    const env = { DB: cacheDb(), TEAM_CODE: 'NC' };
     for (let i = 0; i < 5; i++) await resolveSeasonOpener(env, 2027);
     check('개막 전 5틱 → 외부 호출 1회 (결과 null 도 캐시)', fetches === 1, `${fetches}회`);
 
     // 조회 실패도 마찬가지
     fetches = 0;
     globalThis.fetch = async () => { fetches++; throw new Error('naver down'); };
-    const env2 = { DB: fakeCacheDb(), TEAM_CODE: 'NC' };
+    const env2 = { DB: cacheDb(), TEAM_CODE: 'NC' };
     for (let i = 0; i < 5; i++) await resolveSeasonOpener(env2, 2027);
     check('조회 실패 5틱 → 외부 호출 1회', fetches === 1, `${fetches}회`);
 
     // 못 정한 결과는 짧게 캐시한다. 개막하면 금방 다시 확인해야 하니까.
-    const db3 = fakeCacheDb();
+    const db3 = cacheDb();
     await resolveSeasonOpener({ DB: db3, TEAM_CODE: 'NC' }, 2027);
     const row = await db3.prepare('SELECT value, expires_at FROM cache WHERE key = ?').bind('opener:2027').first();
     const ttlH = (Date.parse(row?.expires_at ?? '') - Date.now()) / 3600000;
@@ -822,22 +771,17 @@ async function testOpenerCaching() {
 
 /** 날짜별 캐시 정리가 지울 것과 남길 것을 맞게 고르는지. */
 async function testCachePrune() {
-  const db = fakeCacheDb();
-  await pruneDatedCache(db, '2026-08-19');
+  const keys = ['plan:2026-08-01', 'plan:2026-08-18', 'plan:2026-08-19', 'plan:2026-08-25',
+    'today:2026-08-01', 'today:2026-08-19', 'schedule:2026', 'standings:2026', 'opener:2026'];
+  const d = sqliteD1();
+  for (const key of keys) d.insert('cache', { key, value: '1', expires_at: 'x', updated_at: 'x' });
+  await pruneDatedCache(d.db, '2026-08-19');
 
-  const ranges = db.deletes.map((args) => args.join(' ~ '));
-  check('plan: 범위로 지움', ranges.includes('plan: ~ plan:2026-08-19'), ranges.join(' / '));
-  check('today: 범위로 지움', ranges.includes('today: ~ today:2026-08-19'), ranges.join(' / '));
-  check('지우는 대상은 이 둘뿐', db.deletes.length === 2, String(db.deletes.length));
-
-  // 범위 비교가 연도별 키를 안 건드리는지 문자열 비교로 확인(SQLite 도 같은 순서).
-  const inRange = (key, prefix) => key >= `${prefix}:` && key < `${prefix}:2026-08-19`;
-  check('지난 plan 은 범위 안', inRange('plan:2026-08-01', 'plan'));
-  check('오늘 plan 은 범위 밖', !inRange('plan:2026-08-25', 'plan'));
-  check('schedule 은 범위 밖 (폴백 보존)', !inRange('schedule:2026', 'plan'));
-  check('standings 는 범위 밖 (폴백 보존)', !inRange('standings:2026', 'plan'));
-  check('opener 는 범위 밖 (폴백 보존)', !inRange('opener:2026', 'plan'));
-  check('today 키는 plan 범위에 안 걸림', !inRange('today:2026-08-01', 'plan'));
+  const left = d.sqlite.prepare('SELECT key FROM cache ORDER BY key').all().map((r) => r.key);
+  const gone = keys.filter((k) => !left.includes(k)).sort();
+  check('지난 plan·today 만 지운다', gone.join() === 'plan:2026-08-01,plan:2026-08-18,today:2026-08-01', gone.join());
+  check('기준일 당일은 남긴다', left.includes('plan:2026-08-19') && left.includes('today:2026-08-19'));
+  check('연도별 키는 남긴다(폴백용)', ['schedule:2026', 'standings:2026', 'opener:2026'].every((k) => left.includes(k)));
 }
 
 /* ══ 7. 보안 검증 ══ */
@@ -997,63 +941,33 @@ async function testSubscriptionEviction() {
 
 /* ══ 8. 홈경기 전용 알림 필터 ══ */
 
-/**
- * D1 스텁. 실행한 SQL·바인딩을 기록하고, WHERE 절을 정규식으로 읽어
- * subscriptions 를 JS 로 거른다.
- */
-function fakeDb(rows) {
-  const calls = [];
-  return {
-    calls,
-    prepare(sql) {
-      calls.push(sql);
-      return {
-        bind: () => this,
-        all: async () => {
-          // WHERE 절을 읽어서 적용.
-          const needsKind = /on_(\w+) = 1/.exec(sql)?.[1];
-          const needsScope = /on_(regular|postseason) = 1/.exec(sql)?.[1];
-          const homeOnlyExcluded = sql.includes('home_only = 0');
-
-          const results = rows.filter((r) => {
-            if (needsKind && !r[`on_${needsKind}`]) return false;
-            if (needsScope && !r[`on_${needsScope}`]) return false;
-            if (homeOnlyExcluded && r.home_only) return false;
-            return true;
-          });
-          return { results };
-        },
-      };
-    },
-  };
-}
-
 async function testHomeOnly() {
-  const rows = [
-    { endpoint: 'all', on_start: 1, on_regular: 1, on_postseason: 1, home_only: 0 },
-    { endpoint: 'homeonly', on_start: 1, on_regular: 1, on_postseason: 1, home_only: 1 },
-  ];
-
+  const subsDb = () => {
+    const d = sqliteD1();
+    const sub = (endpoint, home_only) =>
+      d.insert('subscriptions', { endpoint, p256dh: 'p', auth: 'a', home_only, created_at: 'x', updated_at: 'x' });
+    sub('all', 0);
+    sub('homeonly', 1);
+    d.insert('subscriptions', { endpoint: 'nostart', p256dh: 'p', auth: 'a', on_start: 0, created_at: 'x', updated_at: 'x' });
+    return d;
+  };
   const names = (r) => r.map((x) => x.endpoint).sort().join(',');
 
-  const home = await subscribersFor(fakeDb(rows), 'start', 'regular', true);
+  const home = await subscribersFor(subsDb().db, 'start', 'regular', true);
   check('홈경기 → 전체 수신자 + 홈경기전용 모두', names(home) === 'all,homeonly', names(home));
 
-  const awayGame = await subscribersFor(fakeDb(rows), 'start', 'regular', false);
+  const awayGame = await subscribersFor(subsDb().db, 'start', 'regular', false);
   check('원정경기 → 홈경기전용은 제외', names(awayGame) === 'all', names(awayGame));
 
-  // 원정 경기일 때만 home_only 조건이 SQL 에 붙어야 한다.
-  const dbHome = fakeDb(rows);
-  await subscribersFor(dbHome, 'start', 'regular', true);
-  check('홈경기 쿼리에는 home_only 조건 없음', !dbHome.calls[0].includes('home_only'));
-
-  const dbAway = fakeDb(rows);
-  await subscribersFor(dbAway, 'start', 'regular', false);
-  check('원정 쿼리에는 home_only = 0 조건 포함', dbAway.calls[0].includes('home_only = 0'));
+  // 종류를 끈 구독은 빠지고, 다른 종류에서는 받는다.
+  const score = await subscribersFor(subsDb().db, 'score', 'regular', true);
+  check('알림 종류를 끈 구독은 그 종류만 제외', names(home).indexOf('nostart') < 0 && names(score).includes('nostart'), names(score));
 
   // 모르는 kind·scope 면 조회하지 않는다.
-  check('모르는 종류는 빈 배열', (await subscribersFor(fakeDb(rows), 'nope', 'regular', true)).length === 0);
-  check('모르는 범위는 빈 배열', (await subscribersFor(fakeDb(rows), 'start', 'nope', true)).length === 0);
+  const d = subsDb();
+  check('모르는 종류는 빈 배열', (await subscribersFor(d.db, 'nope', 'regular', true)).length === 0);
+  check('모르는 범위는 빈 배열', (await subscribersFor(d.db, 'start', 'nope', true)).length === 0);
+  check('모르는 값이면 쿼리도 안 나간다', d.calls.length === 0, String(d.calls.length));
 }
 
 /* ══ 9. 전광판 조회 ══ */
@@ -1570,24 +1484,48 @@ async function testDelivered() {
   check('나머지 종류는 그대로', dispatchKindOf('end') === 'end' && dispatchKindOf('start') === 'start');
 }
 
-/** 실제 스키마(schema.sql)를 올린 메모리 SQLite 를 D1 모양으로 감싼다. */
+/**
+ * 실제 스키마(schema.sql)를 올린 메모리 SQLite 를 D1 모양으로 감싼다.
+ * calls 에 실행한 SQL 이 쌓이고, insert(table, row) 로 행을 미리 넣을 수 있다.
+ */
 function sqliteD1() {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+  const calls = [];
   const db = {
     prepare(sql) {
+      calls.push(sql);
       const st = sqlite.prepare(sql);
       let args = [];
       const api = {
         bind: (...a) => { args = a; return api; },
         all: async () => ({ results: st.all(...args) }),
         first: async () => st.get(...args) ?? null,
-        run: async () => st.run(...args),
+        run: async () => {
+          const r = st.run(...args);
+          return { meta: { changes: r.changes, last_row_id: Number(r.lastInsertRowid) } };
+        },
       };
       return api;
     },
+    async batch(stmts) {
+      const out = [];
+      for (const s of stmts) out.push(await s.run());
+      return out;
+    },
   };
-  return { sqlite, db };
+  const insert = (table, row) => {
+    const cols = Object.keys(row);
+    sqlite.prepare(`INSERT INTO ${table} (${cols}) VALUES (${cols.map(() => '?')})`).run(...Object.values(row));
+  };
+  return { sqlite, db, calls, insert };
+}
+
+/** cache 행을 미리 넣은 D1. rows: { key: { value, expires_at } } */
+function cacheDb(rows = {}) {
+  const d = sqliteD1();
+  for (const [key, r] of Object.entries(rows)) d.insert('cache', { key, ...r, updated_at: r.expires_at });
+  return d.db;
 }
 
 /* ══ 실행 ══ */
