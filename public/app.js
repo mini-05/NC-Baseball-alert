@@ -1,11 +1,9 @@
-/* NC 다이노스 경기 알림 — PWA 클라이언트 */
+/* NC 다이노스 경기 알림 PWA 클라이언트 */
 
 /*
- * 테마. 최대한 이르게(파일 맨 위에서) 적용해 깜빡임을 줄인다.
- * CSP(script-src 'self')가 인라인 스크립트를 막아 <head> 에서 더 일찍 적용할 수는
- * 없다 — 'unsafe-inline' 을 허용하는 대신 이 정도 지연을 감수했다.
- * 'auto' 는 저장하지 않는다: 값이 없으면 곧 시스템 설정(prefers-color-scheme)을
- * 그대로 따르는 것이 'auto' 이기 때문이다.
+ * 테마는 깜빡임을 줄이려고 파일 맨 위에서 적용한다. CSP 때문에 <head> 인라인
+ * 스크립트는 못 쓴다('unsafe-inline' 은 안 열기로 함).
+ * 'auto' 는 저장하지 않는다. 값이 없으면 시스템 설정을 따르는 게 곧 auto 다.
  */
 const THEME_KEY = 'theme';
 
@@ -21,13 +19,12 @@ applyTheme(localStorage.getItem(THEME_KEY));
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+/** 일정 탭에서 지금 켜진 뷰(list | calendar). */
+const scheduleView = () => $('.view-btn.is-active')?.dataset.view;
 
 /**
  * DOM 생성 헬퍼.
- *
- * 문자열을 innerHTML 로 조립하지 않는 이유: 경기 데이터는 외부 API에서 온다.
- * 팀명·구장·상황("7회말") 같은 값이 언제든 태그처럼 생긴 문자열이 될 수 있는데,
- * 아래처럼 textContent 로만 넣으면 XSS 가 성립할 여지 자체가 없어진다.
+ * 경기 데이터는 외부 API 값이라 innerHTML 로 조립하지 않고 textContent 로만 넣는다(XSS 방지).
  */
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -48,10 +45,7 @@ function el(tag, props = {}, ...children) {
 
 const clear = (node) => { while (node.firstChild) node.firstChild.remove(); };
 
-/**
- * Tossface 아이콘. index.html 에 인라인된 <symbol> 을 참조한다.
- * 같은 문서 안의 참조라 외부 SVG use 의 브라우저 호환 문제가 없다.
- */
+/** Tossface 아이콘. index.html 에 넣어 둔 <symbol> 을 <use> 로 참조한다. */
 function icon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('class', 'tf');
@@ -64,13 +58,11 @@ function icon(name) {
   return svg;
 }
 
-const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', concede: '실점', end: '종료', test: '테스트' };
+// 기록 타임라인 라벨. events.kind 값 기준이라 득점·실점이 서버에서 이미 나뉘어 온다
+// (src/db.js insertEvent).
+const KIND_LABEL = { start: '시작', cancel: '취소', score: '득점', concede: '실점', end: '종료' };
 
-/*
- * 득점·실점은 서버가 events.kind 에 score / concede 로 구분해 저장한다
- * (src/db.js insertEvent). 제목 문구를 뒤져 짐작하지 않으므로 알림 문구가
- * 바뀌어도 여기가 흔들리지 않는다.
- */
+// 포스트시즌 시리즈만 있다. 여기 없는 시리즈(정규시즌)는 태그 없음.
 const SERIES_SHORT = {
   tiebreaker: '순위결정전',
   wildcard: '와일드카드',
@@ -78,20 +70,23 @@ const SERIES_SHORT = {
   playoff: 'PO',
   korean_series: '한국시리즈',
 };
+const seriesTagOf = (series) =>
+  SERIES_SHORT[series] ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[series]) : null;
 
-const SETTING_KEYS = ['start', 'cancel', 'score', 'end', 'regular', 'postseason', 'homeOnly'];
-const VIBRATE_KEYS = ['start', 'cancel', 'score', 'end'];
 const DEFAULT_VIBRATE = { start: true, cancel: true, score: true, end: true };
+const VIBRATE_KEYS = Object.keys(DEFAULT_VIBRATE);
 
 let teamCode = 'NC';
+// 서버 설정(teamCode). 순위표 강조에만 필요해서 다른 요청은 이걸 기다리지 않는다.
+const configReady = api('/api/config')
+  .then((cfg) => { teamCode = cfg.teamCode || 'NC'; })
+  .catch(() => { /* 실패하면 기본값으로 */ });
 let subscription = null; // 현재 기기의 PushSubscription
 
 /*
- * 진동 on/off. 서버가 아니라 이 기기의 IndexedDB 에 둔다 — "이 알림을 보낼지"는
- * 서버가 판단해야 하지만(그래서 on_start 등은 DB 컬럼), "이미 받은 알림을 이
- * 기기가 어떻게 표시할지"는 순수 로컬 문제라 서버를 거칠 이유가 없다. 서비스
- * 워커(sw.js)는 앱이 안 떠 있어도 푸시를 받을 수 있으므로, localStorage 가
- * 아니라 서비스워커에서도 읽히는 IndexedDB 를 쓴다.
+ * 진동 on/off 는 서버가 아니라 기기의 IndexedDB 에 둔다. 보낼지는 서버가 정하지만
+ * 받은 알림을 어떻게 띄울지는 기기 문제다. sw.js 에서도 읽어야 해서
+ * localStorage 대신 IndexedDB 를 쓴다.
  */
 function openSettingsDb() {
   return new Promise((resolve, reject) => {
@@ -112,10 +107,9 @@ async function getVibrateSettings() {
       req.onerror = () => resolve(DEFAULT_VIBRATE);
     });
   } catch {
-    return DEFAULT_VIBRATE; // IndexedDB 를 못 쓰는 환경이면 기존 동작(항상 켬)으로
+    return DEFAULT_VIBRATE; // IndexedDB 를 못 쓰면 전부 켬
   } finally {
-    // 열어 둔 연결은 반드시 닫는다. 남아 있으면 나중에 스키마 버전을 올릴 때
-    // upgrade 가 onblocked 로 막힌다.
+    // 연결은 꼭 닫는다. 열어 두면 나중에 DB 버전을 올릴 때 막힌다.
     db?.close();
   }
 }
@@ -135,6 +129,16 @@ async function setVibrateSettings(settings) {
 }
 
 /* ─────────── 공통 ─────────── */
+
+// 마지막으로 그린 응답. 자동 갱신 때 내용이 같으면 다시 그리지 않는다
+// (DOM 을 통째로 바꾸면 펼친 카드·스크롤이 흔들리고 배터리도 쓴다).
+const lastShown = {};
+function changed(key, data) {
+  const s = JSON.stringify(data);
+  if (lastShown[key] === s) return false;
+  lastShown[key] = s;
+  return true;
+}
 
 async function api(path, options) {
   const res = await fetch(path, {
@@ -172,10 +176,8 @@ function serialize(sub) {
 /* ─────────── 탭 ─────────── */
 
 /**
- * .topbar(제목+탭 메뉴) 는 sticky 로 화면 위에 고정된다. 일정 탭의 .sched-fixed
- * 가 그 바로 아래에 이어 붙으려면 정확한 높이가 필요한데, 폰트 로딩·글자 크기
- * 설정 등으로 실제 렌더 높이가 미묘하게 달라질 수 있어 하드코딩하지 않고
- * ResizeObserver 로 실측해 CSS 변수에 반영한다.
+ * .topbar(제목+탭)는 sticky 로 위에 붙어 있고, 일정 탭 .sched-fixed 가 그 바로 아래에
+ * 붙는다. 높이가 폰트·글자 크기 설정에 따라 달라서 재서 --topbar-h 에 넣는다.
  */
 {
   const topbar = $('.topbar');
@@ -183,10 +185,8 @@ function serialize(sub) {
     document.documentElement.style.setProperty('--topbar-h', `${topbar.offsetHeight}px`);
   };
 
-  // ResizeObserver 는 관측 시작 시 콜백을 한 번 비동기로 보내주는 게 스펙이지만,
-  // 그 첫 콜백이 오기 전 스크롤이 먼저 일어나면 --topbar-h 가 비어 있어
-  // .sched-fixed 가 topbar 와 겹친다. 그래서 최초 값은 여기서 동기적으로
-  // 먼저 채워 두고, 이후 폰트 로딩 등으로 실제 높이가 바뀌는 경우만 관측자에 맡긴다.
+  // ResizeObserver 첫 콜백은 비동기라 그 전에 스크롤하면 겹친다. 처음 값은
+  // 바로 넣고, 이후 변화만 ResizeObserver 에 맡긴다.
   syncTopbarHeight();
   if ('ResizeObserver' in window) new ResizeObserver(syncTopbarHeight).observe(topbar);
 }
@@ -194,26 +194,16 @@ function serialize(sub) {
 const TAB_KEY = 'tab';
 
 /**
- * 탭을 켠다. 없는 이름이면 아무것도 바꾸지 않고 false 를 준다.
- *
- * 탭 목록을 따로 두지 않고 그때그때 DOM 에서 찾는다 — 탭이 늘거나 줄어도
- * index.html 만 고치면 되고 이 파일은 그대로다.
+ * 탭 전환. 없는 이름이면 그대로 두고 false.
+ * 탭 목록은 DOM 에서 찾는다. 탭을 바꿀 땐 index.html 만 고치면 된다.
  */
 function activateTab(name) {
   const tabs = $$('.tab');
   const tab = tabs.find((t) => t.dataset.tab === name);
   if (!tab) return false;
 
-  /*
-   * 넘어가는 방향을 패널에 남겨 둔다(data-enter). 스와이프한 손가락 방향에서
-   * 내용이 따라 들어와야 두 화면이 옆으로 이어져 있다는 느낌이 난다.
-   *
-   * 방향을 여기서 정하므로 탭을 눌렀을 때도 같은 움직임이 난다 — 스와이프는
-   * 결국 .tab.click() 을 부르기 때문이다(아래 touchend 핸들러).
-   *
-   * 첫 렌더(from === -1)나 같은 탭을 다시 누른 경우(from === to)에는 붙이지
-   * 않는다. 움직일 이유가 없는데 움직이면 그게 더 어색하다.
-   */
+  // 이동 방향(data-enter)을 패널에 붙여서 CSS 가 그 방향으로 슬라이드한다.
+  // 스와이프도 .tab.click() 을 거치니 같은 동작. 첫 렌더나 같은 탭이면 안 붙인다.
   const from = tabs.findIndex((t) => t.classList.contains('is-active'));
   const to = tabs.indexOf(tab);
   const enter = from === -1 || from === to ? null : to > from ? 'next' : 'prev';
@@ -226,17 +216,8 @@ function activateTab(name) {
     p.classList.toggle('is-active', on);
   });
 
-  /*
-   * 탭을 옮기면 그 탭의 맨 위부터 보여 준다.
-   *
-   * 스크롤은 탭마다 따로가 아니라 문서 하나를 공유한다. 그대로 두면 옮겨 간
-   * 탭의 중간에 떨어지거나(기록 600px → 알림 600px), 목적지가 짧으면 0으로
-   * 잘렸다가 돌아올 때 덜컥거린다(일정 900px → 달력 뷰 0px). 어느 쪽이든
-   * 규칙이 없어 예측이 안 된다.
-   *
-   * 같은 탭을 다시 누른 경우(from === to)는 옮긴 것이 아니므로 건드리지 않는다.
-   * 일정 탭의 "오늘로 스크롤"은 이 뒤에 따로 돌아 제자리를 잡는다(클릭 핸들러).
-   */
+  // 탭을 옮기면 맨 위로. 스크롤은 문서 하나를 같이 써서 그대로 두면 다른 탭
+  // 중간에 떨어진다. 일정 탭의 "오늘로 스크롤"은 클릭 핸들러에서 이 뒤에 돈다.
   if (from !== to) window.scrollTo(0, 0);
   return true;
 }
@@ -246,38 +227,29 @@ $$('.tab').forEach((tab) => {
     const name = tab.dataset.tab;
     activateTab(name);
 
-    // 새로고침·앱 재실행 후에도 보던 탭으로 돌아오게 한다. 테마와 같은 방식이다.
+    // 다시 열었을 때 보던 탭으로.
     localStorage.setItem(TAB_KEY, name);
 
-    // 일정 탭을 열 때 리스트가 기본으로 보이는 뷰라면 오늘 경기 위치로 맞춘다.
-    // 패널이 display:none 인 동안은 scrollIntoView 가 아무 효과가 없으므로,
-    // 반드시 패널이 보이게 된 "이 시점"에 호출해야 한다.
+    // 일정 리스트면 오늘 경기로 스크롤. 패널이 숨어 있을 땐 scrollIntoView 가
+    // 안 먹어서 패널을 켠 다음에 부른다.
     if (name === 'schedule' &&
-        document.querySelector('.view-btn.is-active')?.dataset.view === 'list') {
+        scheduleView() === 'list') {
       scrollListToToday();
     }
   });
 });
 
-/*
- * 마지막으로 보던 탭 복원.
- *
- * 저장된 값이 없거나(첫 방문) 그 탭이 사라졌으면 activateTab 이 false 를 주고,
- * 마크업에 이미 붙어 있는 is-active 가 그대로 기본값이 된다.
- */
+// 마지막 탭 복원. 값이 없거나 없는 탭이면 마크업의 is-active 가 기본.
 activateTab(localStorage.getItem(TAB_KEY));
 
 /**
- * 좌우 스와이프로 탭을 넘긴다. 탭 버튼 클릭과 같은 경로(.tab.click())를 타서
- * 스크롤-투데이 같은 부수 동작도 그대로 적용된다.
- *
- * 전광판(.scorebox-wrap)은 자체 가로 스크롤 표라, 그 안에서 시작한 터치는
- * 스와이프 판정에서 제외한다 — 표를 넘겨 보려는 손짓이 탭 전환으로 새면 안 된다.
+ * 좌우 스와이프로 탭 전환. .tab.click() 을 불러서 클릭과 똑같이 동작한다.
+ * 전광판(.scorebox-wrap)은 가로 스크롤이 있어서 거기서 시작한 터치는 무시한다.
  */
 {
-  // 순서는 마크업의 탭 순서를 그대로 따른다. 탭이 늘어도 고칠 곳이 없다.
+  // 탭 순서는 마크업 순서.
   const TAB_ORDER = $$('.tab').map((t) => t.dataset.tab);
-  const SWIPE_MIN_X = 60; // 오탭 방지용 최소 이동 거리
+  const SWIPE_MIN_X = 60; // 최소 이동 거리(px)
   let touchStartX = 0;
   let touchStartY = 0;
   let touchStartTarget = null;
@@ -298,25 +270,23 @@ activateTab(localStorage.getItem(TAB_KEY));
     const dx = t.clientX - touchStartX;
     const dy = t.clientY - touchStartY;
 
-    // 가로로 충분히, 세로보다 뚜렷하게 움직인 경우만 스와이프로 본다.
+    // 가로로 충분히, 세로보다 확실히 많이 움직였을 때만.
     if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 1.5) return;
 
-    const activeTab = document.querySelector('.tab.is-active')?.dataset.tab;
+    const activeTab = $('.tab.is-active')?.dataset.tab;
     const i = TAB_ORDER.indexOf(activeTab);
     if (i < 0) return;
 
     const next = TAB_ORDER[dx < 0 ? i + 1 : i - 1]; // 왼쪽으로 밀면 다음 탭
-    if (next) document.querySelector(`.tab[data-tab="${next}"]`)?.click();
+    if (next) $(`.tab[data-tab="${next}"]`)?.click();
   }, { passive: true });
 }
 
 /* ─────────── 순위 · 포스트시즌 ─────────── */
 
 /**
- * 전체 순위표. 포스트시즌 진출 구간을 구분선으로 나눠 보여준다.
- *
- * 진출 기준(1위 한국시리즈 / 4~5위 와일드카드 등)은 서버가 순위 API 응답의
- * postSeason.teamColors 를 그대로 넘겨준 것이라, KBO 가 규칙을 바꿔도 따라간다.
+ * 전체 순위표. 포스트시즌 진출 구간마다 구분선을 넣는다.
+ * 구간은 서버가 순위 API(postSeason.teamColors)에서 받아 온 값 그대로다.
  */
 function renderTable(standings) {
   const box = $('#table');
@@ -330,23 +300,20 @@ function renderTable(standings) {
   const tiers = standings.tiers ?? [];
   const rows = [];
 
-  /*
-   * 오늘 경기가 아직 안 끝난 팀이 하나라도 있을 때만 반영 표시를 붙인다.
-   * 다 끝났거나 경기가 없는 날은 표시할 것이 없으므로 아예 그리지 않는다 —
-   * 모든 줄에 체크가 붙어 있는 화면은 아무 정보도 주지 않는다.
-   */
+  // 오늘 경기가 안 끝난 팀이 있을 때만 반영 표시(✓/•)를 붙인다.
+  // 다 끝났으면 전부 ✓ 라 의미가 없다.
   const showMarks = standings.teams.some((t) => t.todayGame === 'pending');
 
   for (const t of standings.teams) {
-    // 이 순위에서 시작하는 진출 구간이 있으면 라벨을 먼저 넣는다.
+    // 이 순위에서 진출 구간이 시작되면 라벨부터.
     const tier = tiers.find((x) => x.from === t.rank);
     if (tier) rows.push(el('p', { class: 'tier-label', text: tier.title }));
 
     const isMine = t.code === teamCode;
-    // 연속 기록. 네이버의 continuousGameResult 를 그대로 쓴다 — "3승" · "2패".
+    // 연속 기록. 네이버 값 그대로("3승", "2패").
     const streak = String(t.streak ?? '');
 
-    // 팀명 바로 뒤에 붙인다. 따로 칸을 만들면 좁은 화면에서 이름이 밀린다.
+    // 팀명 뒤에 붙인다. 칸을 따로 두면 좁은 화면에서 이름이 밀린다.
     const mark = showMarks && t.todayGame
       ? el('span', {
           class: `tmark ${t.todayGame}`,
@@ -360,9 +327,9 @@ function renderTable(standings) {
         el('span', { class: 'trank', text: String(t.rank) }),
         el('span', { class: 'tname' }, t.name, mark),
         el('span', { class: 'trec', text: `${t.wins}승 ${t.draws}무 ${t.losses}패` }),
-        el('span', { class: 'tpct', text: t.pct.toFixed(3).replace(/^0/, '') }),
+        el('span', { class: 'tpct', text: pctText(t.pct) }),
         el('span', { class: 'tgb', text: t.gb === 0 ? '-' : t.gb.toFixed(1) }),
-        // 연승은 초록, 연패는 빨강 — 경기 카드의 승/패 색(.verdict)과 같은 변수를 쓴다.
+        // 연승 초록, 연패 빨강(.verdict 와 같은 색 변수).
         el('span', {
           class: `tstreak${/승$/.test(streak) ? ' win' : /패$/.test(streak) ? ' lose' : ''}`,
           text: streak,
@@ -371,7 +338,7 @@ function renderTable(standings) {
       ),
     );
 
-    // 진출권 마지막 순위 뒤에 선을 그어 경계를 분명히 한다.
+    // 진출권 마지막 순위 아래에 구분선.
     if (standings.cutoff && t.rank === standings.cutoff) {
       rows.push(el('div', { class: 'cutline' }, el('span', { text: '포스트시즌 진출선' })));
     }
@@ -394,24 +361,21 @@ function renderTable(standings) {
 }
 
 /**
- * 순위가 언제 것인지 알려 주는 한 줄.
- *
- * 서버가 조회 시각(fetchedAt)을 함께 내려준다. 화면을 그린 시각이 아니라 이
- * 값을 써야 하는 이유: 네이버 조회가 실패하면 서버가 마지막으로 확인된 순위로
- * 되돌아가는데(season.js 의 getCacheStale), 그때 렌더 시각을 보여 주면 방금
- * 받아온 최신 순위처럼 보인다.
+ * "○○ 기준" 한 줄. 화면 그린 시각이 아니라 서버 조회 시각(fetchedAt)을 쓴다.
+ * 조회에 실패하면 서버가 예전 순위를 주는데(season.js getCacheStale), 그때도
+ * 언제 값인지 맞게 보여야 한다.
  */
-const STANDINGS_STALE_MS = 30 * 60 * 1000; // 캐시 수명이 10분이라, 이보다 오래됐으면 갱신이 막힌 것이다
+const STANDINGS_STALE_MS = 30 * 60 * 1000; // 캐시가 10분이니 이보다 오래됐으면 갱신이 안 되는 중
 
 function standingsStamp(standings) {
   if (!standings) return '';
 
-  // 이 기능이 나오기 전에 캐시된 값에는 fetchedAt 이 없다. 캐시가 갱신되면 사라진다.
+  // 예전 캐시 값에는 fetchedAt 이 없다.
   if (!standings.fetchedAt) return '경기 종료 시 갱신';
 
   const at = new Date(standings.fetchedAt);
   const time = at.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
-  // 오늘 것이면 시각만, 지난 날짜면 날짜까지 밝힌다.
+  // 오늘이면 시각만, 아니면 날짜도.
   const when =
     at.toDateString() === new Date().toDateString()
       ? time
@@ -430,11 +394,11 @@ function renderStandings({ standings, outlook }) {
 
   const slot = $('#outlook');
   clear(slot);
-  if (!standings || !outlook) return; // 비시즌이면 카드를 아예 띄우지 않는다.
+  if (!standings || !outlook) return; // 데이터 없으면(비시즌) 카드 없음
 
   const { team, rank, cutoff, remaining, gamesBehindLine, tierTitle, status } = outlook;
 
-  // 진출권 안일 때만 코랄. 시스템은 코랄을 아껴 쓴다.
+  // 진출권 안일 때만 강조색(골드).
   const pill =
     status === 'in'
       ? el('span', { class: 'pill in', text: tierTitle ?? '포스트시즌 진출권' })
@@ -442,8 +406,7 @@ function renderStandings({ standings, outlook }) {
         ? el('span', { class: 'pill out', text: '포스트시즌 탈락 확정' })
         : el('span', { class: 'pill', text: `${cutoff}위까지 ${gamesBehindLine}경기차` });
 
-  // 바로 아래 순위와의 승차. 위 칩과 같은 줄에 나란히 붙는다(.pill 이 inline-block).
-  // 꼴찌면 서버가 chaser 를 null 로 주므로 칩 자체가 안 붙는다.
+  // 바로 아래 순위와의 승차 칩. 꼴찌면 chaser 가 null 이라 없음.
   const chaserPill = outlook.chaser
     ? el('span', {
         class: 'pill chaser',
@@ -451,10 +414,10 @@ function renderStandings({ standings, outlook }) {
       })
     : null;
 
-  // 문장은 서버가 es-hangul 로 조사까지 맞춰 내려준다. 여기서는 그대로 쓴다.
+  // 문장은 서버가 조사까지 맞춰서 준다.
   const note = outlook.note ?? '';
 
-  // 진출권까지의 거리를 시각화. 승차가 클수록 막대가 짧아진다.
+  // 진출권까지 거리 막대. 승차가 클수록 짧다.
   const progress = status === 'in' ? 1 : Math.max(0, 1 - gamesBehindLine / Math.max(remaining, 1));
 
   slot.append(
@@ -486,14 +449,18 @@ function formatDay(dateStr) {
   return `${m}월 ${d}일 ${wd}요일`;
 }
 
-/** ISO 시각(UTC)을 24시간제 HH:MM 로. 이벤트 기록 시각에 쓴다. */
+// 렌더할 때마다 많이 불려서 포매터는 한 번만 만든다.
+const CLOCK = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+/** ISO 시각(UTC) → 24시간제 HH:MM. 이벤트 시각용. */
 function clockOf(iso) {
-  return new Date(iso).toLocaleTimeString('ko-KR', {
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  });
+  return CLOCK.format(new Date(iso));
 }
 
-/** 서버가 저장한 KST 로컬시각 문자열. 시간대 변환 없이 그대로 읽는다. */
+/** 승률을 .xxx 로. 순위표·상대전적 공용. */
+const pctText = (pct) => pct.toFixed(3).replace(/^0/, '');
+
+/** KST 시각 문자열("2026-08-23T18:30:00") → "오후 6:30". 시간대 변환 없음. */
 function formatStart(iso) {
   const m = /T(\d{2}):(\d{2})/.exec(iso || '');
   if (!m) return '';
@@ -502,16 +469,13 @@ function formatStart(iso) {
 }
 
 /**
- * 사용자가 직접 여닫은 경기. gameId → 열림 여부.
- *
- * 자동 갱신(20·60초)이 카드를 통째로 다시 그리므로, 이 기억이 없으면 펼쳐 둔
- * 경기가 갱신될 때마다 도로 접힌다. 명시적으로 누른 경기만 여기에 남고,
- * 나머지는 그때그때의 기본값(가장 최근 경기만 펼침)을 따른다.
+ * 사용자가 직접 여닫은 경기(gameId → 열림 여부).
+ * 자동 갱신 때 카드를 새로 그려서, 이게 없으면 펼쳐 둔 경기가 다시 접힌다.
  */
 const gameOpenState = new Map();
 
 function renderGame(g, defaultOpen) {
-  // 홈/원정 관점은 서버가 이미 계산해 보낸다(perspective()) — /api/schedule 과 같은 방식.
+  // 우리 팀 기준 값은 서버가 계산해서 준다.
   const isHome = g.isHome;
   const mine = { name: g.teamName, score: g.teamScore };
   const opp = { name: g.oppName, score: g.oppScore };
@@ -529,12 +493,7 @@ function renderGame(g, defaultOpen) {
 
   const isLive = g.phase === 'live' && !g.cancelled;
 
-  // 시리즈 태그는 포스트시즌 경기에만 붙인다. 정규시즌 경기에는 표시하지 않는다.
-  // 판단 근거는 서버가 내려주는 isPostseason 이며, 라벨만 여기서 고른다.
-  const seriesTag =
-    g.isPostseason && SERIES_SHORT[g.series]
-      ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
-      : null;
+  const seriesTag = seriesTagOf(g.series);
 
   const team = (t, lost) =>
     el('div', { class: `team${t === mine ? ' mine' : ''}${lost ? ' lost' : ''}` },
@@ -551,13 +510,8 @@ function renderGame(g, defaultOpen) {
         })
       : null;
 
-  /*
-   * 시작·종료 시각.
-   *
-   * 알림 이벤트에 기록된 시각이 실제 관측 시각이라 가장 정확하다.
-   * 다만 앱이 감시를 시작하기 전에 이미 끝난 경기에는 이벤트가 없으므로,
-   * 그때는 편성 시각(startAt)으로 대신하고 '예정'임을 밝힌다.
-   */
+  // 시작·종료 시각은 이벤트 시각(실제 감지 시각)을 쓴다. 이벤트가 없으면
+  // (감시 전에 끝난 경기) 편성 시각에 '예정'을 붙인다.
   const at = (kind) => {
     const e = g.events.find((x) => x.kind === kind);
     return e ? clockOf(e.createdAt) : null;
@@ -592,16 +546,11 @@ function renderGame(g, defaultOpen) {
       )
     : null;
 
-  /*
-   * 접기·펼치기는 <details> 에 맡긴다 — 클릭 토글·키보드·스크린리더가 전부
-   * 브라우저 기본 동작이라 직접 구현할 것이 없다.
-   *
-   * <summary>(항상 보임)에 경기 결과를, 그 아래(펼쳤을 때만 보임)에 전광판·
-   * 시각·타임라인을 둔다. 접힌 상태에서 "결과만 간단히"가 그대로 나온다.
-   */
+  // 접기·펼치기는 <details> 로(키보드·스크린리더 지원이 기본으로 됨).
+  // summary 에 결과, 펼치면 전광판·시각·타임라인.
   const open = gameOpenState.get(g.gameId) ?? defaultOpen;
 
-  // 카드 색은 모든 경기가 같다. 진행 중 표시는 Live 태그가 맡는다.
+  // 진행 중 표시는 Live 태그로만.
   const card = el('details', { class: 'card game', open: open || null },
     el('summary', { class: 'game-summary' },
       el('div', { class: 'game-meta' },
@@ -622,14 +571,8 @@ function renderGame(g, defaultOpen) {
     timeline,
   );
 
-  /*
-   * 기본값과 다를 때만 기억한다.
-   *
-   * open 속성을 달고 만든 <details> 는 DOM 에 붙을 때 toggle 이 한 번 발생한다.
-   * 그것까지 "사용자가 폈다"로 저장하면, 기본으로 펼쳐졌던 어제 경기가 오늘
-   * 경기 시작 후에도 계속 펼쳐진 채로 남는다. 기본값과 같아지면 기억을 지워
-   * 그 뒤로는 다시 기본 규칙을 따르게 한다.
-   */
+  // 기본값과 다를 때만 기억한다. open 으로 만든 <details> 는 붙을 때 toggle 이
+  // 한 번 나는데, 그것까지 저장하면 어제 경기가 계속 펼쳐져 있게 된다.
   card.addEventListener('toggle', () => {
     if (card.open === defaultOpen) gameOpenState.delete(g.gameId);
     else gameOpenState.set(g.gameId, card.open);
@@ -638,20 +581,14 @@ function renderGame(g, defaultOpen) {
 }
 
 /**
- * 전광판(이닝별 점수 표). 경기 전이거나 서버가 아직 못 가져왔으면(g.scoreboard
- * 가 null) 아무것도 그리지 않는다 — 없는 데이터를 빈 표로 보여주지 않는다.
- * 가로 폭이 좁은 화면에서 연장전(10회 이상)까지 다 담기면 넘칠 수 있어
- * 바깥을 가로 스크롤 컨테이너로 감싼다.
+ * 전광판(이닝별 점수 표). 데이터가 없으면(경기 전 등) 안 그린다.
+ * 연장전이면 좁은 화면에서 넘쳐서 가로 스크롤로 감싼다.
  */
 function renderScoreboard(sb, teamLabel, oppLabel, isHome) {
   if (!sb) return null;
 
   const innings = Math.max(sb.team.innings.length, sb.opp.innings.length, 9);
-  /*
-   * 치지 않은 이닝은 빈칸이 아니라 '-' 로 둔다. 빈칸이면 "0점을 냈다"와 "치지
-   * 않았다"가 구분되지 않는데, 홈팀이 앞선 채 9회말을 치지 않는 경우는 흔하다.
-   * 네이버 전광판도 같은 표기를 쓴다.
-   */
+  // 안 친 이닝은 '-'(9회말 없이 끝나는 경우 등). 네이버 전광판과 같은 표기.
   const at = (arr, i) => (arr[i] != null ? String(arr[i]) : '-');
 
   const row = (label, side, isMine) =>
@@ -677,16 +614,9 @@ function renderScoreboard(sb, teamLabel, oppLabel, isHome) {
         ),
       ),
       /*
-       * 원정팀이 위, 홈팀이 아래 — 전광판에서 위아래는 곧 초·말이다.
-       *
-       * 우리 팀을 늘 위에 두면 홈경기에서 두 줄이 뒤바뀌어, 9회초와 9회말을
-       * 정반대로 읽게 된다. 2026-09-01 창원 NC:KIA 7:2 가 그랬다 — NC(홈)가
-       * 앞서 9회말을 치지 않아 그 칸이 비었는데, NC 가 윗줄이라 "원정팀이
-       * 9회초를 안 쳤고, 홈팀은 이기는데도 9회말을 쳤다"로 보였다. 둘 다
-       * 야구에서 나올 수 없는 장면이라 숫자가 틀린 것처럼 읽힌다.
-       *
-       * 우리 팀 강조는 위치가 아니라 tr.mine 클래스가 맡으므로(style.css)
-       * 순서를 바꿔도 어느 쪽이 우리 팀인지는 그대로 드러난다.
+       * 원정 위, 홈 아래(위아래 = 초·말). 우리 팀을 항상 위에 두면 홈경기에서
+       * 9회말 '-' 가 윗줄에 보여서 틀린 표처럼 읽힌다(2026-09-01 NC:KIA).
+       * 우리 팀 표시는 tr.mine 이 한다.
        */
       el('tbody', {}, ...(isHome
         ? [row(oppLabel, sb.opp, false), row(teamLabel, sb.team, true)]
@@ -695,10 +625,7 @@ function renderScoreboard(sb, teamLabel, oppLabel, isHome) {
   );
 }
 
-/**
- * 진행 중인 경기가 있는지. 회차와 초·말이 계속 바뀌는 상태라는 뜻이라,
- * 자동 갱신 주기를 여기에 맞춘다. 판단 기준은 카드에 'Live' 를 붙이는 것과 같다.
- */
+/** 진행 중인 경기가 있는지. 있으면 자동 갱신을 더 자주 한다(refresh). */
 let liveGame = false;
 
 async function loadHistory() {
@@ -706,6 +633,7 @@ async function loadHistory() {
   try {
     const { games } = await api('/api/history?days=30');
     liveGame = games.some((g) => g.phase === 'live' && !g.cancelled);
+    if (!changed('history', games)) return;
     clear(box);
 
     if (!games.length) {
@@ -715,14 +643,8 @@ async function loadHistory() {
       return;
     }
 
-    /*
-     * 기본으로 펼칠 경기 하나를 고른다: "이미 시작한 것 중 가장 최근 경기".
-     * 서버가 최신순으로 주므로 앞에서부터 처음 걸리는 것이 그것이다.
-     *
-     * 오늘 경기가 시작되면 그 경기가 이 자리를 가져가고, 직전까지 펼쳐져 있던
-     * 어제 경기는 자동으로 접힌다 — 규칙 하나로 두 경우가 모두 처리된다.
-     * 아직 시작 전인 경기는 펼쳐 봐야 보여 줄 내용이 없어 건너뛴다.
-     */
+    // 기본으로 펼칠 경기: 시작한 경기 중 가장 최근 것(서버가 최신순으로 준다).
+    // 오늘 경기가 시작되면 어제 경기는 자동으로 접힌다.
     const featured = games.find((g) => g.phase !== 'before')?.gameId ?? null;
 
     const byDay = new Map();
@@ -738,6 +660,7 @@ async function loadHistory() {
       );
     }
   } catch (err) {
+    delete lastShown.history;
     clear(box);
     box.append(el('p', { class: 'empty' }, '기록을 불러오지 못했어요.', el('br'), err.message));
   }
@@ -745,25 +668,20 @@ async function loadHistory() {
 
 async function loadStandings() {
   try {
-    renderStandings(await api('/api/standings'));
+    const data = await api('/api/standings');
+    await configReady; // 우리 팀 행 강조에 teamCode 가 필요하다
+    if (changed('standings', data)) renderStandings(data);
+    // "○○ 기준" 문구는 시간이 지나면 바뀌니까(30분 넘으면 경고) 매번 갱신한다.
+    else $('#standings-updated').textContent = standingsStamp(data.standings);
   } catch {
-    /* 순위는 부가 정보다. 실패해도 기록 화면은 그대로 쓴다. */
+    /* 순위는 실패해도 넘어간다. */
   }
 }
 
 /**
- * 상대 팀별 시즌 전적. 순위 탭의 순위표 아래에 붙는다.
- *
- * 값은 서버가 일정에서 세어 함께 내려준다(kbo.js headToHead) — 순위 API 에는
- * 상대전적이 없어서 일정을 재료로 쓴다. 그래서 순위가 아니라 *일정*을 불러올 때
- * 그려진다.
- *
- * 무승부는 0 이어도 적는다. 위 순위표가 "85승 2무 47패" 형식이라 여기만 빼면
- * 다른 표처럼 보이고, 행마다 글자 수가 달라져 세로로 읽기 어려워진다.
- *
- * 칸 순서와 승률 표기(.625)는 위 순위표와 맞춘다. 승률은 KBO 공식대로 무승부를
- * 뺀 값이라(kbo.js headToHead) 순위표의 승률과 같은 기준으로 읽힌다.
- * 승부가 하나도 안 난 상대는 pct 가 null 로 오므로 '-' 로 둔다.
+ * 상대 팀별 시즌 전적(순위 탭, 순위표 아래).
+ * 서버가 일정에서 세서 /api/schedule 에 같이 주기 때문에 일정을 불러올 때 그린다.
+ * 순위표와 형식을 맞추려고 무승부는 0 이어도 적는다. pct 가 null 이면 '-'.
  */
 function renderHeadToHead(rows) {
   const box = $('#h2h');
@@ -781,13 +699,12 @@ function renderHeadToHead(rows) {
       ...rows.map((r) =>
         el('div', { class: 'h2h-row' },
           el('span', { class: 'h2h-opp', text: r.opp }),
-          // 숫자를 고정 폭 칸(.n)에 담아 자릿수가 달라도 세로로 줄이 맞게 한다.
-          // 문자열로만 두면 "10승"과 "9승"의 시작점이 한 자리씩 밀린다.
+          // 숫자를 고정 폭 칸(.n)에 넣어 "10승"/"9승" 자릿수가 달라도 줄이 맞게.
           el('span', { class: 'h2h-rec' },
             n(r.wins), '승 ', n(r.draws), '무 ', n(r.losses), '패'),
           el('span', {
             class: 'h2h-pct',
-            text: r.pct === null ? '-' : r.pct.toFixed(3).replace(/^0/, ''),
+            text: r.pct === null ? '-' : pctText(r.pct),
           }),
         ),
       ),
@@ -797,11 +714,7 @@ function renderHeadToHead(rows) {
 
 /* ─────────── 일정 ─────────── */
 
-/**
- * dateStr 이 today 로부터 며칠 뒤인지. 0이면 오늘, 1이면 내일.
- * today 는 서버가 이미 계산해 준 KST 날짜 문자열('YYYY-MM-DD')을 그대로 받는다 —
- * 일정 목록의 매 행마다 new Date() 로 "오늘"을 다시 구할 이유가 없다.
- */
+/** dateStr 이 today 로부터 며칠 뒤인지(0 오늘, 1 내일). today 는 서버가 준 KST 날짜. */
 function daysFromToday(dateStr, today) {
   const [ay, am, ad] = today.split('-').map(Number);
   const [by, bm, bd] = dateStr.split('-').map(Number);
@@ -823,12 +736,9 @@ function renderScheduleItem(g, today) {
   const isPast = g.gameDate < today;
   const isToday = g.gameDate === today;
 
-  const seriesTag =
-    SERIES_SHORT[g.series] && g.series !== 'regular'
-      ? el('span', { class: 'tag' }, icon('post'), SERIES_SHORT[g.series])
-      : null;
+  const seriesTag = seriesTagOf(g.series);
 
-  // 지난 경기는 결과를, 예정 경기는 시각을 오른쪽에 둔다.
+  // 오른쪽: 지난 경기는 결과, 예정 경기는 시각.
   const trailing = g.result
     ? el('div', { class: `sched-score ${g.result}` },
         el('span', { class: 'sched-vs', text: `${g.teamScore} : ${g.oppScore}` }),
@@ -870,15 +780,11 @@ function renderScheduleItem(g, today) {
 /* ─────────── 일정 · 달력 ─────────── */
 
 
-/** 마지막으로 불러온 일정. 리스트/달력 전환과 '오늘' 버튼이 재조회 없이 이 값을 함께 쓴다. */
+/** 마지막으로 받은 일정. 뷰 전환·'오늘' 버튼이 다시 조회하지 않고 쓴다. */
 let scheduleData = null;
-let calendarMonth = null; // 'YYYY-MM'. 달력이 지금 보여주는 달.
+let calendarMonth = null; // 달력에 보이는 달 'YYYY-MM'
 
-/**
- * 리스트 뷰에서 날짜 카드를 찾아 화면 중앙으로 옮긴다.
- * 그 날짜에 경기가 없으면(휴식일) 그 이후 가장 가까운 경기로 대신한다 —
- * "오늘 경기, 없으면 내일 경기"를 일반화한 동작이다.
- */
+/** 리스트에서 그 날짜 카드를 화면 가운데로. 경기 없는 날이면 다음 경기로. */
 function scrollListToDate(box, date) {
   const anchor =
     box.querySelector(`[data-date="${date}"]`) ??
@@ -887,12 +793,12 @@ function scrollListToDate(box, date) {
   return Boolean(anchor);
 }
 
-/** 리스트가 켜질 때마다 호출한다: 오늘(없으면 다음) 경기를 화면 중앙으로. */
+/** 오늘(없으면 다음) 경기를 가운데로. */
 function scrollListToToday() {
   if (scheduleData) scrollListToDate($('#schedule-list'), scheduleData.today);
 }
 
-/** 리스트/달력 버튼 상태를 바꾸고 해당 뷰를 다시 그린다. 스크롤은 호출부가 필요할 때 따로 한다. */
+/** 리스트/달력 전환. 스크롤은 호출부에서. */
 function activateScheduleView(view) {
   $$('.view-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.view === view));
   renderScheduleView();
@@ -907,9 +813,7 @@ function renderScheduleList(box, { games, today }) {
   const draws = played.filter((g) => g.result === 'draw').length;
   const homeCount = games.filter((g) => g.isHome).length;
 
-  // 요약줄은 카드 목록과 달리 #sched-fixed 안에 고정된 요소라, 매번 새로 만들지 않고
-  // 내용만 갈아 끼운다 — '경기 알림' 제목부터 이 줄까지는 그대로 있고 카드만 스크롤되게
-  // 하려는 것이 목적이라, 애초에 스크롤 영역(box) 안에 넣지 않는다.
+  // 요약줄은 고정 영역(#sched-fixed)에 있어서 내용만 바꾼다. 카드 목록만 스크롤된다.
   const summary = $('#sched-summary');
   clear(summary);
   summary.append(
@@ -919,7 +823,7 @@ function renderScheduleList(box, { games, today }) {
     played.length ? ` · ${wins}승 ${draws}무 ${losses}패` : '',
   );
 
-  // 월별로 끊어 긴 목록을 훑기 쉽게 한다.
+  // 월별로 나눈다.
   let lastMonth = null;
   for (const g of games) {
     const month = g.gameDate.slice(0, 7);
@@ -932,12 +836,9 @@ function renderScheduleList(box, { games, today }) {
 }
 
 /**
- * 달력 뷰. 한 달을 7열 격자로 그리고, 경기가 있는 날짜에 상대팀 이름(검정)과
- * 결과 배지(승 파랑 · 패 빨강 · 무 회색)를 얹는다. 홈경기는 배경을 한 단계
- * 진한 크림으로 칠해 원정과 구분한다.
- *
- * 날짜를 누르면 리스트 뷰로 전환해 그 날짜로 스크롤한다 — 달력은 훑어보는 용도,
- * 상세 확인은 리스트가 맡는 방식으로 역할을 나눴다.
+ * 달력 뷰(7열). 경기 있는 날에 상대팀 이름을 쓰고, 결과는 칸 테두리 색
+ * (승 파랑, 패 빨강, 무 노랑)으로 표시한다. 홈경기는 배경색이 다르다.
+ * 날짜를 누르면 리스트로 바꿔서 그 날짜로 스크롤한다.
  */
 function renderCalendar(box, { games, today }) {
   clear(box);
@@ -980,8 +881,7 @@ function renderCalendar(box, { games, today }) {
       g && 'has-game',
       g?.isHome && 'is-home-game',
       g?.cancelled && 'is-off',
-      // 승/패/무를 원 배지 대신 셀 테두리 색으로 표시한다. 홈/원정 구분(배경 명도)과
-      // 별개로, 결과가 있는 날짜는 어느 쪽이든 이 테두리가 붙는다.
+      // 결과는 테두리 색(style.css .result-*).
       g?.result && `result-${g.result}`,
     ].filter(Boolean).join(' ');
 
@@ -1001,10 +901,10 @@ function renderCalendar(box, { games, today }) {
 function renderScheduleView() {
   if (!scheduleData) return;
 
-  const active = document.querySelector('.view-btn.is-active')?.dataset.view ?? 'list';
+  const active = scheduleView() ?? 'list';
   $('#schedule-list').classList.toggle('is-active', active === 'list');
   $('#schedule-calendar').classList.toggle('is-active', active === 'calendar');
-  // 요약줄은 리스트 전용 정보라, 고정 영역에 상시 존재하는 대신 리스트일 때만 보여준다.
+  // 요약줄은 리스트일 때만.
   $('#sched-summary').hidden = active !== 'list';
 
   if (active === 'list') {
@@ -1018,7 +918,7 @@ function renderScheduleView() {
 $$('.view-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     activateScheduleView(btn.dataset.view);
-    // 리스트가 켜질 때마다("리스트 상태 on") 오늘 경기 위치로 다시 맞춘다.
+    // 리스트로 바꿀 때마다 오늘 경기로 스크롤.
     if (btn.dataset.view === 'list') scrollListToToday();
   });
 });
@@ -1035,9 +935,8 @@ $('#schedule-calendar').addEventListener('click', (ev) => {
 
   const cell = ev.target.closest('[data-date]');
   if (cell && !cell.disabled) {
-    // activateScheduleView 로 직접 전환한다(view-btn.click() 을 거치면 위의
-    // "오늘로 스크롤"이 먼저 실행돼 방금 고른 날짜로 다시 스크롤하는 두 번째
-    // 애니메이션과 겹친다). 여기서는 고른 날짜로 곧장 한 번만 스크롤한다.
+    // view-btn.click() 을 쓰면 "오늘로 스크롤"이 먼저 돌아서 스크롤이 두 번 된다.
+    // 직접 전환하고 고른 날짜로 한 번만 스크롤한다.
     activateScheduleView('list');
     scrollListToDate($('#schedule-list'), cell.dataset.date);
   }
@@ -1045,7 +944,7 @@ $('#schedule-calendar').addEventListener('click', (ev) => {
 
 $('#btn-today').addEventListener('click', () => {
   if (!scheduleData) return;
-  const active = document.querySelector('.view-btn.is-active')?.dataset.view;
+  const active = scheduleView();
 
   if (active === 'calendar') {
     calendarMonth = scheduleData.today.slice(0, 7);
@@ -1056,18 +955,18 @@ $('#btn-today').addEventListener('click', () => {
 });
 
 async function loadSchedule() {
-  // 비어 있거나 실패했을 때의 안내는 지금 켜져 있는 뷰에 띄운다.
-  // 기본이 달력이라, 리스트에만 넣으면 아무것도 안 보이는 화면이 된다.
+  // 빈 상태·에러 안내는 지금 켜진 뷰에 넣는다(기본 뷰가 달력).
   const box = () =>
-    document.querySelector('.view-btn.is-active')?.dataset.view === 'calendar'
+    scheduleView() === 'calendar'
       ? $('#schedule-calendar')
       : $('#schedule-list');
 
   try {
-    scheduleData = await api('/api/schedule');
+    const data = await api('/api/schedule');
+    if (!changed('schedule', data)) return;
+    scheduleData = data;
 
-    // 상대전적은 이 응답에 함께 실려 온다. 일정이 비어도(비시즌) 빈 상태를
-    // 그려 줘야 스켈레톤이 남지 않으므로 아래 early return 보다 먼저 부른다.
+    // 상대전적은 일정이 비어도 그려야(스켈레톤 지우기) 해서 return 보다 먼저.
     renderHeadToHead(scheduleData.headToHead);
 
     if (!scheduleData.games.length) {
@@ -1079,9 +978,9 @@ async function loadSchedule() {
     }
 
     renderScheduleView();
-    // 오늘 경기 위치로 맞추는 시점은 여기가 아니라 "일정 탭을 열 때"·"리스트로
-    // 전환할 때"다(패널이 안 보이는 동안은 스크롤이 무효하다). .tab 클릭 핸들러 참고.
+    // 오늘로 스크롤은 여기서 안 한다. 패널이 숨어 있으면 안 먹어서 탭을 열 때 한다.
   } catch (err) {
+    delete lastShown.schedule;
     clear(box());
     box().append(el('p', { class: 'empty' }, '일정을 불러오지 못했어요.', el('br'), err.message));
   }
@@ -1092,8 +991,7 @@ async function loadSchedule() {
 function setPushUi(state, desc) {
   $('#push-desc').textContent = desc;
 
-  // 알림이 꺼져 있을 때만 전면 코랄 콜아웃으로 바꿔 행동을 유도한다.
-  // 켜진 뒤에는 평범한 크림 카드로 돌아간다 — 코랄은 아껴 쓰는 색이다.
+  // 알림이 꺼져 있을 때만 강조 카드(card-coral)로 보여서 켜도록 유도한다.
   $('#push-card').classList.toggle('card-coral', state === 'off' || state === 'error');
 
   const btn = $('#btn-toggle');
@@ -1104,9 +1002,7 @@ function setPushUi(state, desc) {
 }
 
 function applySettings(settings) {
-  // [data-key] 로 한정한다 — 진동 스위치는 같은 .sw 마크업을 쓰지만
-  // data-vibrate-key 를 쓰고 서버 settings 객체에는 없는 값이라, 한정하지
-  // 않으면 여기서 매번 꺼진 것으로 잘못 덮어써진다.
+  // [data-key] 만. 진동 스위치도 .sw 를 쓰는데 서버 설정에는 없어서 꺼진 걸로 덮인다.
   $$('.sw input[data-key]').forEach((input) => {
     input.checked = Boolean(settings?.[input.dataset.key]);
   });
@@ -1129,7 +1025,7 @@ async function enablePush() {
 
   const { vapidPublicKey } = await api('/api/config');
 
-  // 초기화 때 등록이 실패했을 수 있으므로 다시 시도한다. register() 는 멱등이다.
+  // 처음에 등록이 실패했을 수도 있어서 다시 한다(여러 번 불러도 괜찮다).
   await navigator.serviceWorker.register('/sw.js');
   const reg = await navigator.serviceWorker.ready;
 
@@ -1201,11 +1097,11 @@ $('#btn-test').addEventListener('click', async () => {
   }
 });
 
-$$('.sw input').forEach((input) => {
+// 진동 스위치(data-vibrate-key)는 서버 설정이 아니므로 [data-key] 로 한정한다.
+$$('.sw input[data-key]').forEach((input) => {
   input.addEventListener('change', async () => {
     if (!subscription) return;
     const key = input.dataset.key;
-    if (!SETTING_KEYS.includes(key)) return;
 
     try {
       await api('/api/settings', {
@@ -1221,9 +1117,8 @@ $$('.sw input').forEach((input) => {
 
 $$('.vibrate-toggle').forEach((input) => {
   input.addEventListener('change', async () => {
-    // 아는 키만 저장한다. sw.js 는 서버가 보낸 kind 로 이 값을 찾으므로,
-    // 마크업에 오타난 키가 섞이면 스위치는 정상처럼 보이면서 진동은 계속
-    // 기본값(켬)으로 동작한다 — 조용히 어긋나는 대신 여기서 걸러 낸다.
+    // 아는 키만 저장한다. sw.js 는 kind 로 이 값을 찾아서, 마크업 키에 오타가
+    // 있으면 스위치는 멀쩡해 보여도 진동은 계속 켜진 채로 동작한다.
     const settings = Object.fromEntries(
       $$('.vibrate-toggle')
         .filter((i) => VIBRATE_KEYS.includes(i.dataset.vibrateKey))
@@ -1232,7 +1127,7 @@ $$('.vibrate-toggle').forEach((input) => {
     try {
       await setVibrateSettings(settings);
     } catch (err) {
-      input.checked = !input.checked; // 저장 실패 시 UI 를 되돌린다.
+      input.checked = !input.checked; // 저장 실패하면 되돌림
       toast(err.message);
     }
   });
@@ -1271,12 +1166,9 @@ async function initPush() {
   subscription = existing;
 
   /*
-   * 서버에 남아 있는 설정을 복원한다. 서버에서 사라졌다면 다시 등록한다.
-   *
-   * "켜짐"은 서버가 이 구독을 안다고 확인한 뒤에 쓴다. 먼저 켜 두면 재등록이
-   * 실패해도 카드가 "이 기기로 알림을 보내드려요" 로 남아, 서버는 이 기기를
-   * 모르는데 화면만 멀쩡해 보인다 — 알림이 안 오는데 볼 곳이 없는 상태가 된다.
-   * 2026-09 에 실제로 그 조합이 가능했다(구독 상한이 재등록을 막았다).
+   * 서버에서 설정을 받아 온다. 서버에 구독이 없으면 다시 등록한다.
+   * "켜짐" 표시는 서버 확인 뒤에 한다. 먼저 켜 두면 재등록이 실패해도 화면은
+   * 켜진 걸로 보인다(2026-09 구독 상한 때문에 실제로 그랬음).
    */
   try {
     let settings;
@@ -1298,16 +1190,8 @@ async function initPush() {
 }
 
 (async function main() {
-  try {
-    const cfg = await api('/api/config');
-    teamCode = cfg.teamCode || 'NC';
-  } catch {
-    /* 설정 조회 실패는 기본값으로 계속 진행 */
-  }
-
-  await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
-
-  // 진동 설정은 순수 로컬(IndexedDB)이라 구독 여부와 무관하게 항상 불러온다.
+  // 알림 준비는 데이터 로딩과 상관없어서 같이 시작한다.
+  // 진동 설정은 로컬 값이라 구독과 상관없이 불러온다.
   applyVibrateSettings().catch((err) => console.error('vibrate settings load failed', err));
 
   initPush().catch((err) => {
@@ -1315,20 +1199,15 @@ async function initPush() {
     console.error('initPush failed', err);
   });
 
+  await Promise.all([loadHistory(), loadStandings(), loadSchedule()]);
+
   /*
-   * 자동 갱신. 새로고침 없이 화면이 따라오게 하는 경로는 세 가지다.
-   *
-   *  - 20초 주기(경기 중에만): 회차와 초·말이 바뀌는 곳은 경기 카드뿐이라
-   *    기록만 다시 부른다. 서버 크론이 1분 간격이라 원본은 1분마다 갱신되는데,
-   *    그 시점이 클라이언트 주기와 어긋나면 60초 주기로는 이미 바뀐 값을 다시
-   *    60초 가까이 못 보게 된다(최악 2분). 20초로 좁혀 그 어긋남을 줄인다.
-   *  - 60초 주기: 순위·일정까지 함께 맞춘다. 이 둘은 경기가 끝나야 바뀌므로
-   *    짧은 주기에 끼울 이유가 없다 — 일정은 시즌 전체라 응답도 크다.
-   *  - 푸시 수신 즉시: 득점·시작·종료가 감지되면 서비스 워커가 알려준다(sw.js).
-   *    알림을 켠 기기에서는 폴링을 기다리지 않고 그 순간 반영된다.
-   *
-   * 화면을 보고 있지 않을 때는 요청하지 않는다. 모든 호출부가 아래 두 함수를
-   * 지나므로 판단을 여기 한 곳에만 둔다.
+   * 자동 갱신
+   *  - 20초(경기 중일 때만): 기록만. 60초로 하면 서버 갱신(1분)과 어긋나서
+   *    최악 2분 늦게 보인다.
+   *  - 60초: 기록·순위·일정 전부. 순위·일정은 경기가 끝나야 바뀐다.
+   *  - 푸시 받았을 때: sw.js 가 메시지를 보내면 바로.
+   * 화면이 안 보일 때는 요청하지 않는다.
    */
   const refresh = () => {
     if (document.hidden) return;
@@ -1345,7 +1224,7 @@ async function initPush() {
   setInterval(refresh, 60_000);
   setInterval(refreshLive, 20_000);
 
-  // 앱을 다시 볼 때 최신 상태로 갱신한다.
+  // 앱으로 돌아오면 바로 갱신.
   document.addEventListener('visibilitychange', refresh);
 
   navigator.serviceWorker?.addEventListener('message', (ev) => {

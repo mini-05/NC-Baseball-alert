@@ -1,8 +1,8 @@
 /**
  * 네이버 스포츠 KBO API 어댑터.
  *
- * 공식 문서가 없는 비공식 엔드포인트다. 응답 스키마가 예고 없이 바뀔 수 있으므로
- * 이 파일 하나만 고치면 되도록 나머지 코드와의 접점을 좁혀 둔다.
+ * 문서 없는 비공식 API라 응답 형식이 언제든 바뀔 수 있다. 바뀌면 이 파일만
+ * 고치면 되도록 네이버 응답을 다루는 코드는 전부 여기에 둔다.
  */
 
 import { josa } from 'es-hangul';
@@ -11,7 +11,7 @@ const SCHEDULE_URL = 'https://api-gw.sports.naver.com/schedule/games';
 const STANDINGS_URL = 'https://api-gw.sports.naver.com/statistics/categories/kbo/seasons';
 const FIELDS = 'basic,superCategoryId,categoryName,stadium,statusNum';
 
-/** 네이버가 봇 트래픽을 막는 경우가 있어 모바일 웹과 동일한 헤더를 보낸다. */
+/** 봇으로 막히는 걸 피하려고 모바일 웹과 같은 헤더를 보낸다. */
 const HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
@@ -23,26 +23,22 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /* ─────────────────────────── 시간 ─────────────────────────── */
 
-/** 현재 시각을 KST 기준으로 분해한다. (Workers 런타임은 UTC로 동작) */
+/** 현재 KST 날짜·연도. Workers 런타임은 UTC 기준이다. */
 export function kstNow(now = new Date()) {
   const k = new Date(now.getTime() + KST_OFFSET_MS);
   return {
     date: k.toISOString().slice(0, 10), // YYYY-MM-DD
     year: k.getUTCFullYear(),
-    month: k.getUTCMonth() + 1,
-    hour: k.getUTCHours(),
-    minute: k.getUTCMinutes(),
-    iso: k.toISOString().slice(0, 19), // 오프셋 없는 KST 로컬시각
   };
 }
 
-/** KST 기준으로 days 만큼 이동한 날짜 문자열. */
+/** KST 기준 오늘에서 days 만큼 옮긴 날짜(YYYY-MM-DD). */
 export function kstDateOffset(days, now = new Date()) {
   const k = new Date(now.getTime() + KST_OFFSET_MS + days * 86400000);
   return k.toISOString().slice(0, 10);
 }
 
-/** "2026-08-23T18:30:00" (KST 로컬) 을 UTC epoch ms 로 바꾼다. */
+/** "2026-08-23T18:30:00"(KST) → epoch ms. 못 읽으면 null. */
 export function kstIsoToEpoch(iso) {
   const t = Date.parse(`${iso}+09:00`);
   return Number.isNaN(t) ? null : t;
@@ -51,22 +47,20 @@ export function kstIsoToEpoch(iso) {
 /* ─────────────────────────── 시리즈 ─────────────────────────── */
 
 export const SERIES = {
-  exhibition: { label: '시범경기', short: '시범', post: false, order: -2 },
-  allstar: { label: '올스타전', short: '올스타', post: false, order: -1 },
-  regular: { label: '정규시즌', short: '', post: false, order: 0 },
-  tiebreaker: { label: '순위결정전', short: '순위결정전', post: true, order: 1 },
-  wildcard: { label: '와일드카드 결정전', short: '와일드카드', post: true, order: 2 },
-  semi_playoff: { label: '준플레이오프', short: '준PO', post: true, order: 3 },
-  playoff: { label: '플레이오프', short: 'PO', post: true, order: 4 },
-  korean_series: { label: '한국시리즈', short: '한국시리즈', post: true, order: 5 },
+  allstar: { short: '올스타', post: false },
+  regular: { short: '', post: false },
+  tiebreaker: { short: '순위결정전', post: true },
+  wildcard: { short: '와일드카드', post: true },
+  semi_playoff: { short: '준PO', post: true },
+  playoff: { short: 'PO', post: true },
+  korean_series: { short: '한국시리즈', post: true },
 };
 
 /**
- * gameId 접두 4자리로 시리즈를 판별한다.
+ * gameId 앞 4자리로 시리즈를 구분한다.
  *
- * 네이버는 시리즈를 나타내는 별도 필드를 주지 않는다. 대신 포스트시즌 경기의
- * gameId 는 날짜 대신 고정 접두사로 시작한다. 2023·2024·2025 세 시즌에서
- * 아래 대응이 일치하는 것을 확인했다.
+ * 시리즈 필드가 따로 없다. 포스트시즌 경기는 gameId 가 날짜 대신 고정 접두사로
+ * 시작하는데, 2023~2025 시즌 데이터로 아래 대응을 확인했다.
  *
  *   20260823...  정규시즌 또는 시범경기 (경기일 YYYYMMDD)
  *   9999...      올스타전 (팀 코드도 EA/WE 로 나온다)
@@ -76,11 +70,11 @@ export const SERIES = {
  *   5555...      플레이오프
  *   7777...      한국시리즈
  *
- * 시범경기는 접두사로 구분되지 않는다. 정규시즌과 형식이 완전히 같아서
- * 개막일 이전인지로 갈라야 한다. (season.js 의 resolveSeasonBounds 참고)
+ * 시범경기는 정규시즌과 gameId 형식이 같아서 개막일로 가른다
+ * (season.js resolveSeasonOpener).
  *
- * 문서화된 규칙이 아니므로, 모르는 접두사는 정규시즌으로 간주해
- * "알림이 아예 안 오는" 최악을 피한다.
+ * 공식 규칙이 아니라서 모르는 접두사는 정규시즌으로 본다. 알림이 아예 안 가는
+ * 것보다는 낫다.
  */
 export function seriesOf(gameId) {
   const prefix = String(gameId ?? '').slice(0, 4);
@@ -97,39 +91,35 @@ export function seriesOf(gameId) {
 
 export const isPostseason = (series) => SERIES[series]?.post === true;
 
+/** 알림 설정의 시리즈 범위(SCOPE_COLUMN 키): regular | postseason */
+export const scopeOf = (series) => (isPostseason(series) ? 'postseason' : 'regular');
+
 /**
- * gameId 끝 4자리는 시즌 연도다. (`20260822SSNC0` + `2026`)
- * 포스트시즌 경기도 같은 규칙을 따른다: `77771026HHLG0` + `2025`.
- * 이 값으로 "올해 경기"를 가려낸다 — 경기 날짜가 아니라 시즌 기준이어야
- * 11월에 열리는 한국시리즈가 그해 시즌으로 묶인다.
+ * gameId 끝 4자리 = 시즌 연도. (`20260822SSNC0` + `2026`, `77771026HHLG0` + `2025`)
+ * 경기 날짜가 아니라 이 값으로 시즌을 나눠야 11월 한국시리즈도 그해 시즌에 들어간다.
  */
 export function seasonYearOf(gameId) {
   const tail = String(gameId ?? '').slice(-4);
   return /^\d{4}$/.test(tail) ? Number(tail) : null;
 }
 
-/** 정규 KBO 10개 구단 코드. 올스타전은 EA(이스턴)·WE(웨스턴)으로 나온다. */
+/** KBO 10개 구단 코드. 올스타전 팀은 EA(이스턴)·WE(웨스턴)이라 여기 없다. */
 export const TEAM_CODES = new Set(['HT', 'SS', 'LG', 'OB', 'KT', 'SK', 'LT', 'NC', 'WO', 'HH']);
 
 /* ─────────────────────────── 일정 ─────────────────────────── */
 
 /**
- * 네이버 원본 경기 객체를 내부 표현으로 변환한다.
+ * 네이버 경기 객체를 내부 형식으로 바꾼다.
  *
- * phase 판정: 관측으로 확인된 값은 BEFORE·READY(경기 전)·RESULT·ENDED(종료),
- * 나머지는 진행 중으로 본다.
+ * phase: BEFORE·READY → before, RESULT·ENDED → result, 나머지 → live.
  *
- * ENDED 는 문서화돼 있지 않지만 실측(poll_log)으로 확인했다 — 스코어가 확정된
- * 직후 RESULT 로 넘어가기 전 최대 10여 분간 이 값을 거친다. 그동안 점수는
- * 더 바뀌지 않으므로 RESULT 와 동일하게 취급해도 안전하고, 그렇게 해야 종료
- * 알림이 그 10분을 기다리지 않는다.
+ * ENDED(poll_log 로 확인): 점수 확정 후 RESULT 로 바뀌기 전까지 최대 10분 정도
+ *   거친다. 점수가 더 안 바뀌므로 result 로 봐야 종료 알림이 10분 늦지 않는다.
+ * READY(poll_log 로 확인): BEFORE 와 STARTED 사이에 최대 53분 거친다. 그동안
+ *   statusInfo 는 "경기전", 점수는 0:0 이다. live 로 보면 시작 알림이 최대 53분
+ *   일찍 나간다.
  *
- * READY 도 문서화돼 있지 않지만 실측으로 확인했다 — BEFORE 와 STARTED 사이에
- * 최대 53분간 이 값을 거치며, statusInfo 가 그동안 계속 "경기전"이고 점수도
- * 0:0 으로 고정돼 있다. live 로 처리하면 실제 플레이볼보다 최대 53분 이른
- * "경기 시작" 알림이 나가므로 BEFORE 와 동일하게 취급한다.
- *
- * 원본 statusCode 를 그대로 저장해 두어 나중에 새 값이 나타나도 추적할 수 있게 한다.
+ * 처음 보는 statusCode 가 나와도 추적할 수 있게 원본 값도 같이 저장한다.
  */
 export function normalizeGame(g) {
   const status = String(g.statusCode || '').toUpperCase();
@@ -159,14 +149,13 @@ export function normalizeGame(g) {
 }
 
 /**
- * size 는 kbo 경기가 아니라 *응답 전체*(퓨처스·국가대표 포함)에 걸리는 상한이고,
- * 넘으면 아무 표시 없이 잘린다. 500 을 넘겨 요청하면 오히려 결과가 깨진다
- * (2000 으로 요청하면 10건만 돌아오는 것을 확인).
- * 그래서 상한은 500 으로 두고, 기간을 짧게 쪼개 여러 번 부른다.
+ * size 는 KBO 경기만이 아니라 응답 전체(퓨처스·국가대표 포함)에 걸리고, 넘치면
+ * 표시 없이 잘린다. 500 보다 크게 주면 오히려 깨진다(2000 → 10건만 옴).
+ * 그래서 500 으로 두고 기간을 쪼개 여러 번 부른다.
  */
 const PAGE_SIZE = 500;
 
-/** 한 번에 요청할 최대 일수. 하루 최대 5경기 × 여러 카테고리를 고려한 값. */
+/** 한 번에 요청하는 최대 일수. 하루 5경기 + 다른 카테고리 경기를 감안한 값. */
 const CHUNK_DAYS = 31;
 
 const addDays = (dateStr, n) =>
@@ -187,16 +176,15 @@ async function fetchWindow(fromDate, toDate) {
 
   const games = json.result.games;
   if (games.length >= PAGE_SIZE) {
-    // 잘렸다는 뜻이다. 조용히 넘어가면 경기가 통째로 빠진 채 동작하게 된다.
+    // 잘린 것. 경기가 빠진 채로 돌 수 있어서 로그는 남긴다.
     console.warn(`KBO schedule truncated at ${PAGE_SIZE}: ${fromDate}~${toDate}`);
   }
   return games;
 }
 
 /**
- * 지정한 기간의 KBO 경기를 가져온다.
- * categoryId 가 'kbo' 인 경기만 남긴다. (퓨처스·국가대표 경기 제외)
- * 기간이 길면 자동으로 나눠 요청하고 gameId 로 중복을 제거한다.
+ * 기간 안의 KBO 경기(categoryId 'kbo', 퓨처스·국가대표 제외)를 가져온다.
+ * 긴 기간은 CHUNK_DAYS 단위로 나눠 요청하고 gameId 로 중복을 뺀다.
  */
 export async function fetchGames(fromDate, toDate) {
   const windows = [];
@@ -221,12 +209,12 @@ export function filterTeam(games, teamCode) {
 }
 
 /**
- * "이번 시즌의 진짜 경기"만 남긴다.
+ * 이번 시즌 정규시즌·포스트시즌 경기만 남긴다.
  *
- * 네이버의 kbo 카테고리에는 정규시즌·포스트시즌 외에 아래가 섞여 있다.
- *   - 시범경기: 형식이 정규시즌과 완전히 같고 개막일 이전에만 열린다 (2026년 팀당 12경기)
- *   - 올스타전: gameId 접두 9999, 팀 코드가 EA(이스턴)·WE(웨스턴)
- *   - 지난 시즌 경기: 날짜 범위가 겹치면 함께 딸려 온다
+ * kbo 카테고리에 섞여 오는 것들:
+ *   - 시범경기: 정규시즌과 형식이 같고 개막일 전에만 열림 (2026년 팀당 12경기)
+ *   - 올스타전: gameId 접두 9999, 팀 코드 EA·WE
+ *   - 지난 시즌 경기: 날짜 범위가 겹치면 같이 온다
  *
  * @param {number} year   이번 시즌 연도
  * @param {string|null} opener 정규시즌 개막일(YYYY-MM-DD). null 이면 시범경기를 거르지 않는다.
@@ -235,18 +223,18 @@ export function filterCurrentSeason(games, year, opener) {
   return games.filter((g) => {
     if (seasonYearOf(g.gameId) !== year) return false;
 
-    // 올스타전은 접두사와 팀 코드 양쪽으로 걸러 한쪽이 바뀌어도 새지 않게 한다.
+    // 올스타전은 접두사와 팀 코드 둘 다로 거른다. 한쪽이 바뀌어도 걸리게.
     if (g.series === 'allstar') return false;
     if (!TEAM_CODES.has(g.homeCode) || !TEAM_CODES.has(g.awayCode)) return false;
 
-    // 개막일을 모르면 시범경기 판별을 포기한다. 빠뜨리는 것보다 낫다.
+    // 개막일을 모르면 시범경기는 거르지 않는다. 정규시즌 경기를 빠뜨리는 것보단 낫다.
     if (opener && g.series === 'regular' && g.gameDate < opener) return false;
 
     return true;
   });
 }
 
-/** 대상 팀 관점에서 상대팀 이름과 홈/원정 여부를 뽑는다. */
+/** 우리 팀 기준으로 홈/원정, 팀명, 점수를 정리한다. */
 export function perspective(game, teamCode) {
   const isHome = game.homeCode === teamCode;
   return {
@@ -261,11 +249,11 @@ export function perspective(game, teamCode) {
 /* ─────────────────────────── 순위 · 포스트시즌 ─────────────────────────── */
 
 /**
- * 시즌 순위표를 가져온다.
+ * 시즌 순위표.
  *
- * 응답의 postSeason.teamColors 에 그 해의 포스트시즌 진출 기준이 들어 있다.
- * ("1위 한국시리즈 진출", "4~5위 와일드카드 결정전 진출" 등)
- * 규칙이 바뀌어도 따라가도록 상수로 박지 않고 이 값을 그대로 쓴다.
+ * postSeason.teamColors 에 그해 포스트시즌 진출 구간이 들어 있다
+ * ("1위 한국시리즈 진출", "4~5위 와일드카드 결정전 진출" 등).
+ * 규칙이 바뀌어도 그대로 따라가도록 하드코딩하지 않고 이 값을 쓴다.
  */
 export async function fetchStandings(year) {
   const res = await fetch(`${STANDINGS_URL}/${year}/teams`, { headers: HEADERS });
@@ -281,13 +269,11 @@ export async function fetchStandings(year) {
     title: c.title,
     from: c.startRanking,
     to: c.endRanking,
-    color: c.color,
   }));
 
   return {
     year,
-    gameType: json.result.gameType ?? null,
-    // 진출권 하한선. tiers 가 비어 있으면 판정을 포기한다(추측하지 않는다).
+    // 진출권 마지막 순위. tiers 가 없으면 null(추측하지 않음).
     cutoff: tiers.length ? Math.max(...tiers.map((t) => t.to)) : null,
     tiers,
     teams: stats
@@ -309,12 +295,11 @@ export async function fetchStandings(year) {
 }
 
 /**
- * 포스트시즌 진출 상황을 판정한다.
+ * 포스트시즌 진출 상황.
  *
- * "탈락 확정"은 산술적으로만 판단한다: 대상 팀이 남은 경기를 전승해도
- * 진출 하한선 팀의 *현재* 승수에 못 미치면 확정 탈락이다. 하한선 팀도 승수가
- * 줄어들 수는 없으므로 이 판정은 반증 불가능하다. 반대로 "가능"은 어디까지나
- * 산술적 가능성이며 확률이 아니다.
+ * 탈락 확정: 남은 경기를 다 이겨도 진출권 마지막 팀의 현재 승수에 못 미칠 때.
+ * 승수는 줄지 않으니 이 판정은 뒤집히지 않는다. "가능"은 산술적으로 가능하다는
+ * 뜻이지 확률이 아니다.
  *
  * @param standings fetchStandings() 결과
  * @param teamCode  대상 팀
@@ -327,7 +312,7 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
   const line = standings.teams.find((t) => t.rank === standings.cutoff);
   const remaining = Math.max(0, totalGames - me.games);
 
-  // 현재 순위가 진출권 안이면 그대로 보고한다.
+  // 지금 진출권 안이면 in.
   const inside = me.rank <= standings.cutoff;
   const tier = standings.tiers.find((t) => me.rank >= t.from && me.rank <= t.to) ?? null;
 
@@ -344,20 +329,18 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
   const lineName = line?.name ?? `${standings.cutoff}위`;
 
   /*
-   * 바로 아래 순위 팀과의 승차. "누가 나를 쫓고 있나"는 진출권 경쟁만큼 자주
-   * 보는 값인데, 표의 승차 칸은 1위 기준이라 이웃끼리의 거리가 드러나지 않는다.
+   * 바로 아래 팀과의 승차. 순위표의 승차는 1위 기준이라 따로 계산한다.
    *
-   * rank + 1 로 찾지 않고 정렬된 목록의 다음 팀을 쓴다 — 공동 순위가 생기면
-   * (7위가 둘이면 그다음은 9위) rank + 1 은 빈손으로 돌아온다. 공동 순위인
-   * 경우 승차 0 으로 나오는데, 그것도 "바로 뒤에 붙어 있다"는 사실 그대로다.
-   * teams 는 fetchStandings 에서 rank 순으로 정렬해 둔다.
+   * rank + 1 대신 정렬된 목록의 다음 팀을 쓴다. 공동 7위가 둘이면 다음은 9위라
+   * rank + 1 로는 못 찾는다. 공동 순위면 승차 0 으로 나온다.
+   * (teams 는 fetchStandings 에서 rank 순으로 정렬돼 있다)
    */
   const below = standings.teams[standings.teams.indexOf(me) + 1];
   const chaser = below
     ? { name: below.name, rank: below.rank, gap: Number((below.gb - me.gb).toFixed(1)) }
     : null;
 
-  // 문장을 서버에서 완성해 내려보낸다. 조사 처리를 한곳(es-hangul)에 모으기 위함이다.
+  // 조사 처리(es-hangul)를 서버 한 곳에 두려고 문장까지 여기서 만든다.
   let note;
   if (status === 'in') {
     note = `현재 순위를 지키면 ${tier?.title ?? '포스트시즌 진출'}이에요. 잔여 ${remaining}경기.`;
@@ -384,18 +367,14 @@ export function postseasonOutlook(standings, teamCode, totalGames) {
 }
 
 /**
- * 상대 팀별 시즌 전적을 센다.
+ * 상대 팀별 시즌 전적.
  *
- * 순위 API 에는 상대전적이 없다. 대신 loadSchedule 이 이미 시즌 전 경기를
- * 상대팀(oppName)과 결과(result)까지 붙여 내려주므로, 그것만 묶어 세면 된다 —
- * 새로 조회할 것이 없다.
+ * 순위 API 에는 상대전적이 없어서 loadSchedule 결과(상대팀·결과 포함)를 센다.
+ * 추가 조회는 없다.
  *
- * 정규시즌만 센다. 지금은 포스트시즌이 없어 무의미하지만, 10월에 시리즈가
- * 열리면 16경기 표본에 5경기가 섞여 조용히 오염된다.
+ * 정규시즌 경기만 센다. 포스트시즌 시리즈가 섞이면 팀당 16경기 전적이 틀어진다.
  *
- * pct 는 KBO 공식대로 무승부를 뺀 승/(승+패)다. 화면에는 아직 쓰지 않고
- * 정렬에만 쓰지만, 필요해지면 그대로 표시하면 된다. 승도 패도 없으면(시즌 초,
- * 우천으로 일정이 통째로 밀린 상대) 0 으로 나누게 되므로 null 로 둔다.
+ * pct 는 KBO 방식대로 무승부를 뺀 승/(승+패). 승패가 하나도 없으면 null.
  *
  * @param {Array} games loadSchedule() 결과
  */
@@ -411,7 +390,7 @@ export function headToHead(games) {
     by.set(g.oppName, r);
   }
 
-  // 강한 상대부터. 승부가 안 난 상대(pct null)는 뒤로 보낸다.
+  // 승률 높은 상대부터. pct 가 null 이면 맨 뒤.
   return [...by.values()]
     .map((r) => ({ ...r, pct: r.wins + r.losses ? r.wins / (r.wins + r.losses) : null }))
     .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
@@ -419,23 +398,19 @@ export function headToHead(games) {
 
 /* ─────────────────────────── 전광판 ─────────────────────────── */
 
-const RECORD_URL = 'https://api-gw.sports.naver.com/schedule/games';
-const RELAY_URL = 'https://api-gw.sports.naver.com/schedule/games';
-
 /**
- * 경기 하나의 이닝별 점수(전광판)를 가져온다.
+ * 경기 전광판(이닝별 점수, R·H·E·B, 홈런 기록).
  *
- * 경기 시작 전에는 `recordData` 가 null 로 온다(정상). 진행 중·종료 후에는
- * `scoreBoard.inn.{home,away}` 에 이닝별 점수 배열이, `scoreBoard.rheb` 에
- * 팀별 R(득점)·H(안타)·E(실책)·B(볼넷) 합계가 들어 있다. 홈/원정 구분은
- * schedule API 의 homeCode/awayCode 와 같은 관례(gameInfo.hCode/aCode)를 쓴다.
+ * 경기 전에는 recordData 가 null 로 온다. 경기 중·후에는
+ * scoreBoard.inn.{home,away} 에 이닝별 점수, scoreBoard.rheb 에 팀별
+ * R(득점)·H(안타)·E(실책)·B(볼넷) 합계가 있다.
  *
- * 실패하거나 아직 데이터가 없으면 null 을 준다 — 전광판은 부가 정보라
- * 이것 때문에 폴링 전체가 실패해서는 안 된다.
+ * 전광판은 부가 정보라 실패하면 예외 대신 null 을 준다. 이것 때문에 폴링이
+ * 통째로 실패하면 안 된다.
  */
 export async function fetchScoreboard(gameId) {
   try {
-    const res = await fetch(`${RECORD_URL}/${gameId}/record`, { headers: HEADERS });
+    const res = await fetch(`${SCHEDULE_URL}/${gameId}/record`, { headers: HEADERS });
     if (!res.ok) return null;
 
     const json = await res.json();
@@ -452,12 +427,9 @@ export async function fetchScoreboard(gameId) {
     });
 
     /*
-     * 홈런은 별도 필드가 아니라 etcRecords(기타 기록: 홈런·3루타·실책 등) 안에
-     * how:'홈런' 으로 섞여 온다. result 문자열에 "누가·몇 회·몇 점"이 이미
-     * 다 들어 있다("오스틴33호(8회3점 손주환)") — 실제 타자 기록(rbi)과
-     * 대조해 확인했다. 숫자를 다시 뽑아내 재조합하지 않고 이 문자열을
-     * 그대로 쓴다: 몇 점 중 몇 점이 홈런인지를 이쪽에서 잘못 계산해
-     * 되돌릴 일이 없게 하려는 것이다.
+     * 홈런은 etcRecords(홈런·3루타·실책 등 기타 기록)에 how:'홈런' 으로 섞여 온다.
+     * result 에 "오스틴33호(8회3점 손주환)"처럼 선수·이닝·타점이 다 있어서
+     * (타자 기록 rbi 와 맞는 것 확인) 문자열을 그대로 쓴다.
      */
     const hr = Array.isArray(record?.etcRecords)
       ? record.etcRecords.filter((r) => r.how === '홈런').map((r) => r.result)
@@ -470,23 +442,21 @@ export async function fetchScoreboard(gameId) {
   }
 }
 
-/* ─────────── 문자중계(relay) — 종료를 앞당겨 잡는 용도 ─────────── */
+/* ─────────── 문자중계(relay): 경기 종료를 빨리 잡는 용도 ─────────── */
 
 /**
- * statusInfo("9회말")에서 회차만 뽑는다. 못 읽으면 0.
- * 문자중계를 언제부터 볼지 정하는 데만 쓰므로, 실패하면 안 보는 쪽이 안전하다.
+ * statusInfo("9회말")에서 회차 숫자. 못 읽으면 0.
+ * 문자중계를 볼지 정하는 데만 쓰므로 못 읽으면 안 보는 쪽으로 간다.
  */
 export function inningOf(statusInfo) {
   return Number(/^(\d+)회/.exec(String(statusInfo ?? ''))?.[1]) || 0;
 }
 
 /**
- * 전광판 이닝별 점수의 합이 총점(schedule API 값)과 같은지 본다.
+ * 전광판 이닝별 점수 합이 총점(schedule API)과 같은지.
  *
- * record API 는 schedule API 와 별도로 조회하는 응답이라, 같은 폴링 틱
- * 안에서도 두 API 의 시점이 미묘하게 어긋날 수 있다(record 쪽이 방금 난
- * 점수를 아직 안 실은 경우). 그 상태의 전광판으로 득점 이닝을 고르면 확신에
- * 찬 오답이 나오므로, 합이 맞을 때만 쓸 수 있다고 판단한다.
+ * record API 와 schedule API 는 따로 조회해서 같은 틱에도 시점이 어긋날 수 있다
+ * (record 쪽에 방금 난 점수가 아직 없는 경우). 합이 맞을 때만 전광판을 믿는다.
  */
 export function inningSumMatches(innings, score) {
   if (!Array.isArray(innings) || innings.length === 0) return false;
@@ -494,25 +464,23 @@ export function inningSumMatches(innings, score) {
 }
 
 /**
- * 문자중계에서 "경기가 끝났는가"만 확인한다. 끝났으면 그 시점의 최종 점수를,
- * 아니면 null 을 준다.
+ * 문자중계로 경기 종료 여부만 본다. 끝났으면 최종 점수, 아니면 null.
  *
- * 왜 필요한가 — schedule API 의 statusCode 는 마지막 아웃 뒤 2분쯤 지나서야
- * ENDED 로 바뀐다(2026-08-29 실측: 마지막 투구 21:22:09 → ENDED 21:24:17).
- * 문자중계에는 그 아웃이 기록되는 즉시 종료 블록이 붙으므로 2분을 앞당길 수 있다.
+ * schedule API 의 statusCode 는 마지막 아웃 후 2분쯤 지나야 ENDED 로 바뀐다
+ * (2026-08-29: 마지막 투구 21:22:09, ENDED 21:24:17). 문자중계에는 종료 블록이
+ * 바로 붙어서 그만큼 빨리 알 수 있다.
  *
- * 종료 판정은 세 겹으로 막는다 — 잘못 보낸 종료 알림은 dedup_key 때문에
- * 되돌릴 수 없다(detect.js `${gameId}:end`).
- *   1) 호출부가 9회 이후 진행 중인 경기에서만 부른다 (index.js poll)
- *   2) type 99 + "=====" 구분선. 투구·교체·타격 결과는 전부 다른 type 이고,
- *      99 는 종료 블록에만 붙는다(실측 응답에서 확인).
- *   3) 점수는 호출부가 schedule API 값과 대조한다 — 어긋나면 쓰지 않는다.
+ * 종료 알림은 한 번 나가면 dedup_key(`${gameId}:end`) 때문에 다시 못 보내니
+ * 세 단계로 확인한다.
+ *   1) 9회 이후 진행 중인 경기에서만 호출 (index.js poll)
+ *   2) type 99 + "=====" 구분선. 99 는 종료 블록에만 나온다(실제 응답으로 확인)
+ *   3) 점수를 호출부에서 schedule API 값과 비교, 다르면 버림
  *
- * 응답이 커서(이닝 하나 분량) 매 폴링마다 부르면 안 된다. 위 1) 게이트가 그 역할.
+ * 응답이 커서(한 이닝 분량) 매번 부르지 않는다. 1)이 그 조건이다.
  */
 export async function fetchRelayFinish(gameId) {
   try {
-    const res = await fetch(`${RELAY_URL}/${gameId}/relay`, { headers: HEADERS });
+    const res = await fetch(`${SCHEDULE_URL}/${gameId}/relay`, { headers: HEADERS });
     if (!res.ok) return null;
 
     const relay = (await res.json())?.result?.textRelayData;
