@@ -184,6 +184,16 @@ main {
 .panel { display: none; }
 .panel.is-active { display: block; }
 
+/* app.js 가 돌기 전, boot.js 가 붙인 시작 탭을 먼저 보여 준다(첫 실행 깜빡임 방지). */
+html[data-start-tab]:not([data-start-tab='history']) #panel-history { display: none; }
+html[data-start-tab='schedule'] #panel-schedule,
+html[data-start-tab='standings'] #panel-standings,
+html[data-start-tab='settings'] #panel-settings { display: block; }
+html[data-start-tab]:not([data-start-tab='history']) .tab[data-tab='history'] { background: none; color: var(--muted); }
+html[data-start-tab='schedule'] .tab[data-tab='schedule'],
+html[data-start-tab='standings'] .tab[data-tab='standings'],
+html[data-start-tab='settings'] .tab[data-tab='settings'] { background: var(--surface-card); color: var(--ink); }
+
 /*
  * 탭 전환 애니메이션. 들어오는 패널만 움직인다(나가는 패널까지 겹치면 스크롤·
  * sticky 처리가 복잡해짐).
