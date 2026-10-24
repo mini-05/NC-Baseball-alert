@@ -1,8 +1,7 @@
 /* NC 다이노스 경기 알림 PWA 클라이언트 */
 
 /*
- * 테마는 깜빡임을 줄이려고 파일 맨 위에서 적용한다. CSP 때문에 <head> 인라인
- * 스크립트는 못 쓴다('unsafe-inline' 은 안 열기로 함).
+ * 테마. 첫 화면 적용은 boot.js 가 <head> 에서 먼저 한다(깜빡임 방지).
  * 'auto' 는 저장하지 않는다. 값이 없으면 시스템 설정을 따르는 게 곧 auto 다.
  */
 const THEME_KEY = 'theme';
@@ -15,7 +14,6 @@ function applyTheme(theme) {
   }
 }
 
-applyTheme(localStorage.getItem(THEME_KEY));
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -197,7 +195,7 @@ const TAB_KEY = 'tab';
  * 탭 전환. 없는 이름이면 그대로 두고 false.
  * 탭 목록은 DOM 에서 찾는다. 탭을 바꿀 땐 index.html 만 고치면 된다.
  */
-function activateTab(name) {
+function activateTab(name, { animate = true } = {}) {
   const tabs = $$('.tab');
   const tab = tabs.find((t) => t.dataset.tab === name);
   if (!tab) return false;
@@ -206,7 +204,7 @@ function activateTab(name) {
   // 스와이프도 .tab.click() 을 거치니 같은 동작. 첫 렌더나 같은 탭이면 안 붙인다.
   const from = tabs.findIndex((t) => t.classList.contains('is-active'));
   const to = tabs.indexOf(tab);
-  const enter = from === -1 || from === to ? null : to > from ? 'next' : 'prev';
+  const enter = !animate || from === -1 || from === to ? null : to > from ? 'next' : 'prev';
 
   tabs.forEach((t) => t.classList.toggle('is-active', t === tab));
   $$('.panel').forEach((p) => {
@@ -240,7 +238,9 @@ $$('.tab').forEach((tab) => {
 });
 
 // 마지막 탭 복원. 값이 없거나 없는 탭이면 마크업의 is-active 가 기본.
-activateTab(localStorage.getItem(TAB_KEY));
+// 처음 복원은 슬라이드 없이. 이후는 클래스가 정하므로 boot.js 의 임시 표시를 지운다.
+activateTab(localStorage.getItem(TAB_KEY), { animate: false });
+delete document.documentElement.dataset.startTab;
 
 /**
  * 좌우 스와이프로 탭 전환. .tab.click() 을 불러서 클릭과 똑같이 동작한다.
